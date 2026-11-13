@@ -1,35 +1,29 @@
-// rterm-app main.rs — minimal GPUI empty window skeleton (bezel-gpui 0.3).
+// rterm-app main.rs — Sprint 1 骨架
+
+mod event;
+mod state;
+mod views;
 
 use gpui::prelude::*;
-use gpui::{App, AppContext, Context, Render, Window, WindowOptions, div, px, rgb};
+use gpui::{App, WindowOptions};
 use gpui_platform;
 
-struct RtermApp;
-
-impl Render for RtermApp {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .size_full()
-            .bg(rgb(0x1e1e1e))
-            .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(rgb(0xcccccc))
-                    .text_size(px(18.))
-                    .child("rterm — SSH Terminal (gpui skeleton OK)"),
-            )
-    }
-}
+use state::AppState;
+use views::main_window::MainWindow;
+use views::session_tree::SessionTreeView;
+use views::status_bar::StatusBar;
 
 fn main() {
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    log::info!("rterm-app starting (Sprint 1 skeleton)");
 
     gpui_platform::application().run(|app: &mut App| {
+        app.set_global(AppState::new());
+
         app.open_window(WindowOptions::default(), |_window, app| {
-            app.new(|_cx| RtermApp)
+            let session_tree = app.new(|_cx| SessionTreeView);
+            let status_bar = app.new(|_cx| StatusBar::new());
+            app.new(|_cx| MainWindow::new(session_tree, status_bar))
         });
     });
 }

@@ -11,11 +11,8 @@ tokio.workspace = true
 anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
-# NOTE: rterm-* crates (ssh/sftp/etc) are added later once all C-toolchain deps
-# (perl for vendored-openssl) are confirmed available. We build gpui alone first.
-# rterm-session.workspace = true
-# rterm-ssh.workspace = true
-# rterm-terminal.workspace = true
-# rterm-sftp.workspace = true
-# rterm-monitor.workspace = true
-# rterm-sync.workspace = true
+rterm-crypto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+dirs = "5"

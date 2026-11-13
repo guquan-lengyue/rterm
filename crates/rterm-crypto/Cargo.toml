@@ -5,3 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+anyhow = "1"
+rand = "0.8"
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+
+# Windows DPAPI — only needed on Windows
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Security_Cryptography",
+] }
