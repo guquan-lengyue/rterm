@@ -1,7 +1,7 @@
-# Sprint 4 — SSH + 终端核心
+# Sprint 5 — SSH 连接 & 终端核心
 
-> **状态**：—
-> **前置**：[Sprint 2](./sprint-02-session-data.md)（Session 模型）
+> **状态**：—（依赖 S3）
+> **前置**：[Sprint 2](./sprint-02-session-data.md)（Session 模型）+ [Sprint 3](./sprint-03-session-tree.md)（会话树能触发 SessionConnectRequested）
 > **目标**：rterm-ssh 封装 + 重连 + PTY；rterm-terminal TerminalEngine + alacritty_terminal glue
 > **难度**：⚠️ 整个项目最具技术挑战的 Sprint
 

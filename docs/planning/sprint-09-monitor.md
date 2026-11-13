@@ -1,7 +1,7 @@
-# Sprint 8 — 远程性能监控
+# Sprint 9 — 远程性能监控
 
 > **状态**：—
-> **前置**：[Sprint 4](./sprint-04-ssh-terminal.md)（SSH exec 能力；Perl ✅ 已完成）
+> **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH exec 能力；Perl ✅ 已完成）
 > **目标**：MonitorCollector + tokio interval 采集 + gpui Canvas 折线图 + Top 进程 + Kill
 
 ---

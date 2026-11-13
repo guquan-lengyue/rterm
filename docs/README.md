@@ -171,17 +171,19 @@ docs/                                ← 你在这里
 │   └── decisions.md                 ← 10 条 ADR 技术决策
 └── planning/                         ← WHEN 交付节奏
     ├── README.md                    ← ⭐ 每次开工先读：状态总览 + 依赖图
+    ├── CHANGELOG.md                 ← 每个 Sprint 完成后追加总结
     ├── roadmap.md                   ← Phase 0–7 里程碑 + 风险缓解
     ├── sprint-01-infrastructure.md  ← 每个 Sprint 一个独立文件
     ├── sprint-02-session-data.md
-    ├── sprint-03-session-ui.md
-    ├── sprint-04-ssh-terminal.md
-    ├── sprint-05-terminal-render.md
-    ├── sprint-06-sftp.md
-    ├── sprint-07-sync.md
-    ├── sprint-08-monitor.md
-    ├── sprint-09-stability.md
-    └── sprint-10-release.md
+    ├── sprint-03-session-tree.md
+    ├── sprint-04-settings-io.md
+    ├── sprint-05-ssh-terminal.md
+    ├── sprint-06-terminal-render.md
+    ├── sprint-07-sftp.md
+    ├── sprint-08-sync.md
+    ├── sprint-09-monitor.md
+    ├── sprint-10-stability.md
+    └── sprint-11-release.md
 ```
 
 ## 8. 变更记录

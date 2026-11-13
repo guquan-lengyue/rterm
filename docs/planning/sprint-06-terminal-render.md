@@ -1,7 +1,7 @@
-﻿# Sprint 5 — 终端渲染
+﻿# Sprint 6 — 终端渲染
 
 > **状态**：—
-> **前置**：[Sprint 4](./sprint-04-ssh-terminal.md)（TerminalEngine + PTY 字节流；Perl ✅ 已完成）
+> **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（TerminalEngine + PTY 字节流；Perl ✅ 已完成）
 > **目标**：gpui Canvas 渲染 Grid + 主题 + 复制粘贴 + 标签页
 
 ---
