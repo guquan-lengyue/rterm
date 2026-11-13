@@ -4,6 +4,67 @@
 
 ---
 
+## Sprint 2 — 会话数据层
+
+**状态**：✅ COMPLETED | **Commit**：`3bbc1c16` | **时间**：2026-11-13
+**前置**：S1（crypto + event_bus + app_state + 主窗口壳）
+**后续**：S3（会话 UI 层）/ S4（SSH + 终端核心）
+
+### 交付清单
+
+| # | 任务 | 产出文件 | 验收 |
+|---|------|----------|------|
+| 2.1 | Session 模型 + AuthMethod | `model.rs` | ✅ `Session::default()` 可构造；三个 AuthMethod 变体 |
+| 2.2 | SessionStore 内存 CRUD | `store.rs` | ✅ upsert 同 id 更新；delete 返回 bool |
+| 2.3 | JSON 持久化 + 原子写 | `store.rs` save/load | ✅ save→rename→tmp 清理；文件不存在返回空 store |
+| 2.4 | 加密桥接 DPAPI + AES-GCM | `crypto_bridge.rs` | ✅ 密码字段 version=0↔1↔2 三态转换 |
+| 2.5 | 导入导出 + 冲突策略 | `export.rs` | ✅ Overwrite/Skip/Rename 三种 + ExportScope + ImportReport |
+| 2.6 | OpenSSH config 解析 | `openssh.rs` | ✅ Host/HostName/Port/User/IdentityFile/ProxyJump |
+| — | S1 占位替换 | `rterm-app/Cargo.toml` + `state.rs` | ✅ 删掉空 SessionStore，改用 `rterm_session::SessionStore` |
+| — | workspace 依赖 | `Cargo.toml` + `rterm-session/Cargo.toml` | ✅ base64=0.22 新增 |
+
+### 测试
+
+| 文件 | 数量 | 全部通过 |
+|------|------|----------|
+| store_tests.rs | 8 | ✅ new/upsert×2/delete/file-not-found/roundtrip/atomic/encrypted |
+| export_tests.rs | 10 | ✅ DPAPI roundtrip + 3 scope + 3 conflict policy + AES-GCM correct/wrong |
+| openssh_tests.rs | 2 | ✅ 基本 Host 解析 + HostName 默认 Host |
+| **总计** | **20** | **✅ 20/20** |
+
+### 踩坑 & 解法（7 个坑）
+
+| # | 问题 | 解法 |
+|---|------|------|
+| 1 | rterm-session/Cargo.toml 没加 base64 | workspace Cargo.toml 加 `base64 = "0.22"` + rterm-session 加 `base64.workspace = true` |
+| 2 | store.rs SessionFile 缺 `use serde::{Serialize, Deserialize}` | 显式 import |
+| 3 | openssh.rs 用了 nightly 的 `&str::leak()` | 重写 split_into_host_blocks 返回 `Vec<(String, String)>`（全所有权） |
+| 4 | rterm-app/Cargo.toml 没加 rterm-session 依赖 | workspace Cargo.toml 顶层声明了不等于各 crate 自动继承；每个 crate 自己 Cargo.toml 必须显式写 `rterm-session.workspace = true` |
+| 5 | Session struct 缺 `PartialEq` | 加 derive（chrono::DateTime<Utc> + Uuid 都实现了 PartialEq，OK） |
+| 6 | openssh.rs doc-comment 里的 ``` 被当 doctest 编译 | 改成 ```text 标记 |
+| 7 | wrong passphrase 测试不 fail — Session::default() 密码是空，加密路径被跳过 | 测试里手工构造带明文密码的 Session（version=0） |
+
+### 验收 Checklist
+
+- [x] `cargo check --workspace` → **0 ERROR**
+- [x] `cargo test -p rterm-session --lib --tests` → **20 passed, 0 failed**
+- [x] `cargo build -p rterm-app` → 无 error（只有 S1 骨架阶段的 dead_code warning）
+- [x] JSON 持久化原子写：先 .tmp 再 rename，无半截文件
+- [x] EncryptedString 密文 base64：JSON 里不可读密码
+- [x] rterm-app/AppState.session_store 类型 → `rterm_session::SessionStore`（替换 S1 占位成功）
+
+### 遗留
+
+| 项 | 后续 |
+|----|------|
+| CoTaskMemFree 还没修 | Sprint 9 |
+| crypto_bridge.rs 还没 ProxyJump 嵌套 AuthMethod 加密/解密（当前已递归） | 已做 ✅ |
+| EventBus 还没 emit（upsert/delete broadcast 事件） | Sprint 3 UI 层接上 |
+| Settings 持久化 | Sprint 3 |
+
+---
+
+
 ## Sprint 1 — 底层基础设施
 
 **状态**：✅ COMPLETED | **Commit**：`f49a37e` + `40f3f32` | **时间**：2026-11-13

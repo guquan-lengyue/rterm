@@ -10,8 +10,8 @@
 |--------|------|------|------|------|
 | **S0** | 环境 & 骨架 | — | ✅ 已完成 | — |
 | **S1** | 底层基础设施 | [sprint-01-infrastructure.md](./sprint-01-infrastructure.md) | ✅ 已完成 | S0 |
-| **S2** | 会话数据层 | [sprint-02-session-data.md](./sprint-02-session-data.md) | ⏳ **下一个** | S1 |
-| **S3** | 会话 UI 层 | [sprint-03-session-ui.md](./sprint-03-session-ui.md) | — | S2 |
+| **S2** | 会话数据层 | [sprint-02-session-data.md](./sprint-02-session-data.md) | ✅ 已完成 | S1 |
+| **S3** | 会话 UI 层 | [sprint-03-session-ui.md](./sprint-03-session-ui.md) | ⏳ **下一个** | S2 |
 | **S4** | SSH + 终端核心 | [sprint-04-ssh-terminal.md](./sprint-04-ssh-terminal.md) | — | S2 |
 | **S5** | 终端渲染 | [sprint-05-terminal-render.md](./sprint-05-terminal-render.md) | — | S4 |
 | **S6** | SFTP 文件管理 | [sprint-06-sftp.md](./sprint-06-sftp.md) | — | S4 |
