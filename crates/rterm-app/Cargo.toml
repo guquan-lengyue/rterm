@@ -1,0 +1,21 @@
+[package]
+name = "rterm-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+# NOTE: rterm-* crates (ssh/sftp/etc) are added later once all C-toolchain deps
+# (perl for vendored-openssl) are confirmed available. We build gpui alone first.
+# rterm-session.workspace = true
+# rterm-ssh.workspace = true
+# rterm-terminal.workspace = true
+# rterm-sftp.workspace = true
+# rterm-monitor.workspace = true
+# rterm-sync.workspace = true

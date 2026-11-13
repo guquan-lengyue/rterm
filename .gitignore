@@ -1,0 +1,71 @@
+# ==============================
+# Rust / Cargo
+# ==============================
+/target/
+Cargo.lock.bak
+
+# ==============================
+# MSVC / build artifacts
+# ==============================
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+*.dbg
+*.log
+*.tlog
+*.lastbuildstate
+*.unsuccessfulbuild
+*.manifest
+*.cat
+
+# ==============================
+# IDE / Editor
+# ==============================
+.vs/
+.vscode/
+.idea/
+.history/
+.vscode-test/
+*.swp
+*.swo
+*~
+
+# ==============================
+# OS
+# ==============================
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.AppleDouble
+ehthumbs.db
+
+# ==============================
+# Application runtime data
+# ==============================
+data/
+logs/
+*.log
+backup/
+
+# ==============================
+# Secrets / keys (NEVER commit!)
+# ==============================
+*.key
+*.pem
+*.ppk
+*.cer
+*.crt
+.env
+.env.local
+secrets.yaml
+
+# ==============================
+# Misc
+# ==============================
+*.tmp
+*.bak
+*.orig
+*.patch

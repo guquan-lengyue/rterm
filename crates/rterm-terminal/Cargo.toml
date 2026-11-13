@@ -1,0 +1,10 @@
+[package]
+name = "rterm-terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+anyhow.workspace = true
+log.workspace = true
