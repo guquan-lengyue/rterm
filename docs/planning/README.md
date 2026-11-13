@@ -9,8 +9,8 @@
 | Sprint | 主题 | 文件 | 状态 | 前置 |
 |--------|------|------|------|------|
 | **S0** | 环境 & 骨架 | — | ✅ 已完成 | — |
-| **S1** | 底层基础设施 | [sprint-01-infrastructure.md](./sprint-01-infrastructure.md) | ⏳ **下一个** | S0 |
-| **S2** | 会话数据层 | [sprint-02-session-data.md](./sprint-02-session-data.md) | — | S1 |
+| **S1** | 底层基础设施 | [sprint-01-infrastructure.md](./sprint-01-infrastructure.md) | ✅ 已完成 | S0 |
+| **S2** | 会话数据层 | [sprint-02-session-data.md](./sprint-02-session-data.md) | ⏳ **下一个** | S1 |
 | **S3** | 会话 UI 层 | [sprint-03-session-ui.md](./sprint-03-session-ui.md) | — | S2 |
 | **S4** | SSH + 终端核心 | [sprint-04-ssh-terminal.md](./sprint-04-ssh-terminal.md) | — | S2 |
 | **S5** | 终端渲染 | [sprint-05-terminal-render.md](./sprint-05-terminal-render.md) | — | S4 |
@@ -64,7 +64,8 @@ S2 会话数据 ─────┤──▶ S3 会话 UI
 
 | 我想…… | 去这里 |
 |--------|--------|
-| **开始写代码** | ⏳ **[sprint-01-infrastructure.md](./sprint-01-infrastructure.md)** |
+| **开始写代码** | ⏳ **[sprint-02-session-data.md](./sprint-02-session-data.md)** |
+| 看 Sprint 完成总结 | [CHANGELOG.md](./CHANGELOG.md)（S1 已记录） |
 | 看里程碑概览 + 风险缓解 | [roadmap.md](./roadmap.md) |
 | 看依赖图 | 本文件「依赖图」章节 |
 | 查当前进度 | 本文件「状态总览」表 |
@@ -73,5 +74,6 @@ S2 会话数据 ─────┤──▶ S3 会话 UI
 
 ## 变更记录
 
+- **2026-11-13** v2.1：S1 完成，状态表更新；新增 CHANGELOG.md 记录 Sprint 总结
 - **2026-11-13** v2.0：从单一 35KB `sprints.md` 拆成 10 个 per-sprint 独立文件；本 README 成为规划目录主索引 + 状态总览
 - 之前的单一 sprints.md 历史在 `docs/planning/sprints.md`（已删除）
