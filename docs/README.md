@@ -40,7 +40,7 @@ rterm/
 | `alacritty_terminal::Term` 是 `!Send + !Sync` | Rc 内部状态 | 必须在 gpui 主线程 |
 | `ssh2::Session` / `Channel` 全是同步的 | C library | 所有 IO 必须 `spawn_blocking` |
 | gpui 渲染在 `Render::render(&mut self, window, cx)` | bezel-gpui 0.3 trait | 所有 UI 更新靠 `cx.notify()` 触发重绘 |
-| EventBus 是 `SubscriberSet<AppEvent>` | gpui 内置 pub/sub | View 之间**永不直接调用**，只订阅 |
+| EventBus 是**空 struct + `impl EventEmitter<AppEvent>`**（S1 实际落地） | gpui marker trait，内部 SubscriberSet 自动管理 | emit: `app.emit(&state.event_bus, ev)`；subscribe: `cx.subscribe(&state.event_bus, handler)` |
 
 ---
 

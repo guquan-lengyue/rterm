@@ -1,7 +1,7 @@
 # Sprint 7 — 路径同步
 
 > **状态**：—
-> **前置**：[Sprint 5](./sprint-05-terminal-render.md)（Terminal PTY 输出）+ [Sprint 6](./sprint-06-sftp.md)（SFTP 导航）
+> **前置**：[Sprint 5](./sprint-05-terminal-render.md)（Terminal PTY 输出）+ [Sprint 6](./sprint-06-sftp.md)（SFTP 导航；Perl ✅ 已完成）
 > **目标**：SyncBridge + PS1 正则 + ignore 防回环
 > **定位**：rterm 独有杀手功能
 

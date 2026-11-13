@@ -1,9 +1,15 @@
 # Sprint 3 — 会话 UI 层
 
-> **状态**：—
-> **前置**：[Sprint 1](./sprint-01-infrastructure.md)（AppState）+ [Sprint 2](./sprint-02-session-data.md)（SessionStore）
+> **状态**：—（依赖 S2）
+> **前置**：[Sprint 1](./sprint-01-infrastructure.md)（AppState + EventBus 已就绪）+ [Sprint 2](./sprint-02-session-data.md)（SessionStore 替换占位）
 > **目标**：SessionTree View + 编辑对话框 + 设置界面 + 导入导出对话框
 > **注意**：本 Sprint 的 View **全部 stub 后端连接**（还没有 SSH），只调 SessionStore
+>
+> **⚠️ EventBus 真实 API（S1 已落地，必须对齐）**：
+> - EventBus 是空 struct + `impl EventEmitter<AppEvent>`（marker trait，内部 SubscriberSet 由 gpui 自动管理）
+> - **emit 侧**：`app.emit(&app.global::<AppState>().event_bus, AppEvent::Xxx { ... })`
+> - **subscribe 侧**：`cx.subscribe(&app_state.event_bus, |app, ev| { ... })`
+> - AppState 通过 `app.global::<AppState>()` 拿（S1 已 set_global）
 
 ---
 
@@ -13,8 +19,8 @@
 |---|------|------|--------|------|
 | 3.1.1 | 0.5h | `crates/rterm-app/src/views/session_tree.rs` | 替换 S1 占位为真实树形：按 `session.folder.split('/')` 建树；每个节点显示 session.name；图标区分文件夹 / 会话 | 构造 5 个 Session（2 个 folder）→ 树形显示 |
 | 3.1.2 | 0.5h | `crates/rterm-app/src/views/session_tree.rs` | 右键菜单：新建 / 编辑 / 复制 / 删除 / 导出 / 打开终端（灰）/ 打开 SFTP（灰）—— gpui 的 MenuItem + `window.open_menu()` 模式 | 右键能弹菜单；点删除会调 SessionStore.delete + 广播 |
-| 3.1.3 | 0.5h | `crates/rterm-app/src/views/session_tree.rs` | 双击会话 → `EventBus.emit(AppEvent::SessionConnectRequested { id })`；回车 → 同样 | debug log 能看到事件发出 |
-| 3.1.4 | 0.25h | `crates/rterm-app/src/views/session_tree.rs` | `cx.subscribe` SessionCreated/Updated/Deleted → 自动 rebuild tree → `cx.notify()` | upsert 一个 Session → 左侧树立刻刷新 |
+| 3.1.3 | 0.5h | `crates/rterm-app/src/views/session_tree.rs` | 双击会话 → `app.emit(&app.global::<AppState>().event_bus, SessionConnectRequested { id })`；回车 → 同样（**注意 EventBus 真实签名见文件头⚠️**） | debug log 能看到事件发出 |
+| 3.1.4 | 0.25h | `crates/rterm-app/src/views/session_tree.rs` | `cx.subscribe(&app_state.event_bus, ...)` SessionCreated/Updated/Deleted → 自动 rebuild tree → `cx.notify()` | upsert 一个 Session → 左侧树立刻刷新 |
 
 ### 3.2 会话编辑对话框（Modal）
 

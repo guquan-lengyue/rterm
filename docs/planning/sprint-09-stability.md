@@ -1,7 +1,7 @@
 # Sprint 9 — 稳定性收尾
 
 > **状态**：—
-> **前置**：[Sprint 5](./sprint-05-terminal-render.md) + [Sprint 6](./sprint-06-sftp.md) + [Sprint 7](./sprint-07-sync.md) + [Sprint 8](./sprint-08-monitor.md) 全部
+> **前置**：[Sprint 5](./sprint-05-terminal-render.md) + [Sprint 6](./sprint-06-sftp.md) + [Sprint 7](./sprint-07-sync.md) + [Sprint 8](./sprint-08-monitor.md) 全部（Perl ✅ 已完成）
 > **目标**：known_hosts 持久化 + 错误映射 + 命令面板 + 全局快捷键 + 日志 + 备份 + 全量 smoke test
 
 ---

@@ -1,9 +1,10 @@
 # Sprint 2 — 会话数据层
 
-> **状态**：—
-> **前置**：[Sprint 1](./sprint-01-infrastructure.md)（crypto + event_bus + app_state + 主窗口壳）
+> **状态**：⏳ 下一个（S1 ✅ 已完成）
+> **前置**：S1 已交付的 rterm-crypto（dpapi_encrypt/aesgcm_encrypt）+ AppState + EventBus
 > **目标**：Session 模型 + SessionStore CRUD + JSON 持久化 + 导入导出
 > **注意**：本 Sprint **不写任何 gpui View**（UI 在 S3）
+> **注意**：S1 在 `rterm-app/src/state.rs` 留了占位 `SessionStore { sessions: Vec<Uuid> }`，本 Sprint **创建真实的 `rterm_session::SessionStore` 后替换它**（从 state.rs 删掉占位，改用 `rterm_session::SessionStore`）。
 
 ---
 
@@ -20,7 +21,7 @@
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
 | 2.2.1 | 0.5h | `crates/rterm-session/src/store.rs` | `pub struct SessionStore { sessions: Vec<Session>, dirty: bool }` + `pub fn list(&self) -> &[Session]` + `pub fn get(&self, id: Uuid) -> Option<&Session>` | 能 new() + list() 为空 |
-| 2.2.2 | 0.5h | `crates/rterm-session/src/store.rs` | `pub fn upsert(&mut self, session: Session)` — 如果 session.id 存在则 update（更新 `last_modified`）否则 push；`self.dirty = true` | 同 id 调两次 upsert 只有一份 |
+| 2.2.2 | 0.5h | `crates/rterm-session/src/store.rs` | `pub fn upsert(&mut self, session: Session)` — 如果 session.id 存在则 update（更新 `last_modified`）否则 push；`self.dirty = true`；**成功后 broadcast `SessionCreated` / `SessionUpdated`（通过传入的 `&EventBus` 或返回事件让上层发）** | 同 id 调两次 upsert 只有一份 |
 | 2.2.3 | 0.25h | `crates/rterm-session/src/store.rs` | `pub fn delete(&mut self, id: Uuid) -> bool` + `pub fn count(&self) -> usize` | 返回被删前 count |
 
 ### 2.3 SessionStore — JSON 持久化

@@ -213,14 +213,20 @@ rterm/
 - **依赖**：全部 `rterm-*` crate、`gpui`（bezel-gpui）、`gpui_platform`
 - **核心类型**：
   ```rust
-  pub struct AppState {
-      session_store: SessionStore,
+  pub struct AppState {                        // impl gpui::Global
+      session_store: SessionStore,             // Sprint 1 占位：Vec<Uuid>; Sprint 2 替换为 rterm_session::SessionStore
       tab_registry: TabRegistry,
-      event_bus: EventBus,
+      event_bus: EventBus,                     // 空 struct + impl EventEmitter<AppEvent>（marker trait）
       settings: Settings,
       themes: ThemeStore,
   }
-  pub struct EventBus { /* SubscriberSet 包装 */ }
+
+  // ✅ S1 已落地的真实签名（2026-11-13）：
+  pub struct EventBus;   // empty struct
+  impl gpui::EventEmitter<AppEvent> for EventBus {}
+
+  // emit:  app.emit(&app.global::<AppState>().event_bus, AppEvent::Xxx { ... });
+  // subscribe: cx.subscribe(&app_state.event_bus, |app, ev| { ... });
   ```
 - **公开事件**（见下「事件总线」）
 
@@ -240,11 +246,11 @@ SessionService::connect(session_id)
 ssh2::Session::connect(host:port)
 ssh2::Session::userauth_password / userauth_publickey / userauth_agent
     │
-    ├── 成功 → EventBus.emit(AppEvent::SessionConnected)
+    ├── 成功 → app.emit(&state.event_bus, AppEvent::SessionConnected)
     │           → 启动 KeepAlive tokio task（每 N 秒发送 "echo ping"）
-    │           → 启动 PTY + EventBus.emit(AppEvent::TerminalReady)
+    │           → 启动 PTY + app.emit(&state.event_bus, AppEvent::TerminalReady)
     │
-    └── 失败 → EventBus.emit(AppEvent::SessionFailed { reason })
+    └── 失败 → app.emit(&state.event_bus, AppEvent::SessionFailed { reason })
                 → SessionStore.last_error = Some(reason)
 ```
 

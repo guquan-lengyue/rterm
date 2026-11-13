@@ -1,7 +1,7 @@
 # Sprint 6 — SFTP 文件管理
 
 > **状态**：—
-> **前置**：[Sprint 4](./sprint-04-ssh-terminal.md)（SSH Session + sftp 子系统）
+> **前置**：[Sprint 4](./sprint-04-ssh-terminal.md)（SSH Session + sftp 子系统；Perl ✅ 已完成）
 > **目标**：SftpService + 双栏 View + 传输队列
 
 ---

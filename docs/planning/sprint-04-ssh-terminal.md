@@ -7,11 +7,11 @@
 
 ---
 
-### 4.0 Perl 验证（必须先做）
+### 4.0 Perl 验证 ✅ 已完成（2026-11-13）
 
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
-| 4.0.1 | 0.25h | — | `perl --version` 能跑；启用 rterm-app/Cargo.toml 里注释的 rterm-* 依赖；`cargo build --all` 完整 workspace 过 | ssh2 vendored-openssl 编过，无 openssl-sys error |
+| 4.0.1 | 0.25h | ✅ | perl 5.42.3 已装（`C:\Strawberry\perl\bin\perl.exe`）；已加 `scripts/msvc-env.ps1`；完整 `cargo check --workspace` 过（9m13s） | ✅ ssh2 vendored-openssl 编过 |
 
 ### 4.1 rterm-ssh — 连接与认证
 
