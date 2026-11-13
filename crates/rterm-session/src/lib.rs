@@ -1,14 +1,14 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! rterm-session — 会话数据层
+//!
+//! 职责：Session 模型 + SessionStore CRUD + JSON 持久化 + 导入导出 + OpenSSH 解析
+//! 本 crate 不依赖 gpui，纯数据层，可独立测试。
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod model;
+pub mod store;
+pub mod crypto_bridge;
+pub mod export;
+pub mod openssh;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use model::{AuthMethod, EncryptedString, Session};
+pub use store::{SessionStore, UpsertResult};
+pub use export::{ConflictPolicy, ExportScope, ImportReport};

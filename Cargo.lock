@@ -4547,6 +4547,7 @@ dependencies = [
  "env_logger",
  "log",
  "rterm-crypto",
+ "rterm-session",
  "serde",
  "serde_json",
  "tokio",
@@ -4579,6 +4580,7 @@ name = "rterm-session"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "log",
  "rterm-crypto",

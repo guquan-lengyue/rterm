@@ -1,4 +1,6 @@
-//! AppState — 应用全局状态 + Settings 默认值 + SessionStore 占位 + TabRegistry
+//! AppState — 应用全局状态 + Settings 默认值 + TabRegistry
+//!
+//! SessionStore 已移到 `rterm_session::SessionStore`（Sprint 2 落地）。
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -71,25 +73,10 @@ impl Default for Settings {
 }
 
 // ---------------------------------------------------------------------------
-// SessionStore（Sprint 2 完成；当前空占位）
+// SessionStore — 用 rterm_session::SessionStore（Sprint 2 落地）
 // ---------------------------------------------------------------------------
 
-pub struct SessionStore {
-    sessions: Vec<Uuid>, // Sprint 2 替换为 Vec<Session>
-}
-
-impl SessionStore {
-    pub fn new() -> Self {
-        Self { sessions: Vec::new() }
-    }
-    pub fn count(&self) -> usize {
-        self.sessions.len()
-    }
-}
-
-impl Default for SessionStore {
-    fn default() -> Self { Self::new() }
-}
+// 用 crate 引用：state.rs 里 SessionStore 字段类型直接是 rterm_session::SessionStore
 
 // ---------------------------------------------------------------------------
 // TabRegistry（Sprint 5 完成；当前空占位）
@@ -131,7 +118,7 @@ impl Default for TabRegistry {
 pub struct AppState {
     pub event_bus: EventBus,
     pub settings: Settings,
-    pub session_store: SessionStore,
+    pub session_store: rterm_session::SessionStore,
     pub tab_registry: TabRegistry,
 }
 
@@ -143,7 +130,7 @@ impl AppState {
         Self {
             event_bus: EventBus,
             settings: Settings::default(),
-            session_store: SessionStore::new(),
+            session_store: rterm_session::SessionStore::new(),
             tab_registry: TabRegistry::new(),
         }
     }
