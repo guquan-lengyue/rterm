@@ -20,6 +20,11 @@ $ucrtInclude = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" -D
 $ucrtLib = (Join-Path $ucrtInclude "..\Lib")
 
 $env:PATH = @($toolBin, $cmakeBin, $env:PATH) -join ";"
+
+# Strawberry Perl (for vendored-openssl build)
+$perlBin = "C:\Strawberry\perl\bin"
+if (Test-Path $perlBin) { $env:PATH = "$perlBin;$env:PATH" }
+
 $env:INCLUDE = "$toolInclude;$ucrtInclude\ucrt;$ucrtInclude\um;$ucrtInclude\shared"
 $env:LIB     = "$toolLib;$ucrtLib\$((Split-Path $ucrtInclude -Leaf))\ucrt\x64;$ucrtLib\$((Split-Path $ucrtInclude -Leaf))\um\x64"
 
