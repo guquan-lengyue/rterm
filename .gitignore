@@ -69,3 +69,11 @@ secrets.yaml
 *.bak
 *.orig
 *.patch
+
+# ==============================
+# Node.js (temp test artifacts)
+# ==============================
+node_modules/
+package.json
+package-lock.json
+npm-debug.log*
