@@ -11,8 +11,8 @@
 | **S0** | 环境 & 骨架 | — | ✅ 已完成 | — |
 | **S1** | 底层基础设施 | [sprint-01-infrastructure.md](./sprint-01-infrastructure.md) | ✅ 已完成 | S0 |
 | **S2** | 会话数据层 | [sprint-02-session-data.md](./sprint-02-session-data.md) | ✅ 已完成 | S1 |
-| **S3** | 会话树 + 编辑对话框 | [sprint-03-session-tree.md](./sprint-03-session-tree.md) | ⏳ **下一个** | S2 |
-| **S4** | 设置 + 导入导出 | [sprint-04-settings-io.md](./sprint-04-settings-io.md) | — | S3 |
+| **S3** | 会话树 + 编辑对话框 | [sprint-03-session-tree.md](./sprint-03-session-tree.md) | ✅ 已完成（2026-11-14） | S2 |
+| **S4** | 设置 + 导入导出 | [sprint-04-settings-io.md](./sprint-04-settings-io.md) | ⏳ **下一个** | S3 |
 | **S5** | SSH 连接 & 终端核心 | [sprint-05-ssh-terminal.md](./sprint-05-ssh-terminal.md) | — | S2 + S3 |
 | **S6** | 终端渲染 | [sprint-06-terminal-render.md](./sprint-06-terminal-render.md) | — | S5 |
 | **S7** | SFTP 文件管理 | [sprint-07-sftp.md](./sprint-07-sftp.md) | — | S5 |

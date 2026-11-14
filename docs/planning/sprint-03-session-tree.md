@@ -67,3 +67,48 @@
   crates/rterm-app/src/views/session_dialog.rs
   crates/rterm-app/src/views/mod.rs（如有，导出新模块）
 ```
+
+---
+
+## Sprint 3 总结（2026-11-14）
+
+### 交付内容
+
+| 模块 | 实现 |
+|------|------|
+| SessionTree | folder 分组 + ▼/▶ 展开折叠 + 选中高亮 + 右键菜单（新建/编辑/删除/导出/导入）+ 双击发起连接 |
+| SessionEditDialog | 三 Tab（基础/认证/高级）+ 密码 8 位掩码 + 测试连接（TCP 5s）+ 保存/取消 |
+| TextInput | 自绘 + IME（EntityInputHandler）+ 密码模式 + Backspace/Delete/←/→/Home/End/Ctrl+A |
+| 主题系统 | `theme.rs` Theme trait + CatppuccinMocha / WindowsLight，全项目无硬编码 rgb |
+| 持久化 | `%APPDATA%\rterm\sessions.json`：启动 DPAPI 解密加载，退出加密保存（Arc<Mutex<SessionStore>> 共享） |
+| 导入导出 | `%APPDATA%\rterm\sessions-export.json`：DPAPI 密文导出 / 导入（ConflictPolicy::Skip） |
+| 事件总线 | EventBusHost（EventEmitter<AppEvent>）+ 各 View subscribe/emit |
+
+### 提交记录
+
+| Commit | 说明 |
+|--------|------|
+| `237ee22` | SessionTree + EventBusHost + TextInput + SessionEditDialog 初版 |
+| `2a5aa7a` | 全局主题系统 + 文字居中 + 去硬编码颜色 |
+| `06a045b` | 退出保存持久化修复 + 右键菜单 + 双击连接 |
+| `98f42e3` | TextInput 键盘编辑（Backspace/Delete/方向键/Home/End/Ctrl+A） |
+| `b128354` | 测试连接 + 密码掩码 + 会话导入导出 |
+
+### 验证结果
+
+- `cargo check --workspace`：0 error
+- 测试：10 (crypto) + 10 (session) + 2 + 8 = 30 项全过
+- E2E（真实键鼠操作）：新建/编辑/删除会话、退出保存、重启加载、密码 8 位掩码且未修改不覆盖、TCP 测试连接、导出后删除再导入恢复 —— 全部通过
+
+### 遗留项（转入后续 Sprint）
+
+| 项 | 去向 |
+|----|------|
+| 双击连接只是 emit `SessionConnectRequested`，无订阅者 | Sprint 5（5.5.1） |
+| 无终端视图 / PTY | Sprint 5 + Sprint 6 |
+| 右键菜单缺「复制会话」「打开终端/SFTP（灰置）」 | Sprint 5/7 顺带补 |
+| 删除无二次确认 | S4/S6 UI 打磨时补 |
+| 导入导出固定路径，无文件选择器 / 口令 / diff 预览 | Sprint 4（4.2） |
+| 高级 Tab 无跳板机、无「全局默认」勾选 | Sprint 4（设置）/ Sprint 5（跳板机） |
+| 密码掩码固定 8 点（非真实长度） | 可接受，后续如需精确长度再调 |
+
