@@ -12,7 +12,7 @@ pub mod ui;
 pub mod views;
 
 use gpui::prelude::*;
-use gpui::{App, WindowOptions};
+use gpui::{App, KeyBinding, WindowOptions};
 use gpui_platform;
 
 use state::AppState;
@@ -60,6 +60,18 @@ fn main() {
             std::sync::Arc::new(theme::default_theme()),
         );
         app.set_global(app_state);
+
+        // TextInput 键盘编辑绑定：Backspace/Delete 等按键走 action 派发，
+        // 不是 IME 文本输入，必须显式 bind。
+        app.bind_keys([
+            KeyBinding::new("backspace", views::text_input::Backspace, None),
+            KeyBinding::new("delete", views::text_input::Delete, None),
+            KeyBinding::new("left", views::text_input::Left, None),
+            KeyBinding::new("right", views::text_input::Right, None),
+            KeyBinding::new("home", views::text_input::Home, None),
+            KeyBinding::new("end", views::text_input::End, None),
+            KeyBinding::new("cmd-a", views::text_input::SelectAll, None),
+        ]);
 
         app.open_window(WindowOptions::default(), |_window, app| {
             let session_tree = app.new(|_cx| SessionTreeView::new());

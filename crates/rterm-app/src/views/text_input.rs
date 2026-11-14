@@ -13,11 +13,19 @@ use std::ops::Range;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, GlobalElementId, Hsla, IntoElement, LayoutId, PaintQuad, Pixels,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
-    div, fill, point, px, relative, rgba, size,
+    actions, App, Bounds, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, IntoElement, LayoutId,
+    PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle,
+    Window, div, fill, point, px, relative, rgba, size,
 };
+
+// 键盘编辑动作。绑定在 main.rs 的 App::bind_keys。
+// 注意：EntityInputHandler 只处理 IME 文本输入，Backspace/Delete 等
+// 按键必须走 action + key binding。
+actions!(
+    rterm_text_input,
+    [Backspace, Delete, Left, Right, Home, End, SelectAll]
+);
 
 // ---------------------------------------------------------------------------
 // TextInput View
@@ -69,6 +77,99 @@ impl TextInput {
         self.content = SharedString::default();
         self.selected_range = 0..0;
         self.marked_range = None;
+        cx.notify();
+    }
+
+    // ---------------- 键盘编辑（action handler） ----------------
+
+    /// 用新文本替换当前选中区域（空选中 = 在光标处插入）。
+    fn replace_selection(&mut self, new_text: &str, cx: &mut Context<Self>) {
+        let start = self.selected_range.start.min(self.content.len());
+        let end = self.selected_range.end.min(self.content.len());
+        self.content = SharedString::from(format!(
+            "{}{}{}",
+            &self.content[..start],
+            new_text,
+            &self.content[end..]
+        ));
+        let cursor = start + new_text.len();
+        self.selected_range = cursor..cursor;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    fn prev_boundary(&self, offset: usize) -> usize {
+        if offset == 0 {
+            return 0;
+        }
+        let mut i = offset - 1;
+        while i > 0 && !self.content.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+
+    fn next_boundary(&self, offset: usize) -> usize {
+        let len = self.content.len();
+        if offset >= len {
+            return len;
+        }
+        let mut i = offset + 1;
+        while i < len && !self.content.is_char_boundary(i) {
+            i += 1;
+        }
+        i
+    }
+
+    fn backspace(&mut self, _: &Backspace, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let cursor = self.cursor_offset();
+            let prev = self.prev_boundary(cursor);
+            if prev == cursor {
+                return;
+            }
+            self.selected_range = prev..cursor;
+        }
+        self.replace_selection("", cx);
+    }
+
+    fn delete(&mut self, _: &Delete, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let cursor = self.cursor_offset();
+            let next = self.next_boundary(cursor);
+            if next == cursor {
+                return;
+            }
+            self.selected_range = cursor..next;
+        }
+        self.replace_selection("", cx);
+    }
+
+    fn left(&mut self, _: &Left, _window: &mut Window, cx: &mut Context<Self>) {
+        let cursor = self.prev_boundary(self.cursor_offset());
+        self.selected_range = cursor..cursor;
+        cx.notify();
+    }
+
+    fn right(&mut self, _: &Right, _window: &mut Window, cx: &mut Context<Self>) {
+        let cursor = self.next_boundary(self.cursor_offset());
+        self.selected_range = cursor..cursor;
+        cx.notify();
+    }
+
+    fn home(&mut self, _: &Home, _window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_range = 0..0;
+        cx.notify();
+    }
+
+    fn end(&mut self, _: &End, _window: &mut Window, cx: &mut Context<Self>) {
+        let len = self.content.len();
+        self.selected_range = len..len;
+        cx.notify();
+    }
+
+    fn select_all(&mut self, _: &SelectAll, _window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
         cx.notify();
     }
 
@@ -414,6 +515,13 @@ impl Render for TextInput {
             .h(px(32.))
             .id(format!("rterm-ti-{}", cx.entity_id()))
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::backspace))
+            .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::left))
+            .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::home))
+            .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::select_all))
             .cursor(CursorStyle::IBeam)
             .border_1()
             .border_color(border_color)
