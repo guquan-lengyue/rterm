@@ -49,6 +49,21 @@ pub enum AuthType {
 }
 
 // ---------------------------------------------------------------------------
+// 测试连接状态
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub enum TestStatus {
+    Testing,
+    Ok(String),
+    Failed(String),
+}
+
+/// 密码框在编辑模式下的掩码占位内容。
+/// 显示为 8 个 ●，保存时若内容等于该串则保留原密码，不覆盖。
+const PASSWORD_SENTINEL: &str = "********";
+
+// ---------------------------------------------------------------------------
 // SessionEditDialog View
 // ---------------------------------------------------------------------------
 
@@ -73,6 +88,9 @@ pub struct SessionEditDialog {
     pub keepalive_input: Entity<TextInput>,
     pub timeout_input: Entity<TextInput>,
     pub compress_enabled: bool,
+
+    // 测试连接结果
+    pub test_status: Option<TestStatus>,
 }
 
 impl SessionEditDialog {
@@ -111,8 +129,13 @@ impl SessionEditDialog {
 
         let (auth_type, password, key_path, passphrase) = match session {
             Some(s) => match &s.auth {
-                rterm_session::AuthMethod::Password { .. } => {
-                    (AuthType::Password, String::new(), String::new(), String::new())
+                rterm_session::AuthMethod::Password { password } => {
+                    let pw = if password.is_empty() {
+                        String::new()
+                    } else {
+                        PASSWORD_SENTINEL.to_string()
+                    };
+                    (AuthType::Password, pw, String::new(), String::new())
                 }
                 rterm_session::AuthMethod::PrivateKey { path, passphrase } => {
                     let pp = passphrase.as_ref().map(|_| String::new()).unwrap_or_default();
@@ -145,6 +168,7 @@ impl SessionEditDialog {
             keepalive_input: Self::make_ti(cx, &keepalive, "30", false),
             timeout_input: Self::make_ti(cx, &timeout, "10", false),
             compress_enabled: compress,
+            test_status: None,
         }
     }
 
@@ -156,11 +180,37 @@ impl SessionEditDialog {
         let folder_val = self.folder_input.read(cx).content.to_string();
         let folder = if folder_val.is_empty() { None } else { Some(folder_val) };
 
+        let session_id = self.editing_id.unwrap_or_else(Uuid::new_v4);
+
+        // 先取旧会话：保留 created_at / last_connected / 未修改的原密码
+        let old = {
+            let state = cx.global::<AppState>();
+            let store = state.session_store.lock().unwrap();
+            store.get(session_id).cloned()
+        };
+
         let auth = match self.auth_type {
             AuthType::Password => {
                 let pw = self.password_input.read(cx).content.to_string();
-                rterm_session::AuthMethod::Password {
-                    password: rterm_session::EncryptedString::new(&pw),
+                if pw == PASSWORD_SENTINEL {
+                    // 密码框未被修改（仍是掩码占位）→ 沿用旧密码
+                    match old.as_ref() {
+                        Some(s)
+                            if matches!(
+                                &s.auth,
+                                rterm_session::AuthMethod::Password { .. }
+                            ) =>
+                        {
+                            s.auth.clone()
+                        }
+                        _ => rterm_session::AuthMethod::Password {
+                            password: rterm_session::EncryptedString::new(""),
+                        },
+                    }
+                } else {
+                    rterm_session::AuthMethod::Password {
+                        password: rterm_session::EncryptedString::new(&pw),
+                    }
                 }
             }
             AuthType::PrivateKey => {
@@ -179,16 +229,9 @@ impl SessionEditDialog {
         let keepalive_secs: u32 = self.keepalive_input.read(cx).content.parse().unwrap_or(30);
         let connect_timeout_secs: u32 = self.timeout_input.read(cx).content.parse().unwrap_or(10);
 
-        let session_id = self.editing_id.unwrap_or_else(Uuid::new_v4);
-
-        let (created_at, last_connected) = {
-            let state = cx.global::<AppState>();
-            let store = state.session_store.lock().unwrap();
-            if let Some(old) = store.get(session_id) {
-                (old.created_at, old.last_connected)
-            } else {
-                (rterm_session::default_now(), None)
-            }
+        let (created_at, last_connected) = match &old {
+            Some(o) => (o.created_at, o.last_connected),
+            None => (rterm_session::default_now(), None),
         };
 
         let mut session = rterm_session::Session::default();
@@ -232,6 +275,51 @@ impl SessionEditDialog {
         cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
             cx.emit(AppEvent::SessionTreeOpenEditDialog { session_id: None });
         });
+    }
+
+    /// TCP 连通性测试（5s 超时，后台线程执行，不阻塞 UI）
+    fn test_connection(&mut self, cx: &mut Context<Self>) {
+        let host = self.host_input.read(cx).content.to_string();
+        let port: u16 = self.port_input.read(cx).content.parse().unwrap_or(22);
+
+        if host.is_empty() {
+            self.test_status = Some(TestStatus::Failed("请先填写主机地址".into()));
+            cx.notify();
+            return;
+        }
+
+        self.test_status = Some(TestStatus::Testing);
+        cx.notify();
+
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let result = executor.spawn(async move { tcp_check(&host, port) }).await;
+            this.update(cx, |this, cx| {
+                this.test_status = Some(result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+/// 阻塞式 TCP 连接检查，返回结果状态。
+fn tcp_check(host: &str, port: u16) -> TestStatus {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    let addr = match (host, port).to_socket_addrs() {
+        Ok(mut iter) => match iter.next() {
+            Some(a) => a,
+            None => return TestStatus::Failed(format!("无法解析主机 {host}")),
+        },
+        Err(e) => return TestStatus::Failed(format!("解析主机失败: {e}")),
+    };
+
+    match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+        Ok(_) => TestStatus::Ok(format!("TCP OK — {addr}")),
+        Err(e) => TestStatus::Failed(format!("连接失败: {e}")),
     }
 }
 
@@ -290,17 +378,19 @@ impl Render for SessionEditDialog {
                     )
                     .child(self.render_tab_content(cx))
                     .child(
-                        // 底部按钮栏
+                        // 底部按钮栏：左侧 测试连接 + 状态，右侧 取消/保存
                         div()
                             .w_full()
                             .h(px(52.))
                             .px_4()
                             .flex()
-                            .justify_end()
                             .items_center()
                             .gap_3()
                             .border_t_1()
                             .border_color(t.border_subtle())
+                            .child(self.render_test_button(cx))
+                            .child(self.render_test_status(cx))
+                            .child(div().flex_1())
                             .child(self.render_button("取消", false, cx))
                             .child(self.render_button("保存", true, cx)),
                     ),
@@ -545,6 +635,48 @@ impl SessionEditDialog {
                 }
             }))
             .child(label_owned)
+            .into_any_element()
+    }
+
+    fn render_test_button(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme(cx);
+        let bg = t.secondary_btn_bg();
+        let hover_bg = t.secondary_btn_hover();
+        let text_color = t.text_on_secondary_btn();
+
+        div()
+            .h(px(32.))
+            .px_4()
+            .rounded_md()
+            .bg(bg)
+            .text_color(text_color)
+            .text_size(px(12.))
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover_bg))
+            .id("rterm-dialog-test")
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_click(cx.listener(|this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                this.test_connection(cx);
+            }))
+            .child("测试连接")
+            .into_any_element()
+    }
+
+    fn render_test_status(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme(cx);
+        let (text, color) = match &self.test_status {
+            None => (String::new(), t.text_subtle()),
+            Some(TestStatus::Testing) => ("正在连接…".to_string(), t.text_subtle()),
+            Some(TestStatus::Ok(msg)) => (msg.clone(), t.success()),
+            Some(TestStatus::Failed(msg)) => (msg.clone(), t.danger()),
+        };
+
+        div()
+            .text_size(px(11.))
+            .text_color(color)
+            .child(text)
             .into_any_element()
     }
 }

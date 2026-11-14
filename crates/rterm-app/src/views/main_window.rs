@@ -45,6 +45,8 @@ enum ContextMenuAction {
     NewSession,
     EditSession(Uuid),
     DeleteSession(Uuid),
+    ExportAll,
+    ImportFile,
 }
 
 pub struct MainWindow {
@@ -99,6 +101,109 @@ impl MainWindow {
         log::info!("Session deleted: {}", session_id);
         cx.notify();
     }
+
+    fn set_status(&mut self, msg: impl Into<String>, cx: &mut Context<Self>) {
+        let msg = msg.into();
+        self.status_bar.update(cx, |bar, cx| {
+            bar.message = msg;
+            cx.notify();
+        });
+    }
+
+    /// 导出全部会话到固定路径 `%APPDATA%\rterm\sessions-export.json`
+    fn export_sessions(&mut self, cx: &mut Context<Self>) {
+        let path = export_path();
+        let sessions = {
+            let state = cx.global::<AppState>();
+            state.session_store.lock().unwrap().list().to_vec()
+        };
+
+        let result: Result<(), String> = (|| {
+            let json = rterm_session::export::export_json(
+                &sessions,
+                rterm_session::ExportScope::All,
+                None,
+            )
+            .map_err(|e| format!("{e:#}"))?;
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&path, json).map_err(|e| format!("写入失败: {e}"))?;
+            Ok(())
+        })();
+
+        self.context_menu = None;
+        match result {
+            Ok(()) => {
+                log::info!("Exported {} sessions to {}", sessions.len(), path.display());
+                self.set_status(
+                    format!("已导出 {} 个会话 → {}", sessions.len(), path.display()),
+                    cx,
+                );
+            }
+            Err(e) => {
+                log::error!("导出失败: {e}");
+                self.set_status(format!("导出失败: {e}"), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 从固定路径导入会话（冲突策略：跳过已存在）
+    fn import_sessions(&mut self, cx: &mut Context<Self>) {
+        let path = export_path();
+        let result: Result<(usize, usize, usize), String> = (|| {
+            let json = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {e}"))?;
+            let existing = {
+                let state = cx.global::<AppState>();
+                state.session_store.lock().unwrap().list().to_vec()
+            };
+            let (merged, report) = rterm_session::export::import_json(
+                &json,
+                &existing,
+                rterm_session::ConflictPolicy::Skip,
+                None,
+            )
+            .map_err(|e| format!("{e:#}"))?;
+            {
+                let state = cx.global_mut::<AppState>();
+                let mut store = state.session_store.lock().unwrap();
+                store.clear();
+                for s in merged {
+                    store.upsert(s);
+                }
+            }
+            Ok((report.added, report.updated, report.skipped))
+        })();
+
+        self.context_menu = None;
+        match result {
+            Ok((added, updated, skipped)) => {
+                let host = cx.global::<AppState>().event_bus_host.clone();
+                cx.update_entity(&host, |_host, cx: &mut Context<crate::event::EventBusHost>| {
+                    cx.emit(AppEvent::SessionImported { added, updated, skipped });
+                });
+                log::info!("Imported: added={} updated={} skipped={}", added, updated, skipped);
+                self.set_status(
+                    format!("导入完成：新增 {added}，更新 {updated}，跳过 {skipped}"),
+                    cx,
+                );
+            }
+            Err(e) => {
+                log::error!("导入失败: {e}");
+                self.set_status(format!("导入失败: {e}"), cx);
+            }
+        }
+        cx.notify();
+    }
+}
+
+/// 导出/导入固定路径：`%APPDATA%\rterm\sessions-export.json`
+fn export_path() -> std::path::PathBuf {
+    let mut p = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    p.push("rterm");
+    p.push("sessions-export.json");
+    p
 }
 
 impl Render for MainWindow {
@@ -219,8 +324,8 @@ impl Render for MainWindow {
 
         if let Some(menu_state) = self.context_menu {
             let viewport = window.viewport_size();
-            let menu_w = 150.0_f32;
-            let menu_h = if menu_state.session_id.is_some() { 98.0_f32 } else { 38.0_f32 };
+            let menu_w = 170.0_f32;
+            let menu_h = if menu_state.session_id.is_some() { 158.0_f32 } else { 98.0_f32 };
             let x = (menu_state.x as f32).min(f32::from(viewport.width) - menu_w).max(0.);
             let y = (menu_state.y as f32).min(f32::from(viewport.height) - menu_h).max(0.);
 
@@ -269,6 +374,22 @@ impl Render for MainWindow {
                     ));
             }
 
+            menu = menu
+                .child(self.render_menu_item(
+                    "rterm-ctx-export",
+                    "⬇ 导出会话 JSON",
+                    false,
+                    ContextMenuAction::ExportAll,
+                    cx,
+                ))
+                .child(self.render_menu_item(
+                    "rterm-ctx-import",
+                    "⬆ 导入会话 JSON",
+                    false,
+                    ContextMenuAction::ImportFile,
+                    cx,
+                ));
+
             root = root.child(menu);
         }
 
@@ -313,6 +434,8 @@ impl MainWindow {
                         ContextMenuAction::NewSession => this.open_edit_dialog(None, cx),
                         ContextMenuAction::EditSession(sid) => this.edit_session(sid, cx),
                         ContextMenuAction::DeleteSession(sid) => this.delete_session(sid, cx),
+                        ContextMenuAction::ExportAll => this.export_sessions(cx),
+                        ContextMenuAction::ImportFile => this.import_sessions(cx),
                     }
                     cx.notify();
                 },

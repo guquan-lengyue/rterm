@@ -91,7 +91,8 @@ impl Render for SessionTreeView {
             match ev {
                 AppEvent::SessionCreated { .. }
                 | AppEvent::SessionUpdated { .. }
-                | AppEvent::SessionDeleted { .. } => cx.notify(),
+                | AppEvent::SessionDeleted { .. }
+                | AppEvent::SessionImported { .. } => cx.notify(),
                 AppEvent::SessionTreeSelectRequested { session_id } => {
                     this.selected = *session_id;
                     cx.notify();

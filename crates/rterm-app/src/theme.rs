@@ -67,6 +67,8 @@ pub trait Theme: 'static + Send + Sync {
     fn secondary_btn_bg(&self) -> Rgba;
     fn secondary_btn_hover(&self) -> Rgba;
     fn danger(&self) -> Rgba;
+    /// 成功状态色（测试连接通过等）
+    fn success(&self) -> Rgba;
 
     // --- Modal ---
 
@@ -117,6 +119,7 @@ impl Theme for CatppuccinMocha {
     fn secondary_btn_bg(&self) -> Rgba      { rgb(0x313244) }
     fn secondary_btn_hover(&self) -> Rgba  { rgb(0x45475a) }
     fn danger(&self) -> Rgba               { rgb(0xe64553) }
+    fn success(&self) -> Rgba              { rgb(0xa6e3a1) }
 
     // Modal
     fn modal_overlay(&self) -> Rgba { rgb(0x66000000) }
@@ -161,6 +164,7 @@ impl Theme for WindowsLight {
     fn secondary_btn_bg(&self) -> Rgba      { rgb(0xf0f0f0) }
     fn secondary_btn_hover(&self) -> Rgba  { rgb(0xe0e0e0) }
     fn danger(&self) -> Rgba               { rgb(0xd13438) }
+    fn success(&self) -> Rgba              { rgb(0x0f7b0f) }
 
     fn modal_overlay(&self) -> Rgba { rgb(0x66000000) }
 }

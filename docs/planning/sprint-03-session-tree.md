@@ -1,9 +1,15 @@
 # Sprint 3 — 会话树 + 编辑对话框 + 启动退出
 
-> **状态**：⏳ 下一个
+> **状态**：✅ 已完成（2026-11-14）
 > **前置**：S1（AppState + EventBus 已就绪）+ S2（SessionStore + Session 模型 + DPAPI 加密桥）
 > **目标**：SessionTree View 真实化 + 编辑对话框 Modal + 启动加载 + 退出 save
 > **注意**：本 Sprint 的 View **全部 stub 后端连接**（还没有 SSH），双击"打开终端"先 emit 事件 + log
+>
+> **实现偏差说明**：
+> - 3.1.2：右键菜单为自绘（bezel-gpui 无原生 Menu），暂不含「复制 / 打开终端 / 打开 SFTP」与删除二次确认
+> - 3.2.2：密码编辑时不回显明文，显示 8 个掩码点；未修改则保存时沿用原密码
+> - 3.2.5：测试结果以内联状态文字显示（绿/红），未用独立 Modal
+> - 3.4.1：导出/导入为固定路径 `%APPDATA%\rterm\sessions-export.json`（暂无文件选择器），导入策略 Skip
 >
 > **⚠️ EventBus 真实 API（必须对齐 S1 落地）**：
 > - emit：`app.emit(&app.global::<AppState>().event_bus, AppEvent::Xxx { ... })`
