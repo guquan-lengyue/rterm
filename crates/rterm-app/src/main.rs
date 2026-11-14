@@ -12,7 +12,7 @@ pub mod ui;
 pub mod views;
 
 use gpui::prelude::*;
-use gpui::{App, KeyBinding, WindowOptions};
+use gpui::{App, KeyBinding, WindowHandle, WindowOptions};
 use gpui_platform;
 
 use state::AppState;
@@ -33,11 +33,12 @@ fn sessions_path() -> std::path::PathBuf {
 // ---------- 入口 ----------
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    log::info!("rterm-app starting (Sprint 3 — SessionTree + 持久化)");
+    log::info!("rterm-app starting (Sprint 4 — 设置 + 导入导出)");
 
-    // 1. 启动加载 store
+    // 1. 启动加载 store + settings
     let store = load_store();
     let path = sessions_path();
+    let settings = state::Settings::load();
 
     // 用 Arc<Mutex<>> 包装，AppState 和退出保存共享同一份。
     // SessionEditDialog.save() 修改时写入 AppState.session_store，
@@ -57,13 +58,13 @@ fn main() {
         let app_state = AppState::new(
             event_bus_host,
             shared_store_for_app,
-            std::sync::Arc::new(theme::default_theme()),
+            settings,
         );
         app.set_global(app_state);
 
         // TextInput 键盘编辑绑定：Backspace/Delete 等按键走 action 派发，
         // 不是 IME 文本输入，必须显式 bind。
-        app.bind_keys([
+        let mut bindings = vec![
             KeyBinding::new("backspace", views::text_input::Backspace, None),
             KeyBinding::new("delete", views::text_input::Delete, None),
             KeyBinding::new("left", views::text_input::Left, None),
@@ -71,13 +72,31 @@ fn main() {
             KeyBinding::new("home", views::text_input::Home, None),
             KeyBinding::new("end", views::text_input::End, None),
             KeyBinding::new("cmd-a", views::text_input::SelectAll, None),
-        ]);
+        ];
+        bindings.extend(views::settings::key_bindings());
+        app.bind_keys(bindings);
 
-        app.open_window(WindowOptions::default(), |_window, app| {
+        let window_handle = app.open_window(WindowOptions::default(), |_window, app| {
             let session_tree = app.new(|_cx| SessionTreeView::new());
             let status_bar = app.new(|_cx| StatusBar::new());
             app.new(|_cx| MainWindow::new(session_tree, status_bar))
         }).unwrap();
+
+        // Ctrl+, → 全局打开设置。
+        // 不能挂根节点的 on_action：窗口没有聚焦元素时，action 只在
+        // dispatch tree 的根节点冒泡，不会进入控件树。App::on_action 是
+        // 窗口级监听，任何焦点状态都能收到。
+        let window_id = window_handle.window_id();
+        app.on_action(move |_: &views::settings::OpenSettings, app: &mut App| {
+            // action 派发期间窗口被临时移出 App.windows，直接 update 会
+            // 报 “window not found”，因此延迟到当前事件处理完成后再打开。
+            app.defer(move |app| {
+                let handle = WindowHandle::<MainWindow>::new(window_id);
+                if let Err(e) = handle.update(app, |main, _window, cx| main.open_settings(cx)) {
+                    log::error!("[shortcut] 打开设置失败: {e:#}");
+                }
+            });
+        });
     });
 
     // 3. 退出保存 —— 从共享 Arc 读，一定是最新状态

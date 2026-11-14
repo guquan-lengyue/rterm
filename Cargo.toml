@@ -48,6 +48,8 @@ env_logger = "0.11"
 parking_lot = "0.12"
 bytes = "1"
 base64 = "0.22"
+# 原生文件选择器（Sprint 4 导入导出）
+rfd = "0.16"
 
 # Internal crates
 rterm-session  = { path = "crates/rterm-session" }

@@ -400,11 +400,11 @@ App (gpui::Application)
 | UI 组件 | 对应 Sprint 任务 | 状态 |
 |---------|-----------------|------|
 | MainWindow 三栏骨架 | S1 | ✅ 已完成 |
-| SessionTreeView（真实） | **S3** 3.1 | ⏳ |
-| SessionEditDialog | **S3** 3.2 | ⏳ |
-| 启动/退出持久化 | **S3** 3.5 | ⏳ |
-| SettingsView | **S4** 4.1 | ⏳ |
-| ImportExportDialog | **S4** 4.2 | ⏳ |
+| SessionTreeView（真实） | **S3** 3.1 | ✅ 已完成 |
+| SessionEditDialog | **S3** 3.2 | ✅ 已完成 |
+| 启动/退出持久化 | **S3** 3.5 | ✅ 已完成 |
+| SettingsView | **S4** 4.1 | ✅ 已完成 |
+| ImportExportDialog | **S4** 4.2 | ✅ 已完成 |
 | TabBar | **S5** 5.2 + **S6** 6.3 | ⏳ |
 | 终端 Canvas View | **S6** 6.1 | ⏳ |
 | SFTP 双栏 View | **S7** 7.2 | ⏳ |

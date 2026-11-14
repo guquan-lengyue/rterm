@@ -9,13 +9,14 @@ use uuid::Uuid;
 use gpui::Entity;
 
 use crate::event::EventBusHost;
-use crate::theme::Theme;
+use crate::theme::{self, Theme};
 
 // ---------------------------------------------------------------------------
-// Settings（持久化 JSON，Sprint 3 完成持久化；当前用 Default 占位）
+// Settings（持久化 JSON，Sprint 4 落地：%APPDATA%\rterm\settings.json）
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     // SSH 默认值
     pub default_port: u16,
@@ -58,7 +59,7 @@ impl Default for Settings {
             keepalive_secs: 30,
             connect_timeout_secs: 10,
 
-            default_theme: "Solarized Dark".into(),
+            default_theme: "Catppuccin Mocha".into(),
             default_font_family: "Cascadia Code".into(),
             default_font_size: 14.0,
             terminal_scrollback_lines: 10_000,
@@ -73,6 +74,64 @@ impl Default for Settings {
             terminal_log_dir: None,
             data_dir: None,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Settings 持久化 — `%APPDATA%\rterm\settings.json`
+// ---------------------------------------------------------------------------
+
+/// `%APPDATA%\rterm\settings.json`，与 sessions.json 同目录。
+pub fn settings_path() -> std::path::PathBuf {
+    let mut p = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    p.push("rterm");
+    p.push("settings.json");
+    p
+}
+
+impl Settings {
+    /// 加载设置。文件不存在 / 解析失败 → 返回默认值（不阻断启动）。
+    pub fn load() -> Self {
+        let path = settings_path();
+        if !path.exists() {
+            log::info!("settings.json 不存在，使用默认设置");
+            return Self::default();
+        }
+        match std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|raw| serde_json::from_str::<Settings>(&raw).map_err(|e| e.to_string()))
+        {
+            Ok(mut s) => {
+                // 旧版本可能存了不存在的主题名，回退默认
+                if theme::theme_by_name(&s.default_theme).name() != s.default_theme {
+                    s.default_theme = Settings::default().default_theme;
+                }
+                log::info!("Loaded settings from {}", path.display());
+                s
+            }
+            Err(e) => {
+                log::error!("加载 settings.json 失败（使用默认值）: {e}");
+                Self::default()
+            }
+        }
+    }
+
+    /// 保存设置：先写临时文件再 rename，避免半截文件。
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = settings_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("创建配置目录失败: {e}"))?;
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| anyhow::anyhow!("序列化设置失败: {e}"))?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, json)
+            .map_err(|e| anyhow::anyhow!("写临时文件失败: {e}"))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| anyhow::anyhow!("重命名 settings.json 失败: {e}"))?;
+        log::info!("Saved settings to {}", path.display());
+        Ok(())
     }
 }
 
@@ -132,15 +191,17 @@ pub struct AppState {
 impl gpui::Global for AppState {}
 
 impl AppState {
-    /// AppState::new 需要 EventBusHost Entity —— 在 main.rs 里 app.new() 之后构造
+    /// AppState::new 需要 EventBusHost Entity —— 在 main.rs 里 app.new() 之后构造。
+    /// 主题由 `settings.default_theme` 决定。
     pub fn new(
         event_bus_host: Entity<EventBusHost>,
         session_store: Arc<Mutex<rterm_session::SessionStore>>,
-        theme: Arc<dyn Theme>,
+        settings: Settings,
     ) -> Self {
+        let theme = theme::theme_by_name(&settings.default_theme);
         Self {
             event_bus_host,
-            settings: Settings::default(),
+            settings,
             session_store,
             tab_registry: TabRegistry::new(),
             theme,

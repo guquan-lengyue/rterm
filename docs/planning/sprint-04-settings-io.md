@@ -1,9 +1,18 @@
 # Sprint 4 — 设置 + 导入导出
 
-> **状态**：⏳ 下一个（S3 已完成，2026-11-14）
+> **状态**：✅ 已完成（2026-11-14）
 > **前置**：S3（SessionTree + 编辑对话框 + 启动退出已可用）
 > **目标**：全局设置界面 SettingsView + 导入导出对话框 ImportExportDialog + Settings 持久化
 > **定位**：S3 管"会话数据增删改"，S4 管"全局配置 + 数据迁移"
+>
+> **实现说明（与计划的偏差）**：
+> - SettingsView 共 **7 个 Tab**：常规 / SSH 默认值 / 终端外观 / SFTP / 监控 / 高级 / 导入导出（4.2.3 的入口合并进设置）
+> - 主题切换**即时生效**（整个应用换肤），取消时还原为已保存主题；新增 Dracula / One Dark 两套主题
+> - 「文件夹 / 选中会话」用 chips + 勾选列表（gpui 0.3 无原生下拉框），选中列表最多展示 24 条
+> - 导入预览最多展示 12 条，超出显示剩余数量
+> - `settings.json` 使用 `#[serde(default)]`，缺字段/未知主题自动回退默认值
+> - 快捷键 `Ctrl+,` 走 `App::on_action` 全局监听 + `app.defer`（action 派发期间窗口被临时移出 `App.windows`，不能同步 update）
+> - 导入错误信息只显示顶层原因（避免长错误链把 footer 按钮挤出卡片）
 >
 > **S3 可直接复用的资产**：
 > - 主题系统 `theme.rs`（Theme trait + CatppuccinMocha / WindowsLight，AppState.theme 可切换）

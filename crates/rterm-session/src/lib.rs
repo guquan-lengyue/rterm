@@ -11,4 +11,6 @@ pub mod openssh;
 
 pub use model::{AuthMethod, EncryptedString, Session, default_now};
 pub use store::{SessionStore, UpsertResult};
-pub use export::{ConflictPolicy, ExportScope, ImportReport};
+pub use export::{
+    ConflictPolicy, ExportScope, ImportPreviewItem, ImportPreviewStatus, ImportReport,
+};

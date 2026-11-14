@@ -8,6 +8,8 @@
 //! - **背景 / 文字严格配对**：每个 surface 有对应的 text，确保对比度
 //! - **gpui 0.3 类型**：直接返回 `gpui::Rgba` / `gpui::Pixels` 避免每个文件 import
 
+use std::sync::Arc;
+
 use gpui::{rgb, Rgba};
 
 // ===========================================================================
@@ -170,8 +172,114 @@ impl Theme for WindowsLight {
 }
 
 // ===========================================================================
+// Dracula — 深紫主题（Sprint 4）
+// ===========================================================================
+
+pub struct Dracula;
+
+impl Theme for Dracula {
+    fn name(&self) -> &'static str { "Dracula" }
+
+    fn app_bg(&self) -> Rgba          { rgb(0x282a36) }
+    fn sidebar_bg(&self) -> Rgba      { rgb(0x21222c) }
+    fn toolbar_bg(&self) -> Rgba      { rgb(0x21222c) }
+    fn card_bg(&self) -> Rgba         { rgb(0x282a36) }
+    fn card_header_bg(&self) -> Rgba  { rgb(0x21222c) }
+    fn row_selected_bg(&self) -> Rgba { rgb(0x44475a) }
+    fn row_hover_bg(&self) -> Rgba    { rgb(0x3a3d4d) }
+    fn input_bg(&self) -> Rgba        { rgb(0x21222c) }
+
+    fn text_on_app_bg(&self) -> Rgba          { rgb(0xf8f8f2) }
+    fn text_on_sidebar_bg(&self) -> Rgba      { rgb(0xf8f8f2) }
+    fn text_on_toolbar_bg(&self) -> Rgba      { rgb(0xb8bfe0) }
+    fn text_on_card_bg(&self) -> Rgba         { rgb(0xf8f8f2) }
+    fn text_on_card_header_bg(&self) -> Rgba  { rgb(0xf8f8f2) }
+    fn text_on_row_selected_bg(&self) -> Rgba { rgb(0xf8f8f2) }
+    fn text_subtle(&self) -> Rgba             { rgb(0x9aa3c7) }
+    fn text_placeholder(&self) -> Rgba        { rgb(0x6272a4) }
+    fn text_on_primary_btn(&self) -> Rgba     { rgb(0x282a36) }
+    fn text_on_secondary_btn(&self) -> Rgba   { rgb(0xf8f8f2) }
+
+    fn border_subtle(&self) -> Rgba      { rgb(0x44475a) }
+    fn border_medium(&self) -> Rgba      { rgb(0x6272a4) }
+    fn border_input_idle(&self) -> Rgba  { rgb(0x44475a) }
+    fn border_input_focused(&self) -> Rgba { rgb(0xbd93f9) }
+
+    fn primary(&self) -> Rgba              { rgb(0xbd93f9) }
+    fn primary_hover(&self) -> Rgba        { rgb(0xcaa9fa) }
+    fn secondary_btn_bg(&self) -> Rgba      { rgb(0x44475a) }
+    fn secondary_btn_hover(&self) -> Rgba  { rgb(0x565a72) }
+    fn danger(&self) -> Rgba               { rgb(0xff5555) }
+    fn success(&self) -> Rgba              { rgb(0x50fa7b) }
+
+    fn modal_overlay(&self) -> Rgba { rgb(0x66000000) }
+}
+
+// ===========================================================================
+// One Dark — Atom 风格（Sprint 4）
+// ===========================================================================
+
+pub struct OneDark;
+
+impl Theme for OneDark {
+    fn name(&self) -> &'static str { "One Dark" }
+
+    fn app_bg(&self) -> Rgba          { rgb(0x282c34) }
+    fn sidebar_bg(&self) -> Rgba      { rgb(0x21252b) }
+    fn toolbar_bg(&self) -> Rgba      { rgb(0x21252b) }
+    fn card_bg(&self) -> Rgba         { rgb(0x282c34) }
+    fn card_header_bg(&self) -> Rgba  { rgb(0x21252b) }
+    fn row_selected_bg(&self) -> Rgba { rgb(0x3e4451) }
+    fn row_hover_bg(&self) -> Rgba    { rgb(0x333842) }
+    fn input_bg(&self) -> Rgba        { rgb(0x21252b) }
+
+    fn text_on_app_bg(&self) -> Rgba          { rgb(0xabb2bf) }
+    fn text_on_sidebar_bg(&self) -> Rgba      { rgb(0xabb2bf) }
+    fn text_on_toolbar_bg(&self) -> Rgba      { rgb(0x9da5b4) }
+    fn text_on_card_bg(&self) -> Rgba         { rgb(0xabb2bf) }
+    fn text_on_card_header_bg(&self) -> Rgba  { rgb(0xabb2bf) }
+    fn text_on_row_selected_bg(&self) -> Rgba { rgb(0xd7dae0) }
+    fn text_subtle(&self) -> Rgba             { rgb(0x7f8796) }
+    fn text_placeholder(&self) -> Rgba        { rgb(0x5c6370) }
+    fn text_on_primary_btn(&self) -> Rgba     { rgb(0xffffff) }
+    fn text_on_secondary_btn(&self) -> Rgba   { rgb(0xabb2bf) }
+
+    fn border_subtle(&self) -> Rgba      { rgb(0x3e4451) }
+    fn border_medium(&self) -> Rgba      { rgb(0x4b5263) }
+    fn border_input_idle(&self) -> Rgba  { rgb(0x3e4451) }
+    fn border_input_focused(&self) -> Rgba { rgb(0x61afef) }
+
+    fn primary(&self) -> Rgba              { rgb(0x61afef) }
+    fn primary_hover(&self) -> Rgba        { rgb(0x7bbff5) }
+    fn secondary_btn_bg(&self) -> Rgba      { rgb(0x3e4451) }
+    fn secondary_btn_hover(&self) -> Rgba  { rgb(0x4b5263) }
+    fn danger(&self) -> Rgba               { rgb(0xe06c75) }
+    fn success(&self) -> Rgba              { rgb(0x98c379) }
+
+    fn modal_overlay(&self) -> Rgba { rgb(0x66000000) }
+}
+
+// ===========================================================================
 // 全局访问入口
 // ===========================================================================
 
 /// 默认主题（可通过 AppState 切换）
 pub fn default_theme() -> CatppuccinMocha { CatppuccinMocha }
+
+/// 所有内置主题（设置界面按顺序展示）
+pub fn all_themes() -> Vec<Arc<dyn Theme>> {
+    vec![
+        Arc::new(CatppuccinMocha),
+        Arc::new(WindowsLight),
+        Arc::new(Dracula),
+        Arc::new(OneDark),
+    ]
+}
+
+/// 按名称取主题；未知名回退到默认主题。
+pub fn theme_by_name(name: &str) -> Arc<dyn Theme> {
+    all_themes()
+        .into_iter()
+        .find(|t| t.name() == name)
+        .unwrap_or_else(|| Arc::new(CatppuccinMocha))
+}

@@ -6,5 +6,7 @@
 pub mod main_window;
 pub mod session_tree;
 pub mod session_dialog;
+pub mod settings;
+pub mod import_export;
 pub mod status_bar;
 pub mod text_input;

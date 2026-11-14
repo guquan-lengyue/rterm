@@ -24,8 +24,10 @@ use crate::event::AppEvent;
 use crate::state::AppState;
 use crate::ui::theme;
 
+use super::import_export::{ImportExportDialog, IoMode};
 use super::session_dialog::SessionEditDialog;
 use super::session_tree::SessionTreeView;
+use super::settings::SettingsView;
 use super::status_bar::StatusBar;
 
 // ---------------------------------------------------------------------------
@@ -45,14 +47,17 @@ enum ContextMenuAction {
     NewSession,
     EditSession(Uuid),
     DeleteSession(Uuid),
-    ExportAll,
-    ImportFile,
+    OpenExportDialog,
+    OpenImportDialog,
+    OpenSettingsDialog,
 }
 
 pub struct MainWindow {
     session_tree: Entity<SessionTreeView>,
     status_bar: Entity<StatusBar>,
     pub edit_dialog: Option<Entity<SessionEditDialog>>,
+    settings_dialog: Option<Entity<SettingsView>>,
+    import_export_dialog: Option<Entity<ImportExportDialog>>,
     context_menu: Option<ContextMenuState>,
 }
 
@@ -62,8 +67,39 @@ impl MainWindow {
             session_tree,
             status_bar,
             edit_dialog: None,
+            settings_dialog: None,
+            import_export_dialog: None,
             context_menu: None,
         }
+    }
+
+    pub fn open_settings(&mut self, cx: &mut Context<Self>) {
+        if self.settings_dialog.is_some() {
+            return;
+        }
+        let dialog = cx.new(SettingsView::new);
+        self.settings_dialog = Some(dialog);
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, saved: bool, cx: &mut Context<Self>) {
+        self.settings_dialog = None;
+        self.set_status(if saved { "设置已保存" } else { "设置已取消" }, cx);
+        cx.notify();
+    }
+
+    fn open_import_export(&mut self, export: bool, cx: &mut Context<Self>) {
+        let mode = if export { IoMode::Export } else { IoMode::Import };
+        let dialog = cx.new(|cx| ImportExportDialog::new(cx, mode));
+        self.import_export_dialog = Some(dialog);
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    fn close_import_export(&mut self, cx: &mut Context<Self>) {
+        self.import_export_dialog = None;
+        cx.notify();
     }
 
     fn open_edit_dialog(&mut self, session: Option<&rterm_session::Session>, cx: &mut Context<Self>) {
@@ -110,100 +146,6 @@ impl MainWindow {
         });
     }
 
-    /// 导出全部会话到固定路径 `%APPDATA%\rterm\sessions-export.json`
-    fn export_sessions(&mut self, cx: &mut Context<Self>) {
-        let path = export_path();
-        let sessions = {
-            let state = cx.global::<AppState>();
-            state.session_store.lock().unwrap().list().to_vec()
-        };
-
-        let result: Result<(), String> = (|| {
-            let json = rterm_session::export::export_json(
-                &sessions,
-                rterm_session::ExportScope::All,
-                None,
-            )
-            .map_err(|e| format!("{e:#}"))?;
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            std::fs::write(&path, json).map_err(|e| format!("写入失败: {e}"))?;
-            Ok(())
-        })();
-
-        self.context_menu = None;
-        match result {
-            Ok(()) => {
-                log::info!("Exported {} sessions to {}", sessions.len(), path.display());
-                self.set_status(
-                    format!("已导出 {} 个会话 → {}", sessions.len(), path.display()),
-                    cx,
-                );
-            }
-            Err(e) => {
-                log::error!("导出失败: {e}");
-                self.set_status(format!("导出失败: {e}"), cx);
-            }
-        }
-        cx.notify();
-    }
-
-    /// 从固定路径导入会话（冲突策略：跳过已存在）
-    fn import_sessions(&mut self, cx: &mut Context<Self>) {
-        let path = export_path();
-        let result: Result<(usize, usize, usize), String> = (|| {
-            let json = std::fs::read_to_string(&path).map_err(|e| format!("读取失败: {e}"))?;
-            let existing = {
-                let state = cx.global::<AppState>();
-                state.session_store.lock().unwrap().list().to_vec()
-            };
-            let (merged, report) = rterm_session::export::import_json(
-                &json,
-                &existing,
-                rterm_session::ConflictPolicy::Skip,
-                None,
-            )
-            .map_err(|e| format!("{e:#}"))?;
-            {
-                let state = cx.global_mut::<AppState>();
-                let mut store = state.session_store.lock().unwrap();
-                store.clear();
-                for s in merged {
-                    store.upsert(s);
-                }
-            }
-            Ok((report.added, report.updated, report.skipped))
-        })();
-
-        self.context_menu = None;
-        match result {
-            Ok((added, updated, skipped)) => {
-                let host = cx.global::<AppState>().event_bus_host.clone();
-                cx.update_entity(&host, |_host, cx: &mut Context<crate::event::EventBusHost>| {
-                    cx.emit(AppEvent::SessionImported { added, updated, skipped });
-                });
-                log::info!("Imported: added={} updated={} skipped={}", added, updated, skipped);
-                self.set_status(
-                    format!("导入完成：新增 {added}，更新 {updated}，跳过 {skipped}"),
-                    cx,
-                );
-            }
-            Err(e) => {
-                log::error!("导入失败: {e}");
-                self.set_status(format!("导入失败: {e}"), cx);
-            }
-        }
-        cx.notify();
-    }
-}
-
-/// 导出/导入固定路径：`%APPDATA%\rterm\sessions-export.json`
-fn export_path() -> std::path::PathBuf {
-    let mut p = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    p.push("rterm");
-    p.push("sessions-export.json");
-    p
 }
 
 impl Render for MainWindow {
@@ -231,12 +173,22 @@ impl Render for MainWindow {
                     });
                     cx.notify();
                 }
+                AppEvent::SettingsCloseRequested { saved } => {
+                    this.close_settings(*saved, cx);
+                }
+                AppEvent::SettingsOpenImportExport { export } => {
+                    this.open_import_export(*export, cx);
+                }
+                AppEvent::ImportExportCloseRequested => {
+                    this.close_import_export(cx);
+                }
                 _ => {}
             }
         }).detach();
 
         let new_btn_id = "rterm-new-session-btn".to_string();
 
+        let settings_hover = t.secondary_btn_hover();
         let mut root = div()
             .size_full()
             .bg(t.app_bg())
@@ -278,6 +230,26 @@ impl Render for MainWindow {
                             .items_center()
                             .justify_center()
                             .child("＋ 新建会话"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .h(px(26.))
+                            .px_3()
+                            .rounded_md()
+                            .bg(t.secondary_btn_bg())
+                            .text_color(t.text_on_secondary_btn())
+                            .text_size(px(11.))
+                            .cursor_pointer()
+                            .id("rterm-settings-btn")
+                            .hover(move |s| s.bg(settings_hover))
+                            .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                                this.open_settings(cx);
+                            }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("⚙ 设置"),
                     ),
             )
             // 左 SessionTree + 右 Content Area
@@ -325,7 +297,7 @@ impl Render for MainWindow {
         if let Some(menu_state) = self.context_menu {
             let viewport = window.viewport_size();
             let menu_w = 170.0_f32;
-            let menu_h = if menu_state.session_id.is_some() { 158.0_f32 } else { 98.0_f32 };
+            let menu_h = if menu_state.session_id.is_some() { 188.0_f32 } else { 128.0_f32 };
             let x = (menu_state.x as f32).min(f32::from(viewport.width) - menu_w).max(0.);
             let y = (menu_state.y as f32).min(f32::from(viewport.height) - menu_h).max(0.);
 
@@ -377,16 +349,23 @@ impl Render for MainWindow {
             menu = menu
                 .child(self.render_menu_item(
                     "rterm-ctx-export",
-                    "⬇ 导出会话 JSON",
+                    "⬇ 导出会话…",
                     false,
-                    ContextMenuAction::ExportAll,
+                    ContextMenuAction::OpenExportDialog,
                     cx,
                 ))
                 .child(self.render_menu_item(
                     "rterm-ctx-import",
-                    "⬆ 导入会话 JSON",
+                    "⬆ 导入会话…",
                     false,
-                    ContextMenuAction::ImportFile,
+                    ContextMenuAction::OpenImportDialog,
+                    cx,
+                ))
+                .child(self.render_menu_item(
+                    "rterm-ctx-settings",
+                    "⚙ 设置…",
+                    false,
+                    ContextMenuAction::OpenSettingsDialog,
                     cx,
                 ));
 
@@ -394,6 +373,12 @@ impl Render for MainWindow {
         }
 
         if let Some(dialog) = &self.edit_dialog {
+            root = root.child(dialog.clone());
+        }
+        if let Some(dialog) = &self.settings_dialog {
+            root = root.child(dialog.clone());
+        }
+        if let Some(dialog) = &self.import_export_dialog {
             root = root.child(dialog.clone());
         }
 
@@ -434,8 +419,9 @@ impl MainWindow {
                         ContextMenuAction::NewSession => this.open_edit_dialog(None, cx),
                         ContextMenuAction::EditSession(sid) => this.edit_session(sid, cx),
                         ContextMenuAction::DeleteSession(sid) => this.delete_session(sid, cx),
-                        ContextMenuAction::ExportAll => this.export_sessions(cx),
-                        ContextMenuAction::ImportFile => this.import_sessions(cx),
+                        ContextMenuAction::OpenExportDialog => this.open_import_export(true, cx),
+                        ContextMenuAction::OpenImportDialog => this.open_import_export(false, cx),
+                        ContextMenuAction::OpenSettingsDialog => this.open_settings(cx),
                     }
                     cx.notify();
                 },

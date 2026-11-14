@@ -62,6 +62,11 @@ pub enum AppEvent {
     AppThemeChanged { name: String },
     StatusBarMessage { text: String, duration_ms: u64 },
 
+    // ---- 设置 / 导入导出 Modal 控制（View → MainWindow） ----
+    SettingsCloseRequested { saved: bool },
+    SettingsOpenImportExport { export: bool },
+    ImportExportCloseRequested,
+
     // ---- SessionTreeView 内部驱动（View → EventBus → View 改状态 → 重绘） ----
     SessionTreeSelectRequested { session_id: Option<Uuid> },
     SessionTreeFolderToggle { folder: String },

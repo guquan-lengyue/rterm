@@ -55,6 +55,22 @@ pub struct ImportReport {
     pub renamed: usize,
 }
 
+/// 导入预览：单个会话将要执行的动作。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportPreviewStatus {
+    Added,
+    Updated,
+    Skipped,
+    Renamed,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImportPreviewItem {
+    pub id: Uuid,
+    pub name: String,
+    pub status: ImportPreviewStatus,
+}
+
 // ============================================================================
 // 导出
 // ============================================================================
@@ -132,22 +148,52 @@ struct ImportTag {
     sessions: Vec<Session>,
 }
 
+/// 读取导出 JSON 并按冲突策略预演每条会话的处理结果（不修改任何数据）。
+pub fn preview_import(
+    json: &str,
+    existing: &[Session],
+    policy: ConflictPolicy,
+    passphrase: Option<&str>,
+) -> Result<Vec<ImportPreviewItem>> {
+    let import = parse_and_decrypt(json, passphrase)?;
+
+    Ok(import
+        .into_iter()
+        .map(|s| {
+            let status = if existing.iter().any(|e| e.id == s.id) {
+                match policy {
+                    ConflictPolicy::Overwrite => ImportPreviewStatus::Updated,
+                    ConflictPolicy::Skip => ImportPreviewStatus::Skipped,
+                    ConflictPolicy::Rename => ImportPreviewStatus::Renamed,
+                }
+            } else {
+                ImportPreviewStatus::Added
+            };
+            ImportPreviewItem { id: s.id, name: s.display_label(), status }
+        })
+        .collect())
+}
+
+/// 解析导出 JSON 并解密所有会话。导入 / 预览共用。
+fn parse_and_decrypt(json: &str, passphrase: Option<&str>) -> Result<Vec<Session>> {
+    let wrapper: ImportWrapper = serde_json::from_str(json).context("解析导出 JSON 失败")?;
+    let tag = wrapper.tag.context("缺少 rterm-export 标记")?;
+
+    let decrypted: Result<Vec<_>> = if let Some(pw) = passphrase {
+        tag.sessions.iter().map(|s| crypto_bridge::decrypt_session_aesgcm(s, pw)).collect()
+    } else {
+        tag.sessions.iter().map(|s| crypto_bridge::decrypt_session_dpapi(s)).collect()
+    };
+    decrypted.context("导入解密失败 — 可能需要口令")
+}
+
 pub fn import_json(
     json: &str,
     existing: &[Session],
     policy: ConflictPolicy,
     passphrase: Option<&str>,
 ) -> Result<(Vec<Session>, ImportReport)> {
-    let wrapper: ImportWrapper = serde_json::from_str(json).context("解析导出 JSON 失败")?;
-    let tag = wrapper.tag.context("缺少 rterm-export 标记")?;
-
-    // 解密
-    let decrypted: Result<Vec<_>> = if let Some(pw) = passphrase {
-        tag.sessions.iter().map(|s| crypto_bridge::decrypt_session_aesgcm(s, pw)).collect()
-    } else {
-        tag.sessions.iter().map(|s| crypto_bridge::decrypt_session_dpapi(s)).collect()
-    };
-    let decrypted = decrypted.context("导入解密失败 — 可能需要口令")?;
+    let decrypted = parse_and_decrypt(json, passphrase)?;
 
     let mut report = ImportReport::default();
     let mut merged: Vec<Session> = existing.to_vec();
