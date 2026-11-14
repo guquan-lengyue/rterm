@@ -11,7 +11,7 @@
 //! cx.subscribe(&event_bus, |app, ev| { ... });
 //! ```
 
-use gpui::EventEmitter;
+use gpui::{EventEmitter, IntoElement};
 use uuid::Uuid;
 
 /// 跨模块事件。按领域分组：会话 / 终端 / SFTP / 监控 / 传输 / UI。
@@ -61,6 +61,12 @@ pub enum AppEvent {
     AppSettingsChanged,
     AppThemeChanged { name: String },
     StatusBarMessage { text: String, duration_ms: u64 },
+
+    // ---- SessionTreeView 内部驱动（View → EventBus → View 改状态 → 重绘） ----
+    SessionTreeSelectRequested { session_id: Option<Uuid> },
+    SessionTreeFolderToggle { folder: String },
+    SessionTreeOpenEditDialog { session_id: Option<Uuid> }, // None = 新建
+    SessionTreeOpenContextMenuAt { session_id: Option<Uuid>, x: i32, y: i32 },
 }
 
 #[derive(Clone, Debug)]
@@ -71,8 +77,21 @@ pub enum CwdSource {
 }
 
 /// 全局事件总线。空 struct，仅用来实现 EventEmitter<AppEvent>。
-/// 持有在 AppState 里，跨 Service / View 共享。
+/// **在 gpui 0.3 中 EventEmitter 只能挂在 Entity 上**，所以 EventBus
+/// 不会直接被 subscribe/emit —— 真正的宿主是 views::event_bus::EventBusHost。
 pub struct EventBus;
 
 // EventEmitter 是 marker trait —— 只需要这一行，gpui 内部 SubscriberSet 自动管理
 impl EventEmitter<AppEvent> for EventBus {}
+
+/// EventBus 的 Entity 宿主。必须有 Render（返回空）才能成为 Entity。
+/// 全局只建一个，存到 AppState.event_bus_host。
+pub struct EventBusHost;
+
+impl gpui::Render for EventBusHost {
+    fn render(&mut self, _window: &mut gpui::Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        gpui::div()
+    }
+}
+
+impl gpui::EventEmitter<AppEvent> for EventBusHost {}

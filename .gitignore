@@ -71,6 +71,18 @@ secrets.yaml
 *.patch
 
 # ==============================
+# UI testing artifacts (NEVER commit screenshots)
+# ==============================
+*.png
+*.bmp
+*.jpg
+*.jpeg
+*.gif
+.webp
+.screenshots/
+shots/
+
+# ==============================
 # Node.js (temp test artifacts)
 # ==============================
 node_modules/

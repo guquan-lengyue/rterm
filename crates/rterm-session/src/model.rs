@@ -117,6 +117,9 @@ fn default_port() -> u16 { 22 }
 fn default_keepalive() -> u32 { 30 }
 fn default_timeout() -> u32 { 10 }
 
+/// 供外部 crate 获取当前时间（避免每个 crate 都直接依赖 chrono）
+pub fn default_now() -> DateTime<Utc> { Utc::now() }
+
 impl Default for Session {
     fn default() -> Self {
         Self {

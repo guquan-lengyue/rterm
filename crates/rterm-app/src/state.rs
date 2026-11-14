@@ -4,8 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use gpui::Entity;
 
-use crate::event::EventBus;
+use crate::event::EventBusHost;
 
 // ---------------------------------------------------------------------------
 // Settings（持久化 JSON，Sprint 3 完成持久化；当前用 Default 占位）
@@ -116,7 +117,7 @@ impl Default for TabRegistry {
 // ---------------------------------------------------------------------------
 
 pub struct AppState {
-    pub event_bus: EventBus,
+    pub event_bus_host: Entity<EventBusHost>,
     pub settings: Settings,
     pub session_store: rterm_session::SessionStore,
     pub tab_registry: TabRegistry,
@@ -126,16 +127,13 @@ pub struct AppState {
 impl gpui::Global for AppState {}
 
 impl AppState {
-    pub fn new() -> Self {
+    /// AppState::new 需要 EventBusHost Entity —— 在 main.rs 里 app.new() 之后构造
+    pub fn new(event_bus_host: Entity<EventBusHost>, session_store: rterm_session::SessionStore) -> Self {
         Self {
-            event_bus: EventBus,
+            event_bus_host,
             settings: Settings::default(),
-            session_store: rterm_session::SessionStore::new(),
+            session_store,
             tab_registry: TabRegistry::new(),
         }
     }
-}
-
-impl Default for AppState {
-    fn default() -> Self { Self::new() }
 }

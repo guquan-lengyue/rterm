@@ -1,0 +1,414 @@
+//! TextInput — 简化版可复用单行文本输入框
+//!
+//! 参考 bezel-gpui 0.3 examples/input.rs 的 EntityInputHandler 模式，
+//! 但只实现最核心的编辑能力：
+//! - 字符输入（IME 通过 handle_input 自动处理）
+//! - Backspace / Delete
+//! - 密码模式（显示 ●●●）
+//! - 焦点高亮
+//!
+//! 不支持：光标移动、选择、复制粘贴（后续迭代）
+
+use std::ops::Range;
+
+use gpui::prelude::*;
+use gpui::{
+    App, Bounds, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    FocusHandle, Focusable, GlobalElementId, IntoElement, LayoutId, PaintQuad, Pixels,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    div, fill, hsla, point, px, relative, rgb, rgba, size,
+};
+
+// ---------------------------------------------------------------------------
+// TextInput View
+// ---------------------------------------------------------------------------
+
+pub struct TextInput {
+    focus_handle: FocusHandle,
+    pub content: SharedString,
+    pub placeholder: SharedString,
+    pub selected_range: Range<usize>,
+    selection_reversed: bool,
+    marked_range: Option<Range<usize>>,
+    pub password_mode: bool,
+    last_layout: Option<ShapedLine>,
+    last_bounds: Option<Bounds<Pixels>>,
+}
+
+impl TextInput {
+    pub fn new(cx: &mut App) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            content: SharedString::default(),
+            placeholder: SharedString::from(""),
+            selected_range: 0..0,
+            selection_reversed: false,
+            marked_range: None,
+            password_mode: false,
+            last_layout: None,
+            last_bounds: None,
+        }
+    }
+
+    pub fn with_content(mut self, text: impl Into<SharedString>) -> Self {
+        self.content = text.into();
+        self
+    }
+
+    pub fn with_placeholder(mut self, text: impl Into<SharedString>) -> Self {
+        self.placeholder = text.into();
+        self
+    }
+
+    pub fn password(mut self) -> Self {
+        self.password_mode = true;
+        self
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.content = SharedString::default();
+        self.selected_range = 0..0;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    pub fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
+    fn display_content(&self) -> SharedString {
+        if self.password_mode && !self.content.is_empty() {
+            SharedString::from("●".repeat(self.content.len()))
+        } else {
+            self.content.clone()
+        }
+    }
+
+    fn cursor_offset(&self) -> usize {
+        if self.selection_reversed {
+            self.selected_range.start
+        } else {
+            self.selected_range.end
+        }
+    }
+
+    fn offset_to_utf16(&self, offset: usize) -> usize {
+        let mut utf16 = 0;
+        let mut utf8 = 0;
+        for ch in self.content.chars() {
+            if utf8 >= offset {
+                break;
+            }
+            utf8 += ch.len_utf8();
+            utf16 += ch.len_utf16();
+        }
+        utf16
+    }
+
+    fn offset_from_utf16(&self, offset: usize) -> usize {
+        let mut utf8 = 0;
+        let mut utf16 = 0;
+        for ch in self.content.chars() {
+            if utf16 >= offset {
+                break;
+            }
+            utf16 += ch.len_utf16();
+            utf8 += ch.len_utf8();
+        }
+        utf8
+    }
+}
+
+impl EntityInputHandler for TextInput {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let start = self.offset_from_utf16(range_utf16.start);
+        let end = self.offset_from_utf16(range_utf16.end);
+        actual_range.replace(self.offset_to_utf16(start)..self.offset_to_utf16(end));
+        Some(self.content[start..end].to_string())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: self.offset_to_utf16(self.selected_range.start)
+                ..self.offset_to_utf16(self.selected_range.end),
+            reversed: self.selection_reversed,
+        })
+    }
+
+    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked_range
+            .as_ref()
+            .map(|r| self.offset_to_utf16(r.start)..self.offset_to_utf16(r.end))
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.marked_range = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|r| self.offset_from_utf16(r.start)..self.offset_from_utf16(r.end))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone());
+
+        self.content =
+            SharedString::from(format!("{}{}{}", &self.content[..range.start], new_text, &self.content[range.end..]));
+        let new_end = range.start + new_text.len();
+        self.selected_range = new_end..new_end;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range_utf16: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|r| self.offset_from_utf16(r.start)..self.offset_from_utf16(r.end))
+            .or(self.marked_range.clone())
+            .unwrap_or(self.selected_range.clone());
+
+        self.content =
+            SharedString::from(format!("{}{}{}", &self.content[..range.start], new_text, &self.content[range.end..]));
+        if !new_text.is_empty() {
+            self.marked_range = Some(range.start..range.start + new_text.len());
+        } else {
+            self.marked_range = None;
+        }
+        let cursor = range.start + new_text.len();
+        self.selected_range = cursor..cursor;
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let line = self.last_layout.as_ref()?;
+        let start = self.offset_from_utf16(range_utf16.start);
+        let end = self.offset_from_utf16(range_utf16.end);
+        Some(Bounds::from_corners(
+            point(bounds.left() + line.x_for_index(start), bounds.top()),
+            point(bounds.left() + line.x_for_index(end), bounds.bottom()),
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let line_point = self.last_bounds?.localize(&point)?;
+        let line = self.last_layout.as_ref()?;
+        let utf8_index = line.index_for_x(line_point.x)?;
+        Some(self.offset_to_utf16(utf8_index))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TextElement — 自定义绘制 Element（处理 layout + paint）
+// ---------------------------------------------------------------------------
+
+struct PrepaintState {
+    line: Option<ShapedLine>,
+    cursor: Option<PaintQuad>,
+    selection: Option<PaintQuad>,
+}
+
+struct TextElement {
+    input: Entity<TextInput>,
+}
+
+impl IntoElement for TextElement {
+    type Element = Self;
+    fn into_element(self) -> Self { self }
+}
+
+impl Element for TextElement {
+    type RequestLayoutState = ();
+    type PrepaintState = PrepaintState;
+
+    fn id(&self) -> Option<ElementId> { None }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = window.line_height().into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let input = self.input.read(cx);
+        let content = input.display_content();
+        let selected_range = input.selected_range.clone();
+        let cursor = input.cursor_offset();
+        let style = window.text_style();
+
+        let (display_text, text_color) = if content.is_empty() {
+            (input.placeholder.clone(), hsla(0., 0., 0., 0.3))
+        } else {
+            (content, style.color)
+        };
+
+        let run = TextRun {
+            len: display_text.len(),
+            font: style.font(),
+            color: text_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+            if !marked_range.is_empty() {
+                vec![
+                    TextRun { len: marked_range.start, ..run.clone() },
+                    TextRun {
+                        len: marked_range.end - marked_range.start,
+                        underline: Some(UnderlineStyle {
+                            color: Some(run.color),
+                            thickness: px(1.0),
+                            wavy: false,
+                        }),
+                        ..run.clone()
+                    },
+                    TextRun { len: display_text.len() - marked_range.end, ..run },
+                ].into_iter().filter(|r| r.len > 0).collect()
+            } else {
+                vec![run]
+            }
+        } else {
+            vec![run]
+        };
+
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let line = window.text_system().shape_line(display_text, font_size, &runs, None);
+        let cursor_pos = line.x_for_index(cursor);
+
+        let (selection, cursor) = if selected_range.is_empty() {
+            (None, Some(fill(
+                Bounds::new(
+                    point(bounds.left() + cursor_pos, bounds.top()),
+                    size(px(2.), bounds.bottom() - bounds.top()),
+                ),
+                gpui::blue(),
+            )))
+        } else {
+            (Some(fill(
+                Bounds::from_corners(
+                    point(bounds.left() + line.x_for_index(selected_range.start), bounds.top()),
+                    point(bounds.left() + line.x_for_index(selected_range.end), bounds.bottom()),
+                ),
+                rgba(0x3311ff30),
+            )), None)
+        };
+
+        PrepaintState { line: Some(line), cursor, selection }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let focus_handle = self.input.read(cx).focus_handle.clone();
+        window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
+        if let Some(sel) = prepaint.selection.take() {
+            window.paint_quad(sel);
+        }
+        let line = prepaint.line.take().unwrap();
+        let _ = line.paint(bounds.origin, window.line_height(), gpui::TextAlign::Left, None, window, cx);
+
+        if focus_handle.is_focused(window) {
+            if let Some(cur) = prepaint.cursor.take() {
+                window.paint_quad(cur);
+            }
+        }
+
+        self.input.update(cx, |input, _cx| {
+            input.last_layout = Some(line);
+            input.last_bounds = Some(bounds);
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Render impl
+// ---------------------------------------------------------------------------
+
+impl Focusable for TextInput {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for TextInput {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_focused = self.focus_handle.is_focused(window);
+        let border_color = if is_focused { rgb(0x007acc) } else { rgb(0x45475a) };
+
+        div()
+            .w_full()
+            .h(px(32.))
+            .id(format!("rterm-ti-{}", cx.entity_id()))
+            .track_focus(&self.focus_handle)
+            .cursor(CursorStyle::IBeam)
+            .border_1()
+            .border_color(border_color)
+            .bg(rgb(0x1e1e2e))
+            .rounded_md()
+            .child(
+                div()
+                    .w_full()
+                    .h(px(30.))
+                    .px_2()
+                    .child(TextElement { input: cx.entity() }),
+            )
+    }
+}

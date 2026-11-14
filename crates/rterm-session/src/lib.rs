@@ -9,6 +9,6 @@ pub mod crypto_bridge;
 pub mod export;
 pub mod openssh;
 
-pub use model::{AuthMethod, EncryptedString, Session};
+pub use model::{AuthMethod, EncryptedString, Session, default_now};
 pub use store::{SessionStore, UpsertResult};
 pub use export::{ConflictPolicy, ExportScope, ImportReport};

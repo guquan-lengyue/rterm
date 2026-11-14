@@ -5,4 +5,6 @@
 
 pub mod main_window;
 pub mod session_tree;
+pub mod session_dialog;
 pub mod status_bar;
+pub mod text_input;
