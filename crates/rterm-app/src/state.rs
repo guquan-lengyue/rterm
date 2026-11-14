@@ -4,7 +4,7 @@
 //! Theme 系统见 `crate::theme`。
 
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use gpui::Entity;
 
@@ -122,7 +122,7 @@ impl Default for TabRegistry {
 pub struct AppState {
     pub event_bus_host: Entity<EventBusHost>,
     pub settings: Settings,
-    pub session_store: rterm_session::SessionStore,
+    pub session_store: Arc<Mutex<rterm_session::SessionStore>>,
     pub tab_registry: TabRegistry,
     /// 当前主题（Arc<dyn Theme> 方便 clone 传递）
     pub theme: Arc<dyn Theme>,
@@ -135,7 +135,7 @@ impl AppState {
     /// AppState::new 需要 EventBusHost Entity —— 在 main.rs 里 app.new() 之后构造
     pub fn new(
         event_bus_host: Entity<EventBusHost>,
-        session_store: rterm_session::SessionStore,
+        session_store: Arc<Mutex<rterm_session::SessionStore>>,
         theme: Arc<dyn Theme>,
     ) -> Self {
         Self {

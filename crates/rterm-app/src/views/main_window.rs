@@ -15,7 +15,10 @@
 //! ```
 
 use gpui::prelude::*;
-use gpui::{div, px, Entity, IntoElement, Render, Window};
+use gpui::{
+    div, px, ClickEvent, Entity, IntoElement, MouseDownEvent, Render, Window,
+};
+use uuid::Uuid;
 
 use crate::event::AppEvent;
 use crate::state::AppState;
@@ -25,10 +28,30 @@ use super::session_dialog::SessionEditDialog;
 use super::session_tree::SessionTreeView;
 use super::status_bar::StatusBar;
 
+// ---------------------------------------------------------------------------
+// 右键菜单
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct ContextMenuState {
+    /// None = 空白处/文件夹右键（只提供「新建会话」）
+    pub session_id: Option<Uuid>,
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ContextMenuAction {
+    NewSession,
+    EditSession(Uuid),
+    DeleteSession(Uuid),
+}
+
 pub struct MainWindow {
     session_tree: Entity<SessionTreeView>,
     status_bar: Entity<StatusBar>,
     pub edit_dialog: Option<Entity<SessionEditDialog>>,
+    context_menu: Option<ContextMenuState>,
 }
 
 impl MainWindow {
@@ -37,12 +60,14 @@ impl MainWindow {
             session_tree,
             status_bar,
             edit_dialog: None,
+            context_menu: None,
         }
     }
 
     fn open_edit_dialog(&mut self, session: Option<&rterm_session::Session>, cx: &mut Context<Self>) {
         let dialog = cx.new(|cx| SessionEditDialog::from_session(cx, session));
         self.edit_dialog = Some(dialog);
+        self.context_menu = None;
         cx.notify();
     }
 
@@ -50,10 +75,34 @@ impl MainWindow {
         self.edit_dialog = None;
         cx.notify();
     }
+
+    fn edit_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let session = {
+            let state = cx.global::<AppState>();
+            state.session_store.lock().unwrap().get(session_id).cloned()
+        };
+        if let Some(s) = session {
+            self.open_edit_dialog(Some(&s), cx);
+        }
+    }
+
+    fn delete_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        {
+            let state = cx.global_mut::<AppState>();
+            state.session_store.lock().unwrap().delete(session_id);
+        }
+        self.context_menu = None;
+        let host = cx.global::<AppState>().event_bus_host.clone();
+        cx.update_entity(&host, |_host, cx: &mut Context<crate::event::EventBusHost>| {
+            cx.emit(AppEvent::SessionDeleted { session_id });
+        });
+        log::info!("Session deleted: {}", session_id);
+        cx.notify();
+    }
 }
 
 impl Render for MainWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
         let host = cx.global::<AppState>().event_bus_host.clone();
@@ -62,18 +111,20 @@ impl Render for MainWindow {
                 AppEvent::SessionTreeOpenEditDialog { session_id } => {
                     match session_id {
                         Some(sid) => {
-                            let session = {
-                                let state = cx.global::<AppState>();
-                                state.session_store.get(*sid).cloned()
-                            };
-                            if let Some(s) = session {
-                                this.open_edit_dialog(Some(&s), cx);
-                            }
+                            this.edit_session(*sid, cx);
                         }
                         None => {
                             this.close_edit_dialog(cx);
                         }
                     }
+                }
+                AppEvent::SessionTreeOpenContextMenuAt { session_id, x, y } => {
+                    this.context_menu = Some(ContextMenuState {
+                        session_id: *session_id,
+                        x: *x,
+                        y: *y,
+                    });
+                    cx.notify();
                 }
                 _ => {}
             }
@@ -166,10 +217,107 @@ impl Render for MainWindow {
             // 底部 StatusBar
             .child(self.status_bar.clone());
 
+        if let Some(menu_state) = self.context_menu {
+            let viewport = window.viewport_size();
+            let menu_w = 150.0_f32;
+            let menu_h = if menu_state.session_id.is_some() { 98.0_f32 } else { 38.0_f32 };
+            let x = (menu_state.x as f32).min(f32::from(viewport.width) - menu_w).max(0.);
+            let y = (menu_state.y as f32).min(f32::from(viewport.height) - menu_h).max(0.);
+
+            let mut menu = div()
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .w(px(menu_w))
+                .py_1()
+                .bg(t.card_bg())
+                .border_1()
+                .border_color(t.border_medium())
+                .rounded_md()
+                .flex()
+                .flex_col()
+                .id("rterm-context-menu")
+                .on_mouse_down_out(cx.listener(
+                    |this: &mut Self, _ev: &MouseDownEvent, _w, cx| {
+                        this.context_menu = None;
+                        cx.notify();
+                    },
+                ))
+                .child(self.render_menu_item(
+                    "rterm-ctx-new",
+                    "＋ 新建会话",
+                    false,
+                    ContextMenuAction::NewSession,
+                    cx,
+                ));
+
+            if let Some(sid) = menu_state.session_id {
+                menu = menu
+                    .child(self.render_menu_item(
+                        "rterm-ctx-edit",
+                        "✏ 编辑会话",
+                        false,
+                        ContextMenuAction::EditSession(sid),
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
+                        "rterm-ctx-delete",
+                        "🗑 删除会话",
+                        true,
+                        ContextMenuAction::DeleteSession(sid),
+                        cx,
+                    ));
+            }
+
+            root = root.child(menu);
+        }
+
         if let Some(dialog) = &self.edit_dialog {
             root = root.child(dialog.clone());
         }
 
         root
+    }
+}
+
+impl MainWindow {
+    fn render_menu_item(
+        &self,
+        id: &'static str,
+        label: &str,
+        danger: bool,
+        action: ContextMenuAction,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = theme(cx);
+        let label = label.to_string();
+        let color = if danger { t.danger() } else { t.text_on_card_bg() };
+        let hover_bg = t.row_hover_bg();
+
+        div()
+            .w_full()
+            .h(px(30.))
+            .px_3()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(12.))
+            .text_color(color)
+            .cursor_pointer()
+            .id(id)
+            .hover(move |s| s.bg(hover_bg))
+            .on_click(cx.listener(
+                move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                    this.context_menu = None;
+                    match action {
+                        ContextMenuAction::NewSession => this.open_edit_dialog(None, cx),
+                        ContextMenuAction::EditSession(sid) => this.edit_session(sid, cx),
+                        ContextMenuAction::DeleteSession(sid) => this.delete_session(sid, cx),
+                    }
+                    cx.notify();
+                },
+            ))
+            .child(label)
+            .into_any_element()
     }
 }

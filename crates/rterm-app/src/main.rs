@@ -20,9 +20,7 @@ use views::main_window::MainWindow;
 use views::session_tree::SessionTreeView;
 use views::status_bar::StatusBar;
 
-// ---------- 进程内静态：退出保存 store ----------
-use std::sync::{Mutex, OnceLock};
-static STORE_FOR_EXIT: OnceLock<Mutex<Option<rterm_session::SessionStore>>> = OnceLock::new();
+use std::sync::{Arc, Mutex};
 
 // ---------- 启动路径 ----------
 fn sessions_path() -> std::path::PathBuf {
@@ -37,16 +35,28 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("rterm-app starting (Sprint 3 — SessionTree + 持久化)");
 
-    // 1. 启动加载 store（DPAPI 解密）
-    let (store, path) = load_store();
-    STORE_FOR_EXIT.set(Mutex::new(Some(store.clone()))).ok();
+    // 1. 启动加载 store
+    let store = load_store();
+    let path = sessions_path();
 
-    // 2. gpui run —— 先 new EventBusHost Entity，再 set_global AppState
+    // 用 Arc<Mutex<>> 包装，AppState 和退出保存共享同一份。
+    // SessionEditDialog.save() 修改时写入 AppState.session_store，
+    // 退出时 save_store() 从同一个 Arc 读出——两边永远一致。
+    let shared_store: Arc<Mutex<rterm_session::SessionStore>> =
+        Arc::new(Mutex::new(store));
+
+    let shared_store_for_app = shared_store.clone();
+
+    // 2. gpui run
     gpui_platform::application().run(move |app: &mut App| {
         let event_bus_host = app.new(|_cx| event::EventBusHost);
+
+        // AppState.session_store 需要 SessionStore（不是 MutexGuard），
+        // 所以这里 clone 一份 Arc。SessionEditDialog 通过 global_mut 写，
+        // 而退出时 save_store 从同一份 Arc 读。
         let app_state = AppState::new(
             event_bus_host,
-            store,
+            shared_store_for_app,
             std::sync::Arc::new(theme::default_theme()),
         );
         app.set_global(app_state);
@@ -58,13 +68,13 @@ fn main() {
         }).unwrap();
     });
 
-    // 3. 退出保存（DPAPI 加密 + 原子写）
-    save_store(&path);
+    // 3. 退出保存 —— 从共享 Arc 读，一定是最新状态
+    save_store(&path, &shared_store);
 }
 
 // ---------- 辅助 ----------
 
-fn load_store() -> (rterm_session::SessionStore, std::path::PathBuf) {
+fn load_store() -> rterm_session::SessionStore {
     let path = sessions_path();
     log::info!("Loading sessions from: {}", path.display());
 
@@ -77,22 +87,15 @@ fn load_store() -> (rterm_session::SessionStore, std::path::PathBuf) {
     });
 
     log::info!("Loaded {} sessions", store.count());
-    (store, path)
+    store
 }
 
-fn save_store(path: &std::path::Path) {
-    let Some(mutex) = STORE_FOR_EXIT.get() else {
-        log::warn!("Exit store never set");
-        return;
-    };
-    let mut store = match mutex.lock() {
-        Ok(mut g) => match g.take() {
-            Some(s) => s,
-            None => {
-                log::warn!("Exit store already consumed");
-                return;
-            }
-        },
+fn save_store(
+    path: &std::path::Path,
+    shared: &Arc<Mutex<rterm_session::SessionStore>>,
+) {
+    let mut store = match shared.lock() {
+        Ok(g) => g.clone(),
         Err(e) => {
             log::error!("Exit store lock poisoned: {e}");
             return;

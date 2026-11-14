@@ -14,9 +14,9 @@ use std::ops::Range;
 use gpui::prelude::*;
 use gpui::{
     App, Bounds, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    FocusHandle, Focusable, GlobalElementId, IntoElement, LayoutId, PaintQuad, Pixels,
+    FocusHandle, Focusable, GlobalElementId, Hsla, IntoElement, LayoutId, PaintQuad, Pixels,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
-    div, fill, hsla, point, px, relative, rgb, rgba, size,
+    div, fill, point, px, relative, rgba, size,
 };
 
 // ---------------------------------------------------------------------------
@@ -286,16 +286,23 @@ impl Element for TextElement {
         let cursor = input.cursor_offset();
         let style = window.text_style();
 
-        let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0., 0.3))
+        // 从 AppState 拿主题色（TextInput 是 gpui::Global，prepaint 用 &mut App）
+        let (text_color, placeholder_color, cursor_color) = {
+            let state = cx.global::<crate::state::AppState>();
+            let t = state.t();
+            (t.text_on_card_bg(), t.text_placeholder(), t.primary())
+        };
+
+        let (display_text, color) = if content.is_empty() {
+            (input.placeholder.clone(), placeholder_color)
         } else {
-            (content, style.color)
+            (content, text_color)
         };
 
         let run = TextRun {
             len: display_text.len(),
             font: style.font(),
-            color: text_color,
+            color: color.into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -326,13 +333,15 @@ impl Element for TextElement {
         let line = window.text_system().shape_line(display_text, font_size, &runs, None);
         let cursor_pos = line.x_for_index(cursor);
 
+        let cursor_hsla: Hsla = cursor_color.into();
+
         let (selection, cursor) = if selected_range.is_empty() {
             (None, Some(fill(
                 Bounds::new(
                     point(bounds.left() + cursor_pos, bounds.top()),
                     size(px(2.), bounds.bottom() - bounds.top()),
                 ),
-                gpui::blue(),
+                cursor_hsla,
             )))
         } else {
             (Some(fill(
@@ -391,7 +400,14 @@ impl Focusable for TextInput {
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_focused = self.focus_handle.is_focused(window);
-        let border_color = if is_focused { rgb(0x007acc) } else { rgb(0x45475a) };
+
+        // 主题色从 AppState 拿
+        let (border_idle, border_focused, input_bg) = {
+            let state = cx.global::<crate::state::AppState>();
+            let t = state.t();
+            (t.border_input_idle(), t.border_input_focused(), t.input_bg())
+        };
+        let border_color = if is_focused { border_focused } else { border_idle };
 
         div()
             .w_full()
@@ -401,7 +417,7 @@ impl Render for TextInput {
             .cursor(CursorStyle::IBeam)
             .border_1()
             .border_color(border_color)
-            .bg(rgb(0x1e1e2e))
+            .bg(input_bg)
             .rounded_md()
             .child(
                 div()

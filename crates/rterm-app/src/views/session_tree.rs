@@ -4,7 +4,7 @@
 //! 所有文字居中（`.items_center()`）。
 
 use gpui::*;
-use gpui::{div, px, ClickEvent, IntoElement, Render, Window};
+use gpui::{div, px, ClickEvent, IntoElement, MouseButton, MouseDownEvent, Render, Window};
 
 use crate::event::{AppEvent, EventBusHost};
 use crate::state::AppState;
@@ -101,7 +101,7 @@ impl Render for SessionTreeView {
         }).detach();
 
         let state = cx.global::<AppState>();
-        let sessions = state.session_store.list().to_vec();
+        let sessions = state.session_store.lock().unwrap().list().to_vec();
         let sessions_refs: Vec<&rterm_session::Session> = sessions.iter().collect();
         let tree = TreeNode::build(&sessions_refs);
 
@@ -162,6 +162,19 @@ impl SessionTreeView {
                     .text_color(t.text_on_sidebar_bg())
                     .id(format!("folder-{}", name))
                     .hover(|s| s.bg(t.row_hover_bg()))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this: &mut Self, ev: &MouseDownEvent, _w, cx| {
+                            this.emit_event(
+                                cx,
+                                AppEvent::SessionTreeOpenContextMenuAt {
+                                    session_id: None,
+                                    x: ev.position.x.to_f64() as i32,
+                                    y: ev.position.y.to_f64() as i32,
+                                },
+                            );
+                        }),
+                    )
                     .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
                         let f = name_clone.clone();
                         if this.expanded.contains(&f) {
@@ -203,13 +216,36 @@ impl SessionTreeView {
                     })
                     .id(format!("session-{}", id_copy))
                     .hover(|s| s.bg(t.row_hover_bg()))
-                    .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this: &mut Self, ev: &MouseDownEvent, _w, cx| {
+                            this.selected = Some(id_copy);
+                            cx.notify();
+                            this.emit_event(
+                                cx,
+                                AppEvent::SessionTreeOpenContextMenuAt {
+                                    session_id: Some(id_copy),
+                                    x: ev.position.x.to_f64() as i32,
+                                    y: ev.position.y.to_f64() as i32,
+                                },
+                            );
+                        }),
+                    )
+                    .on_click(cx.listener(move |this: &mut Self, ev: &ClickEvent, _w, cx| {
                         let sid = id_copy;
+                        let click_count = match ev {
+                            ClickEvent::Mouse(m) => m.down.click_count,
+                            ClickEvent::Touch(t) => t.tap_count,
+                            ClickEvent::Keyboard(_) => 1,
+                        };
                         this.selected = Some(sid);
                         cx.notify();
                         this.emit_event(cx, AppEvent::SessionTreeSelectRequested { session_id: Some(sid) });
-                        this.emit_event(cx, AppEvent::SessionConnectRequested { session_id: sid });
-                        log::info!("SessionTree selected {}", sid);
+                        // 双击才发起连接，单击仅选中，避免误触
+                        if click_count >= 2 {
+                            log::info!("SessionTree double-click connect {}", sid);
+                            this.emit_event(cx, AppEvent::SessionConnectRequested { session_id: sid });
+                        }
                     }))
                     .child(
                         div()

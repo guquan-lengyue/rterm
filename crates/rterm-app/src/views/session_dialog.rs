@@ -183,7 +183,8 @@ impl SessionEditDialog {
 
         let (created_at, last_connected) = {
             let state = cx.global::<AppState>();
-            if let Some(old) = state.session_store.get(session_id) {
+            let store = state.session_store.lock().unwrap();
+            if let Some(old) = store.get(session_id) {
                 (old.created_at, old.last_connected)
             } else {
                 (rterm_session::default_now(), None)
@@ -207,7 +208,8 @@ impl SessionEditDialog {
 
         {
             let state = cx.global_mut::<AppState>();
-            state.session_store.upsert(session);
+            let mut store = state.session_store.lock().unwrap();
+            store.upsert(session);
         }
 
         let host = cx.global::<AppState>().event_bus_host.clone();
@@ -222,7 +224,6 @@ impl SessionEditDialog {
             cx.emit(AppEvent::SessionTreeOpenEditDialog { session_id: None });
         });
 
-        log::info!("Dialog button clicked: is_save=true");
         log::info!("SessionEditDialog saved session {} (new={})", session_id, is_new);
     }
 
@@ -231,7 +232,6 @@ impl SessionEditDialog {
         cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
             cx.emit(AppEvent::SessionTreeOpenEditDialog { session_id: None });
         });
-        log::info!("Dialog button clicked: is_save=false");
     }
 }
 
