@@ -1,15 +1,14 @@
 //! SessionTreeView — 左侧会话树
 //!
-//! Sprint 3 真实实现。核心 EventBus 桥接：
-//! - subscribe：`cx.subscribe(&state.event_bus_host, |this, _host, ev, cx| { ... })`
-//! - emit：`cx.update_entity(&state.event_bus_host, |_host, cx| cx.emit(event))`
-//! - 事件回调：`cx.listener(closure)` 把签名从 App 升级到 View Context
+//! 所有颜色通过 `crate::ui::theme(cx)` 取主题，不硬编码 rgb。
+//! 所有文字居中（`.items_center()`）。
 
 use gpui::*;
-use gpui::{div, px, rgb, ClickEvent, IntoElement, Render, Window};
+use gpui::{div, px, ClickEvent, IntoElement, Render, Window};
 
 use crate::event::{AppEvent, EventBusHost};
 use crate::state::AppState;
+use crate::ui::theme;
 
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
@@ -75,7 +74,6 @@ impl SessionTreeView {
         }
     }
 
-    /// emit 一个 EventBus 事件（在当前 Context 里通过 update_entity 间接触发）
     fn emit_event(&self, cx: &mut Context<Self>, ev: AppEvent) {
         let host = cx.global::<AppState>().event_bus_host.clone();
         cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
@@ -86,7 +84,8 @@ impl SessionTreeView {
 
 impl Render for SessionTreeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 订阅 EventBusHost Entity
+        let t = theme(cx);
+
         let host = cx.global::<AppState>().event_bus_host.clone();
         cx.subscribe(&host, |this: &mut Self, _host_entity, ev, cx| {
             match ev {
@@ -109,17 +108,21 @@ impl Render for SessionTreeView {
         let mut root = div()
             .w(px(240.))
             .size_full()
-            .bg(rgb(0x1e1e2e))
+            .bg(t.sidebar_bg())
             .flex()
             .flex_col();
 
         root = root.child(
             div()
                 .w_full()
+                .h(px(28.))
                 .px_3()
-                .py_2()
-                .bg(rgb(0x181825))
-                .text_color(rgb(0xa6adc8))
+                .bg(t.toolbar_bg())
+                .border_b_1()
+                .border_color(t.border_subtle())
+                .flex()
+                .items_center()
+                .text_color(t.text_subtle())
                 .text_size(px(11.))
                 .child(format!("会话 ({})", sessions.len())),
         );
@@ -141,6 +144,8 @@ impl SessionTreeView {
         indent: u32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let t = theme(cx);
+
         match node {
             TreeNode::Folder { name, children } => {
                 let is_expanded = self.expanded.contains(name);
@@ -151,10 +156,12 @@ impl SessionTreeView {
                     .pl(px(12. * indent as f32))
                     .pr(px(8.))
                     .py_1()
+                    .flex()
+                    .items_center()
                     .text_size(px(12.))
-                    .text_color(rgb(0xa6adc8))
+                    .text_color(t.text_on_sidebar_bg())
                     .id(format!("folder-{}", name))
-                    .hover(|s| s.bg(rgb(0x313244)))
+                    .hover(|s| s.bg(t.row_hover_bg()))
                     .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
                         let f = name_clone.clone();
                         if this.expanded.contains(&f) {
@@ -178,7 +185,7 @@ impl SessionTreeView {
             TreeNode::Session { id, name, host } => {
                 let id_copy = *id;
                 let selected = self.selected == Some(id_copy);
-                let bg = if selected { rgb(0x313244) } else { rgb(0x1e1e2e) };
+                let bg = if selected { t.row_selected_bg() } else { t.sidebar_bg() };
 
                 let row = div()
                     .w_full()
@@ -186,24 +193,34 @@ impl SessionTreeView {
                     .pr(px(8.))
                     .py_1()
                     .bg(bg)
+                    .flex()
+                    .flex_col()
                     .text_size(px(12.))
-                    .text_color(rgb(0xcdd6f4))
+                    .text_color(if selected {
+                        t.text_on_row_selected_bg()
+                    } else {
+                        t.text_on_sidebar_bg()
+                    })
                     .id(format!("session-{}", id_copy))
-                    .hover(|s| s.bg(rgb(0x313244)))
+                    .hover(|s| s.bg(t.row_hover_bg()))
                     .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
                         let sid = id_copy;
                         this.selected = Some(sid);
                         cx.notify();
-                        // emit 两个事件：选中状态 + 连接请求（先 log，S5 接）
                         this.emit_event(cx, AppEvent::SessionTreeSelectRequested { session_id: Some(sid) });
                         this.emit_event(cx, AppEvent::SessionConnectRequested { session_id: sid });
                         log::info!("SessionTree selected {}", sid);
                     }))
-                    .child(format!("🖥️ {}", name))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(format!("🖥️ {}", name)),
+                    )
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(0x6c7086))
+                            .text_color(t.text_subtle())
                             .child(format!("{}:22", host)),
                     );
 

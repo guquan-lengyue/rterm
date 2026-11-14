@@ -7,6 +7,8 @@
 
 pub mod event;
 pub mod state;
+pub mod theme;
+pub mod ui;
 pub mod views;
 
 use gpui::prelude::*;
@@ -42,7 +44,11 @@ fn main() {
     // 2. gpui run —— 先 new EventBusHost Entity，再 set_global AppState
     gpui_platform::application().run(move |app: &mut App| {
         let event_bus_host = app.new(|_cx| event::EventBusHost);
-        let app_state = AppState::new(event_bus_host, store);
+        let app_state = AppState::new(
+            event_bus_host,
+            store,
+            std::sync::Arc::new(theme::default_theme()),
+        );
         app.set_global(app_state);
 
         app.open_window(WindowOptions::default(), |_window, app| {

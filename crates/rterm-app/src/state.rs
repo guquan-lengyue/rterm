@@ -1,12 +1,15 @@
 //! AppState — 应用全局状态 + Settings 默认值 + TabRegistry
 //!
 //! SessionStore 已移到 `rterm_session::SessionStore`（Sprint 2 落地）。
+//! Theme 系统见 `crate::theme`。
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 use gpui::Entity;
 
 use crate::event::EventBusHost;
+use crate::theme::Theme;
 
 // ---------------------------------------------------------------------------
 // Settings（持久化 JSON，Sprint 3 完成持久化；当前用 Default 占位）
@@ -121,6 +124,8 @@ pub struct AppState {
     pub settings: Settings,
     pub session_store: rterm_session::SessionStore,
     pub tab_registry: TabRegistry,
+    /// 当前主题（Arc<dyn Theme> 方便 clone 传递）
+    pub theme: Arc<dyn Theme>,
 }
 
 // AppState 存 gpui::App::set_global，要求实现 Global
@@ -128,12 +133,22 @@ impl gpui::Global for AppState {}
 
 impl AppState {
     /// AppState::new 需要 EventBusHost Entity —— 在 main.rs 里 app.new() 之后构造
-    pub fn new(event_bus_host: Entity<EventBusHost>, session_store: rterm_session::SessionStore) -> Self {
+    pub fn new(
+        event_bus_host: Entity<EventBusHost>,
+        session_store: rterm_session::SessionStore,
+        theme: Arc<dyn Theme>,
+    ) -> Self {
         Self {
             event_bus_host,
             settings: Settings::default(),
             session_store,
             tab_registry: TabRegistry::new(),
+            theme,
         }
+    }
+
+    /// 便捷方法：从 AppState 取主题，避免每个 View 都写 Arc 解引用
+    pub fn t(&self) -> &dyn Theme {
+        self.theme.as_ref()
     }
 }

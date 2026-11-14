@@ -1,15 +1,18 @@
-//! SessionEditDialog — 会话编辑 Modal（简化版）
+//! SessionEditDialog — 会话编辑 Modal
 //!
-//! 三 Tab 表单 + Save/Cancel 按钮。
+//! 所有颜色通过 `crate::ui::theme(cx)` 取主题，不硬编码 rgb。
+//! 所有文字居中。
+//!
 //! 密码/口令字段用 `EncryptedString::new(&plain)` 创建 version=0 明文，
 //! 主程序退出时 crypto_bridge 统一 DPAPI 加密。
 
 use gpui::prelude::*;
-use gpui::{div, px, rgb, Entity, IntoElement, Render, Window};
+use gpui::{div, px, Entity, IntoElement, Render, Window};
 use uuid::Uuid;
 
 use crate::event::{AppEvent, EventBusHost};
 use crate::state::AppState;
+use crate::ui::theme;
 
 use super::text_input::TextInput;
 
@@ -153,7 +156,6 @@ impl SessionEditDialog {
         let folder_val = self.folder_input.read(cx).content.to_string();
         let folder = if folder_val.is_empty() { None } else { Some(folder_val) };
 
-        // EncryptedString::new 创建 version=0 明文，主程序退出时统一 DPAPI 加密
         let auth = match self.auth_type {
             AuthType::Password => {
                 let pw = self.password_input.read(cx).content.to_string();
@@ -179,7 +181,6 @@ impl SessionEditDialog {
 
         let session_id = self.editing_id.unwrap_or_else(Uuid::new_v4);
 
-        // 保留旧 session 的 created_at 和 last_connected
         let (created_at, last_connected) = {
             let state = cx.global::<AppState>();
             if let Some(old) = state.session_store.get(session_id) {
@@ -218,8 +219,10 @@ impl SessionEditDialog {
                 AppEvent::SessionUpdated { session_id }
             };
             cx.emit(ev);
+            cx.emit(AppEvent::SessionTreeOpenEditDialog { session_id: None });
         });
 
+        log::info!("Dialog button clicked: is_save=true");
         log::info!("SessionEditDialog saved session {} (new={})", session_id, is_new);
     }
 
@@ -228,6 +231,7 @@ impl SessionEditDialog {
         cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
             cx.emit(AppEvent::SessionTreeOpenEditDialog { session_id: None });
         });
+        log::info!("Dialog button clicked: is_save=false");
     }
 }
 
@@ -237,52 +241,56 @@ impl SessionEditDialog {
 
 impl Render for SessionEditDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
         let title = if self.editing_id.is_some() { "编辑会话" } else { "新建会话" };
 
         div()
             .size_full()
             .absolute()
             .inset_0()
-            .bg(rgb(0x66000000))
+            .bg(t.modal_overlay())
             .flex()
             .items_center()
             .justify_center()
             .child(
                 div()
                     .w(px(520.))
-                    .bg(rgb(0x1e1e2e))
+                    .bg(t.card_bg())
                     .border_1()
-                    .border_color(rgb(0x45475a))
+                    .border_color(t.border_medium())
                     .rounded_lg()
                     .flex()
                     .flex_col()
                     .child(
+                        // 标题栏
                         div()
                             .w_full()
                             .h(px(44.))
                             .px_4()
                             .flex()
                             .items_center()
-                            .bg(rgb(0x181825))
+                            .bg(t.card_header_bg())
                             .border_b_1()
-                            .border_color(rgb(0x313244))
-                            .text_color(rgb(0xcdd6f4))
+                            .border_color(t.border_subtle())
+                            .text_color(t.text_on_card_header_bg())
                             .text_size(px(14.))
                             .child(title),
                     )
                     .child(
+                        // Tab 栏
                         div()
                             .w_full()
                             .h(px(36.))
                             .flex()
                             .border_b_1()
-                            .border_color(rgb(0x313244))
+                            .border_color(t.border_subtle())
                             .child(self.render_tab_header(DialogTab::Basic, cx))
                             .child(self.render_tab_header(DialogTab::Auth, cx))
                             .child(self.render_tab_header(DialogTab::Advanced, cx)),
                     )
                     .child(self.render_tab_content(cx))
                     .child(
+                        // 底部按钮栏
                         div()
                             .w_full()
                             .h(px(52.))
@@ -292,9 +300,9 @@ impl Render for SessionEditDialog {
                             .items_center()
                             .gap_3()
                             .border_t_1()
-                            .border_color(rgb(0x313244))
-                            .child(self.render_button("取消", rgb(0x313244), cx))
-                            .child(self.render_button("保存", rgb(0x007acc), cx)),
+                            .border_color(t.border_subtle())
+                            .child(self.render_button("取消", false, cx))
+                            .child(self.render_button("保存", true, cx)),
                     ),
             )
     }
@@ -306,10 +314,11 @@ impl SessionEditDialog {
         tab: DialogTab,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let t = theme(cx);
         let is_active = self.active_tab == tab;
-        let bg = if is_active { rgb(0x313244) } else { rgb(0x181825) };
-        let text_color = if is_active { rgb(0xffffff) } else { rgb(0x7f849c) };
-        let border_color = if is_active { rgb(0x007acc) } else { rgb(0x313244) };
+        let bg = if is_active { t.row_selected_bg() } else { t.card_header_bg() };
+        let text_color = if is_active { t.text_on_row_selected_bg() } else { t.text_subtle() };
+        let border_color = if is_active { t.primary() } else { t.border_subtle() };
         let label = tab.label().to_string();
         let id_str = format!("rterm-tab-{:?}", tab.label());
 
@@ -318,13 +327,14 @@ impl SessionEditDialog {
             .px_4()
             .flex()
             .items_center()
+            .justify_center()
             .bg(bg)
             .text_color(text_color)
             .text_size(px(12.))
             .cursor_pointer()
             .border_b_2()
             .border_color(border_color)
-            .hover(|s| s.text_color(rgb(0xffffff)))
+            .hover(|s| s.text_color(t.text_on_card_header_bg()))
             .id(id_str)
             .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
                 this.active_tab = tab;
@@ -345,8 +355,9 @@ impl SessionEditDialog {
     fn render_field(
         label: &str,
         input: Entity<TextInput>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let t = theme(cx);
         let label_owned = label.to_string();
         div()
             .w_full()
@@ -357,7 +368,7 @@ impl SessionEditDialog {
             .child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(0x7f849c))
+                    .text_color(t.text_subtle())
                     .child(label_owned),
             )
             .child(input)
@@ -379,10 +390,14 @@ impl SessionEditDialog {
     }
 
     fn render_auth_tab(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        // Radio buttons
+        let t = theme(cx);
+        let selected_fg = t.primary();
+        let unselected_fg = t.border_medium();
+
         let radio = |label_str: &str, variant: AuthType, selected: bool, cx: &mut Context<Self>| {
             let label_owned = label_str.to_string();
-            let dot_color = if selected { rgb(0x007acc) } else { rgb(0x45475a) };
+            let dot_color = if selected { selected_fg } else { unselected_fg };
+            let label_color = if selected { t.text_on_card_bg() } else { t.text_subtle() };
             let id_str = format!("rterm-auth-{:?}", variant);
             div()
                 .flex()
@@ -406,7 +421,7 @@ impl SessionEditDialog {
                 .child(
                     div()
                         .text_size(px(12.))
-                        .text_color(rgb(0xcdd6f4))
+                        .text_color(label_color)
                         .child(label_owned),
                 )
         };
@@ -419,7 +434,7 @@ impl SessionEditDialog {
             .child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(0x7f849c))
+                    .text_color(t.text_subtle())
                     .mb_2()
                     .child("认证方式"),
             )
@@ -440,7 +455,7 @@ impl SessionEditDialog {
                 container = container.child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(0x7f849c))
+                        .text_color(t.text_subtle())
                         .mt_2()
                         .child("SSH Agent 将从运行时环境枚举密钥"),
                 );
@@ -451,6 +466,7 @@ impl SessionEditDialog {
     }
 
     fn render_advanced_tab(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme(cx);
         let compress_id = "rterm-compress-toggle".to_string();
         div()
             .w_full()
@@ -477,13 +493,13 @@ impl SessionEditDialog {
                             .h(px(14.))
                             .rounded(px(3.))
                             .border_1()
-                            .border_color(rgb(0x45475a))
-                            .bg(if self.compress_enabled { rgb(0x007acc) } else { rgb(0x1e1e2e) }),
+                            .border_color(t.border_input_idle())
+                            .bg(if self.compress_enabled { t.primary() } else { t.input_bg() }),
                     )
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(0xcdd6f4))
+                            .text_color(t.text_on_card_bg())
                             .child("启用压缩"),
                     ),
             )
@@ -493,14 +509,20 @@ impl SessionEditDialog {
     fn render_button(
         &self,
         label: &str,
-        bg: gpui::Rgba,
+        is_primary: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let t = theme(cx);
         let label_owned = label.to_string();
         let id_str = format!("rterm-dialog-btn-{}", label);
-        let is_save = label == "保存";
-        let text_color = rgb(0xffffff);
-        let hover_bg = if is_save { rgb(0x2096e0) } else { rgb(0x45475a) };
+
+        let bg = if is_primary { t.primary() } else { t.secondary_btn_bg() };
+        let hover_bg = if is_primary { t.primary_hover() } else { t.secondary_btn_hover() };
+        let text_color = if is_primary {
+            t.text_on_primary_btn()
+        } else {
+            t.text_on_secondary_btn()
+        };
 
         div()
             .h(px(32.))
@@ -512,8 +534,11 @@ impl SessionEditDialog {
             .cursor_pointer()
             .hover(move |s| s.bg(hover_bg))
             .id(id_str)
+            .flex()
+            .items_center()
+            .justify_center()
             .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                if is_save {
+                if is_primary {
                     this.save(cx);
                 } else {
                     this.cancel(cx);
