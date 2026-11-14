@@ -4,6 +4,59 @@
 
 ---
 
+## Sprint 4 — 设置 + 导入导出
+
+**状态**：✅ COMPLETED | **Commit**：`e7a9574` | **时间**：2026-11-14
+**前置**：S3（SessionTree / SessionEditDialog / 启动退出持久化）
+**后续**：S5（SSH 连接 + 终端核心）
+
+### 交付清单
+
+| # | 任务 | 产出文件 | 验收 |
+|---|------|----------|------|
+| 4.1.1 | SettingsView：左侧 7 Tab + 右侧表单 | `views/settings.rs` | ✅ 每 Tab 内容独立；`Ctrl+,` 打开 |
+| 4.1.2 | SSH 默认值 / SFTP 模式 / 监控 / 高级目录 | `views/settings.rs` | ✅ 保存后写回 `AppState.settings` 并广播事件 |
+| 4.1.3 | 终端外观：主题 / 字体 / 字号 / 光标 / 滚动 + 预览 | `views/settings.rs` + `theme.rs` | ✅ 切 Dracula 预览立刻变紫；字号联动预览 |
+| 4.1.4 | 保存 / 取消 / 恢复默认 | `views/settings.rs` | ✅ 取消还原主题；恢复默认重置全部字段 |
+| 4.1.5 | Settings 持久化 | `state.rs` + `main.rs` | ✅ `%APPDATA%\rterm\settings.json`，重启保留 |
+| 4.2.1 | 导出 Modal：Scope / DPAPI·AES-GCM / rfd 路径 | `views/import_export.rs` | ✅ 全部/文件夹/多选；DPAPI 本机可解，口令文件跨机可用 |
+| 4.2.2 | 导入 Modal：口令 / 冲突策略 / diff 预览 / 报告 | `views/import_export.rs` + `export.rs` | ✅ 错口令显示解密失败；正确口令预览 + 更新 2 条 |
+| 4.2.3 | 入口：设置 Tab + SessionTree 右键菜单 | `main_window.rs` | ✅ 两处入口打开同一个 Modal |
+| — | 主题扩展 + 注册表 | `theme.rs` | ✅ Dracula / One Dark；`all_themes()` / `theme_by_name()` |
+| — | 导入预览 API | `rterm-session/src/export.rs` | ✅ `preview_import` 复用 `parse_and_decrypt` |
+
+### 测试 & 验收
+
+| 项 | 结果 |
+|----|------|
+| `cargo check --workspace` | ✅ 0 error |
+| `cargo test --workspace` | ✅ 35 passed, 0 failed |
+| E2E：终端主题 Dracula → 保存 → 重启 | ✅ 重启后仍是 Dracula |
+| E2E：DPAPI 导出 2 个会话 → 导入 Overwrite | ✅ 数量一致，report 更新 2 |
+| E2E：AES-GCM 口令 "abc" → 错误口令预览 | ✅ 显示「导入解密失败 — 可能需要口令」 |
+| E2E：`Ctrl+,` | ✅ 设置弹窗打开 |
+
+### 踩坑 & 解法（5 个坑）
+
+| # | 问题 | 解法 |
+|---|------|------|
+| 1 | `App::on_action` 里同步 `WindowHandle::update` 报 `window not found` | action 派发期间窗口被临时移出 `App.windows`，改用 `app.defer` 延迟到事件处理结束后再打开 |
+| 2 | 根节点 `.on_action` 在无聚焦元素时不触发 | 无焦点时 action 从 dispatch tree 根节点冒泡，不进入控件树；改用 `App::on_action` 全局监听 |
+| 3 | gpui 0.3 没有 `min_h` / 滚动容器 | 表单布局保持紧凑；长列表限制展示条数（选择 24 / 预览 12） |
+| 4 | 导入错误链过长把 footer 按钮挤出卡片 | 只显示顶层错误（`{e}` 而非 `{e:#}`）+ 消息区 `truncate()` |
+| 5 | rfd 首次引入 + 屏幕坐标随 DPI/窗口位置变化 | 锁定依赖后用像素扫描定位按钮，坐标按 1.5 DPI 换算 |
+
+### 遗留
+
+| 项 | 后续 |
+|----|------|
+| 选择会话 / 预览列表无滚动，超过上限只显示前 N 条 | S10 稳定性阶段补滚动容器 |
+| 字体为 4 个预设，未枚举系统字体 | S6 终端渲染时补 |
+| 删除会话二次确认仍未做（S3 遗留） | S10 |
+| 日志目录 / 数据目录首页仅存储，尚未被终端与日志模块使用 | S6 / S9 |
+
+---
+
 ## Sprint 2 — 会话数据层
 
 **状态**：✅ COMPLETED | **Commit**：`3bbc1c16` | **时间**：2026-11-13
