@@ -19,8 +19,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, ClickEvent, Context, Entity, IntoElement, KeyBinding, MouseDownEvent,
-    Render, Window,
+    actions, div, px, AnyElement, ClickEvent, Context, Entity, FocusHandle, IntoElement, KeyBinding,
+    MouseDownEvent, Render, Window,
 };
 use uuid::Uuid;
 
@@ -31,6 +31,7 @@ use crate::ui::theme;
 use super::import_export::{ImportExportDialog, IoMode};
 use super::session_dialog::SessionEditDialog;
 use super::session_tree::SessionTreeView;
+use super::sftp::SftpView;
 use super::settings::SettingsView;
 use super::status_bar::StatusBar;
 use super::tab_bar::TabBar;
@@ -68,6 +69,7 @@ enum ContextMenuAction {
     NewSession,
     EditSession(Uuid),
     OpenTerminal(Uuid),
+    OpenSftp(Uuid),
     DeleteSession(Uuid),
     OpenExportDialog,
     OpenImportDialog,
@@ -78,11 +80,46 @@ enum ContextMenuAction {
 // Tab
 // ---------------------------------------------------------------------------
 
+/// 标签页内容（S7 起支持多类型）。
+#[derive(Clone)]
+pub enum TabContentView {
+    Terminal(Entity<TerminalView>),
+    Sftp(Entity<SftpView>),
+}
+
+impl TabContentView {
+    fn focus_handle(&self, cx: &mut Context<MainWindow>) -> FocusHandle {
+        match self {
+            Self::Terminal(view) => view.read(cx).focus_handle(),
+            Self::Sftp(view) => view.read(cx).focus_handle(),
+        }
+    }
+
+    fn close(&self, cx: &mut Context<MainWindow>) {
+        match self {
+            Self::Terminal(view) => {
+                view.update(cx, |view, cx| view.disconnect(cx));
+            }
+            Self::Sftp(view) => {
+                view.update(cx, |view, cx| view.shutdown(cx));
+            }
+        }
+    }
+
+    fn into_element(&self) -> AnyElement {
+        match self {
+            Self::Terminal(view) => view.clone().into_any_element(),
+            Self::Sftp(view) => view.clone().into_any_element(),
+        }
+    }
+}
+
 pub struct TabEntry {
     pub id: Uuid,
     pub session_id: Uuid,
     pub title: String,
-    pub view: Entity<TerminalView>,
+    pub kind: TabKind,
+    pub content: TabContentView,
 }
 
 pub struct MainWindow {
@@ -185,7 +222,35 @@ impl MainWindow {
             id,
             session_id,
             title,
-            view,
+            kind: TabKind::Terminal,
+            content: TabContentView::Terminal(view),
+        });
+        self.active_tab = self.tabs.len() - 1;
+        self.focus_pending = true;
+        self.sync_tab_bar(cx);
+        cx.notify();
+    }
+
+    fn open_sftp_tab(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let title = {
+            let state = cx.global::<AppState>();
+            let store = state.session_store.lock().unwrap();
+            store
+                .get(session_id)
+                .map(|session| format!("{} · SFTP", session.display_label()))
+                .unwrap_or_else(|| "SFTP".to_string())
+        };
+
+        let view = cx.new(|cx| SftpView::new(cx));
+        view.update(cx, |view, cx| view.connect(session_id, cx));
+        let id = view.read(cx).tab_id();
+
+        self.tabs.push(TabEntry {
+            id,
+            session_id,
+            title,
+            kind: TabKind::Sftp,
+            content: TabContentView::Sftp(view),
         });
         self.active_tab = self.tabs.len() - 1;
         self.focus_pending = true;
@@ -207,7 +272,7 @@ impl MainWindow {
             return;
         };
         let entry = self.tabs.remove(index);
-        entry.view.update(cx, |view, cx| view.disconnect(cx));
+        entry.content.close(cx);
 
         if index < self.active_tab {
             self.active_tab -= 1;
@@ -234,7 +299,7 @@ impl MainWindow {
         self.tabs = kept;
         self.active_tab = 0;
         for entry in removed {
-            entry.view.update(cx, |view, cx| view.disconnect(cx));
+            entry.content.close(cx);
         }
         self.focus_pending = true;
         self.sync_tab_bar(cx);
@@ -247,7 +312,7 @@ impl MainWindow {
         };
         let removed: Vec<TabEntry> = self.tabs.drain(index + 1..).collect();
         for entry in removed {
-            entry.view.update(cx, |view, cx| view.disconnect(cx));
+            entry.content.close(cx);
         }
         if self.active_tab > index {
             self.active_tab = index;
@@ -264,7 +329,7 @@ impl MainWindow {
             .map(|tab| TabInfo {
                 id: tab.id,
                 title: tab.title.clone(),
-                kind: TabKind::Terminal,
+                kind: tab.kind.clone(),
             })
             .collect();
         let active = self.active_tab;
@@ -413,7 +478,7 @@ impl Render for MainWindow {
             let handle = self
                 .tabs
                 .get(self.active_tab)
-                .map(|tab| tab.view.read(cx).focus_handle());
+                .map(|tab| tab.content.focus_handle(cx));
             if let Some(handle) = handle {
                 window.focus(&handle, cx);
             }
@@ -527,7 +592,7 @@ impl Render for MainWindow {
             let viewport = window.viewport_size();
             let menu_w = 170.0_f32;
             let menu_h = if menu_state.session_id.is_some() {
-                218.0_f32
+                248.0_f32
             } else {
                 128.0_f32
             };
@@ -582,6 +647,13 @@ impl Render for MainWindow {
                         cx,
                     ))
                     .child(self.render_menu_item(
+                        "rterm-ctx-open-sftp",
+                        "📁 打开 SFTP",
+                        false,
+                        ContextMenuAction::OpenSftp(sid),
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
                         "rterm-ctx-delete",
                         "🗑 删除会话",
                         true,
@@ -633,7 +705,7 @@ impl Render for MainWindow {
 impl MainWindow {
     fn render_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            return tab.view.clone().into_any_element();
+            return tab.content.into_element();
         }
 
         let t = theme(cx);
@@ -711,6 +783,7 @@ impl MainWindow {
                         ContextMenuAction::NewSession => this.open_edit_dialog(None, cx),
                         ContextMenuAction::EditSession(sid) => this.edit_session(sid, cx),
                         ContextMenuAction::OpenTerminal(sid) => this.request_terminal(sid, cx),
+                        ContextMenuAction::OpenSftp(sid) => this.open_sftp_tab(sid, cx),
                         ContextMenuAction::DeleteSession(sid) => this.delete_session(sid, cx),
                         ContextMenuAction::OpenExportDialog => this.open_import_export(true, cx),
                         ContextMenuAction::OpenImportDialog => this.open_import_export(false, cx),

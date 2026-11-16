@@ -15,6 +15,11 @@
 > - 主题切换 / 高 DPI 鼠标 E2E 未覆盖 → 9.12.1 全量回归
 > - 光标方块对比度、滚动条拖拽、双击选词 / 三击整行 → 9.17
 > - 多类型 Tab（S7/S9 接入后）回归 → 9.12.1
+>
+> **S7 遗留（本 Sprint 收口）**：
+> - 拖拽上传/下载、暂停/继续/取消 GUI E2E、空白区右键菜单 → 9.18
+> - mkdir / rename / delete / chmod 逐项 E2E → 9.12.1
+> - 文件列表虚拟化（大目录）→ 9.18
 
 ---
 
@@ -38,6 +43,7 @@
 | 9.15 | 0.25h | `crates/rterm-app/src/views/main_window.rs` + `session_tree.rs` | 删除会话二次确认 Modal（S3 遗留）；删除后 emit SessionDeleted 并刷新树 | 点删除 → 确认 → 才真删 |
 | 9.16 | 0.25h | `crates/rterm-app/src/main.rs` + `state.rs` | `Settings.data_dir` 接线：sessions.json / settings.json / 备份统一到自定义目录；`terminal_log_dir` 供 9.5 使用 | 改数据目录 → 重启后新路径生效 |
 | 9.17 | 0.5h | `crates/rterm-app/src/views/terminal.rs` | 终端交互打磨（S6 遗留）：方块光标改用反色/半透明提升对比度；滚动条支持鼠标拖拽；双击选中单词 / 三击选中整行 | 光标在任意配色下可辨认；滚动条可拖；双击选词 |
+| 9.18 | 1h | `crates/rterm-app/src/views/sftp.rs` | SFTP 交互补全（S7 遗留）：Pane 间拖拽上传/下载；暂停/继续/取消 GUI E2E；空白区右键菜单；列表虚拟化（大目录不卡） | 拖拽可传输；暂停后进度停止；1000 项目录滚动流畅 |
 
 ### 9.12 全量 Smoke Test
 

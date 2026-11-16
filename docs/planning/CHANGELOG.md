@@ -4,9 +4,58 @@
 
 ---
 
+## Sprint 7 — SFTP 文件管理（核心完成）
+
+**状态**：🚧 IN PROGRESS | **Commit**：待提交 | **时间**：2026-11-16
+**前置**：S5（SSH Session）+ S6（多类型 Tab / TabBar）
+**后续**：S8 直接订阅 `SftpNavigated`；S9 按 `TabContentView` 模式接入 Monitor
+
+### 交付清单
+
+| 模块 | 内容 |
+|------|------|
+| `rterm-sftp/service.rs` | `SftpService`（listdir / stat / mkdir / rmdir / unlink / rename / chmod / home_dir）+ `FileEntry`、目录优先排序、`format_mode/size`；11 个单元测试 |
+| `rterm-sftp/queue.rs` | 2 worker 上传/下载队列、64KB 分块、100ms 进度节流、暂停/继续/取消、3 次重试、失败清理 |
+| `SftpView` | 双栏（本地/远端）、地址栏 + 转到、面包屑、列头排序、鼠标滚轮、双击目录进入、双击文件上传/下载、右键下载/上传/重命名/删除/权限/属性、顶部「＋ 文件夹」、底部传输面板 |
+| Tab 集成 | `TabContentView::{Terminal, Sftp}`、`TabKind::Sftp`、会话右键「📁 打开 SFTP」、Ctrl+W 关闭（断开 SFTP 并取消队列） |
+| 事件 | `SftpOpened/SftpNavigated/SftpClosed` + `FileTransferStarted/Progress/Completed/Failed` 转发到 EventBus |
+
+### 测试 & 验收
+
+| 项 | 结果 |
+|----|------|
+| `cargo test --workspace` | ✅ 全部通过（新增 rterm-sftp 11 个测试） |
+| `cargo build -p rterm-app` | ✅ BUILD OK |
+| E2E：连接 192.168.1.95 | ✅ 本地面板 + 远端 `/home/ubuntu` 正常列出 |
+| E2E：下载 | ✅ `.trae-cn/plugin-config.json`（453 B）→ 本地 `.icube-remote-ssh/`，进度条 100%「已完成」 |
+| E2E：上传 | ✅ 同一文件上传回远端，远端列表出现新文件（mtime 更新），两个任务均「已完成」 |
+| E2E：关闭 Tab | ✅ Ctrl+W 关闭 SFTP Tab，SSH/队列释放，进程存活 |
+
+### 踩坑 & 修正
+
+| # | 问题 | 解法 |
+|---|------|------|
+| 1 | TextInput 外部替换内容后 IME `marked_range` 越界导致 panic | 新增 `TextInput::set_content` 清空 marked_range；所有 IME 区间与渲染下标统一 `clamp_range` 到字符边界（含密码模式），并补 2 个单测 |
+| 2 | 双栏宽度被内容撑开 / 列被挤出窗口 | 改为 `w(relative(0.5))` 等宽 + 固定元信息列宽 + 名称 `truncate()` |
+| 3 | 列表超过一屏无法访问 | 增加滚轮滚动（按 3 行/格），渲染时 `skip(scroll)` |
+| 4 | 地址栏文本溢出遮挡按钮 | 地址栏独立成行 + `overflow_hidden` + 显式「转到」按钮 |
+
+### 遗留
+
+| 项 | 后续 |
+|----|------|
+| 拖拽上传/下载 | S10 9.18 |
+| 暂停/继续/取消 GUI E2E | S10 9.18 |
+| 空白区右键菜单（当前用顶部「＋ 文件夹」） | S10 9.18 |
+| mkdir/rename/delete/chmod 未逐项 E2E | S10 全量 smoke |
+| 文件列表未虚拟化（大目录） | S10 |
+| SFTP 使用独立 SSH 连接，未复用终端 Tab 的 Session | 设计取舍，功能等价；如需复用可在 S8 统一连接池 |
+
+---
+
 ## Sprint 6 — 终端渲染
 
-**状态**：✅ COMPLETED | **Commit**：待提交 | **时间**：2026-11-16
+**状态**：✅ COMPLETED | **Commit**：`6b07fd6` | **时间**：2026-11-16
 **前置**：S5（TerminalEngine / PTY / 连接编排）+ S4（Settings / 4 套 UI 主题）
 **后续**：S7（SFTP）/ S9（监控）可直接复用 TabBar
 

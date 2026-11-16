@@ -16,6 +16,7 @@ rterm-crypto.workspace = true
 rterm-session.workspace = true
 rterm-ssh.workspace = true
 rterm-terminal.workspace = true
+rterm-sftp = { path = "../rterm-sftp" }
 alacritty_terminal.workspace = true
 chrono.workspace = true
 serde.workspace = true

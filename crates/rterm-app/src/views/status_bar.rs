@@ -1,4 +1,4 @@
-//! StatusBar — 底部状态栏（Sprint 6）
+//! StatusBar — 底部状态栏（Sprint 7）
 //!
 //! 左侧：临时消息（设置已保存 / 会话已删除…）
 //! 右侧：当前主机 · 连接延迟 · 重连次数 · 时钟
@@ -85,7 +85,7 @@ impl StatusBar {
         .detach();
 
         Self {
-            message: "Ready — rterm Sprint 6".into(),
+            message: "Ready — rterm Sprint 7".into(),
             host: None,
             latency_ms: None,
             reconnect_attempt: None,
@@ -138,7 +138,7 @@ impl Render for StatusBar {
 impl Default for StatusBar {
     fn default() -> Self {
         Self {
-            message: "Ready — rterm Sprint 6".into(),
+            message: "Ready — rterm Sprint 7".into(),
             host: None,
             latency_ms: None,
             reconnect_attempt: None,

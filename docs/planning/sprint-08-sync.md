@@ -1,13 +1,15 @@
 # Sprint 8 — 路径同步
 
-> **状态**：待开始（前置 S6 ✅ + S7）
+> **状态**：⏳ **下一个**（S7 核心已交付，SftpNavigated 可直接订阅）
 > **前置**：[Sprint 6](./sprint-06-terminal-render.md)（Terminal PTY 输出 ✅）+ [Sprint 7](./sprint-07-sftp.md)（SFTP 导航；Perl ✅ 已完成）+ [Sprint 4](./sprint-04-settings-io.md)（`Settings.sftp_sync_mode` 已持久化）
 > **目标**：SyncBridge + PS1 正则 + ignore 防回环
 > **定位**：rterm 独有杀手功能
 >
 > **S5 已就绪的接入点**：
 > - `TerminalData { tab_id, session_id, bytes }` 已在每个 PTY chunk 实时 emit → SyncBridge 可直接订阅，无需改 TerminalView 的连接层
-> - **S6 已交付多 Tab 映射**：`MainWindow.tabs: Vec<TabEntry { id, session_id, view }>`，S8 按 tab 隔离 SyncBridge 状态
+> - **S6 已交付多 Tab 映射**：`MainWindow.tabs: Vec<TabEntry { id, session_id, title, kind, content }>`，S8 按 tab 隔离 SyncBridge 状态
+> - **S7 已交付 SFTP 导航**：`SftpView` 每次成功导航（双击目录 / 面包屑 / 地址栏 / 刷新）都会 emit `SftpNavigated { tab_id, session_id, path }`；刷新也会触发，SyncBridge 需对比 `last_sftp` 去重，避免自激
+> - **S7 已交付 Tab 内容枚举**：`TabContentView::{Terminal, Sftp}`；S8 通过 `MainWindow.tabs` 找到同 `session_id` 的终端 Tab
 > - `SshSession::session_clone()` 可用于 SFTP 侧连接
 >
 > **S4 已就绪的接入点**：
@@ -33,7 +35,7 @@
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
 | 7.2.1 | 0.5h | `crates/rterm-app/src/views/terminal.rs` + `main_window.rs` | `TerminalView::handle_pty_event` 喂完 PTY 字节 → `sync_bridge.on_terminal_output(bytes)` → 若 Some(cwd) → emit `TerminalCwdHint` / `SftpNavigated`；SyncBridge 按 `tab_id` 隔离（映射来自 `MainWindow.tabs`） | 终端 cd /var/log → SFTP 自动跳 |
-| 7.2.2 | 0.5h | `crates/rterm-app/src/views/main_window.rs` + SFTP View | SFTP 用户导航 → emit `UserRequestedCwd { tab_id, path }` → sync_bridge.on_sftp_navigated → 组装命令 → 对应 `TabEntry` 的 PTY `Write` | SFTP 导航 → 终端自动 cd |
+| 7.2.2 | 0.5h | `crates/rterm-app/src/views/main_window.rs` + SFTP View | SFTP 用户导航已在 `SftpView::navigate` 内 emit `SftpNavigated`；SyncBridge 处理后返回注入命令 → 找到同 `session_id` 的 `TabContentView::Terminal`，调用新增的 `TerminalView::inject_command`（内部 `PtyCommand::Write`） | SFTP 导航 → 终端自动 cd |
 
 ### 7.3 验收
 

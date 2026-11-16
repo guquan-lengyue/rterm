@@ -1,14 +1,13 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! rterm-sftp — SFTP 文件操作与传输队列。
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod queue;
+pub mod service;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use queue::{
+    TransferDirection, TransferEvent, TransferQueue, TransferSnapshot, TransferState, CHUNK_SIZE,
+    MAX_ATTEMPTS,
+};
+pub use service::{
+    format_mode, format_size, remote_join, remote_parent, sort_entries, FileEntry, SftpService,
+    SortKey,
+};

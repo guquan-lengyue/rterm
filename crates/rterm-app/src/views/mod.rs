@@ -8,6 +8,7 @@ pub mod session_tree;
 pub mod session_dialog;
 pub mod settings;
 pub mod import_export;
+pub mod sftp;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod terminal;

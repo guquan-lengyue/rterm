@@ -1,6 +1,6 @@
 # Sprint 7 — SFTP 文件管理
 
-> **状态**：⏳ **下一个**（S6 已完成，Tab 入口已就绪）
+> **状态**：🚧 **进行中**（核心已完成 2026-11-16；剩余拖拽上传/暂停取消 E2E）
 > **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH Session + sftp 子系统；Perl ✅ 已完成）
 > **目标**：SftpService + 双栏 View + 传输队列
 >

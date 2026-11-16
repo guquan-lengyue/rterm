@@ -148,7 +148,7 @@
 
 ---
 
-## Phase 3 — SFTP 文件管理
+## Phase 3 — SFTP 文件管理 🚧（S7 核心完成）
 
 ### 前置条件
 - [x] P1（SessionStore）
@@ -156,27 +156,29 @@
 
 ### 任务清单
 
-#### 3.1 rterm-sftp 核心
-- [ ] `SftpService::sftp()`：复用 SSH Session 的 sftp 子系统
-- [ ] `listdir(path) → Vec<FileEntry>`：解析 stat / lstat
-- [ ] `mkdir(path)` / `rmdir(path)` / `unlink(path)` / `rename(from, to)`
-- [ ] `chmod(path, mode)` / `stat(path)`
-- [ ] 本地文件浏览：`walkdir` 配合系统 shell 执行
+#### 3.1 rterm-sftp 核心 ✅
+- [x] `SftpService::sftp()`：基于 SSH Session 的 sftp 子系统
+- [x] `listdir(path) → Vec<FileEntry>`：解析 stat / lstat
+- [x] `mkdir(path)` / `rmdir(path)` / `unlink(path)` / `rename(from, to)`
+- [x] `chmod(path, mode)` / `stat(path)`
+- [x] 本地文件浏览（std::fs 实现，未用 walkdir/shell；功能等价）
 
-#### 3.2 传输队列
-- [ ] `TransferQueue`：并发数可配（默认 2）
-- [ ] 上传：`channel.sftp().put_file(local_path, remote_path)` chunked
-- [ ] 下载：`channel.sftp().get_file(remote_path, local_path)` chunked
-- [ ] 每个任务进度 + 速度（bytes / sec）实时更新
-- [ ] 暂停 / 恢复 / 取消 / 失败重试
+#### 3.2 传输队列 ✅
+- [x] `TransferQueue`：并发数可配（默认 2）
+- [x] 上传：分块读取本地文件 → SFTP create
+- [x] 下载：SFTP open → 分块写入本地
+- [x] 每个任务进度实时更新（~100ms 节流）
+- [ ] 速度（bytes / sec）显示
+- [x] 暂停 / 恢复 / 取消 / 失败重试（代码完成；暂停取消 E2E 留 S10）
 
-#### 3.3 Sftp View（gpui）
-- [ ] 双栏 Split View（左本地，右远程）
-- [ ] 地址栏 + 面包屑 + 刷新 + 前进后退
-- [ ] 文件列表图标（按扩展名 / 目录 / 可执行）
-- [ ] 拖拽上传 / 下载
-- [ ] 右键菜单：上传 / 下载 / 新建目录 / 重命名 / 删除 / chmod / 属性
-- [ ] 传输进度条（底部状态栏或独立弹窗）
+#### 3.3 Sftp View（gpui）🚧
+- [x] 双栏 Split View（左本地，右远程）
+- [x] 地址栏 + 面包屑 + 刷新
+- [ ] 前进 / 后退
+- [x] 文件列表图标（目录 / 文件 / 符号链接）
+- [ ] 拖拽上传 / 下载（S10 9.18）
+- [x] 右键菜单：上传 / 下载 / 重命名 / 删除 / chmod / 属性（新建目录在顶部工具栏）
+- [x] 传输进度条（底部传输面板）
 
 ---
 

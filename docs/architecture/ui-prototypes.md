@@ -407,7 +407,7 @@ App (gpui::Application)
 | ImportExportDialog | **S4** 4.2 | ✅ 已完成 |
 | TabBar | **S6** 5.4 | ✅ 已完成 |
 | 终端 Canvas View | **S6** 5.1 | ✅ 已完成 |
-| SFTP 双栏 View | **S7** 7.2 | ⏳ |
+| SFTP 双栏 View | **S7** 7.2 | ✅ 核心完成（拖拽留 S10） |
 | 监控折线图 View | **S9** 9.2 | ⏳ |
 | 命令面板 | **S10** 10.3 | ⏳ |
 | HostKey/Delete 确认 | **S3** / **S10** | ⏳ |

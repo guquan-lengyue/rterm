@@ -4605,6 +4605,7 @@ dependencies = [
  "rfd",
  "rterm-crypto",
  "rterm-session",
+ "rterm-sftp",
  "rterm-ssh",
  "rterm-terminal",
  "serde",
@@ -4659,6 +4660,7 @@ dependencies = [
  "ssh2",
  "thiserror 1.0.69",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -31,7 +31,7 @@ fn sessions_path() -> std::path::PathBuf {
 // ---------- 入口 ----------
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    log::info!("rterm-app starting (Sprint 6 — 终端 Canvas 渲染)");
+    log::info!("rterm-app starting (Sprint 7 — SFTP 文件管理)");
 
     // 1. 启动加载 store + settings
     let store = load_store();

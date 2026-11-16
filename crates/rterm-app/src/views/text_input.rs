@@ -80,12 +80,22 @@ impl TextInput {
         cx.notify();
     }
 
+    /// 外部替换内容：同时清空 IME marked_range 与选区，避免越界。
+    pub fn set_content(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.content = text.into();
+        let end = self.content.len();
+        self.selected_range = end..end;
+        self.marked_range = None;
+        cx.notify();
+    }
+
     // ---------------- 键盘编辑（action handler） ----------------
 
     /// 用新文本替换当前选中区域（空选中 = 在光标处插入）。
     fn replace_selection(&mut self, new_text: &str, cx: &mut Context<Self>) {
-        let start = self.selected_range.start.min(self.content.len());
-        let end = self.selected_range.end.min(self.content.len());
+        let range = clamp_range(self.selected_range.clone(), &self.content);
+        let start = range.start;
+        let end = range.end;
         self.content = SharedString::from(format!(
             "{}{}{}",
             &self.content[..start],
@@ -179,7 +189,7 @@ impl TextInput {
 
     fn display_content(&self) -> SharedString {
         if self.password_mode && !self.content.is_empty() {
-            SharedString::from("●".repeat(self.content.len()))
+            SharedString::from("●".repeat(self.content.chars().count()))
         } else {
             self.content.clone()
         }
@@ -228,10 +238,12 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let start = self.offset_from_utf16(range_utf16.start);
-        let end = self.offset_from_utf16(range_utf16.end);
-        actual_range.replace(self.offset_to_utf16(start)..self.offset_to_utf16(end));
-        Some(self.content[start..end].to_string())
+        let start = self.offset_to_utf16(clamp_index(&self.content, self.offset_from_utf16(range_utf16.start)));
+        let end = self.offset_to_utf16(clamp_index(&self.content, self.offset_from_utf16(range_utf16.end)));
+        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        actual_range.replace(start..end);
+        let range = clamp_range(start..end, &self.content);
+        Some(self.content[range].to_string())
     }
 
     fn selected_text_range(
@@ -240,9 +252,9 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<UTF16Selection> {
+        let range = clamp_range(self.selected_range.clone(), &self.content);
         Some(UTF16Selection {
-            range: self.offset_to_utf16(self.selected_range.start)
-                ..self.offset_to_utf16(self.selected_range.end),
+            range: self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end),
             reversed: self.selection_reversed,
         })
     }
@@ -250,6 +262,7 @@ impl EntityInputHandler for TextInput {
     fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
         self.marked_range
             .as_ref()
+            .map(|r| clamp_range(r.clone(), &self.content))
             .map(|r| self.offset_to_utf16(r.start)..self.offset_to_utf16(r.end))
     }
 
@@ -264,11 +277,12 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
+        let raw = range_utf16
             .as_ref()
             .map(|r| self.offset_from_utf16(r.start)..self.offset_from_utf16(r.end))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = clamp_range(raw, &self.content);
 
         self.content =
             SharedString::from(format!("{}{}{}", &self.content[..range.start], new_text, &self.content[range.end..]));
@@ -286,11 +300,12 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let range = range_utf16
+        let raw = range_utf16
             .as_ref()
             .map(|r| self.offset_from_utf16(r.start)..self.offset_from_utf16(r.end))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        let range = clamp_range(raw, &self.content);
 
         self.content =
             SharedString::from(format!("{}{}{}", &self.content[..range.start], new_text, &self.content[range.end..]));
@@ -312,8 +327,12 @@ impl EntityInputHandler for TextInput {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let line = self.last_layout.as_ref()?;
-        let start = self.offset_from_utf16(range_utf16.start);
-        let end = self.offset_from_utf16(range_utf16.end);
+        // 密码模式显示的是 ●，与 content 下标不一致，跳过候选窗定位
+        if self.password_mode {
+            return None;
+        }
+        let start = clamp_index(&self.content, self.offset_from_utf16(range_utf16.start));
+        let end = clamp_index(&self.content, self.offset_from_utf16(range_utf16.end));
         Some(Bounds::from_corners(
             point(bounds.left() + line.x_for_index(start), bounds.top()),
             point(bounds.left() + line.x_for_index(end), bounds.bottom()),
@@ -330,6 +349,51 @@ impl EntityInputHandler for TextInput {
         let line = self.last_layout.as_ref()?;
         let utf8_index = line.index_for_x(line_point.x)?;
         Some(self.offset_to_utf16(utf8_index))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 下标安全工具
+// ---------------------------------------------------------------------------
+
+/// 夹到 `text` 的字节长度内，并回退到最近的字符边界。
+fn clamp_index(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// 夹住一个区间；保证 start <= end 且均为合法字符边界。
+fn clamp_range(range: Range<usize>, text: &str) -> Range<usize> {
+    let start = clamp_index(text, range.start);
+    let end = clamp_index(text, range.end).max(start);
+    start..end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_index, clamp_range};
+
+    #[test]
+    fn clamp_index_handles_overflow_and_char_boundaries() {
+        assert_eq!(clamp_index("abc", 2), 2);
+        assert_eq!(clamp_index("abc", 99), 3);
+        // "你" 占 3 字节；落在中间时回退到字符起点
+        assert_eq!(clamp_index("你好", 4), 3);
+        assert_eq!(clamp_index("你好", 99), 6);
+        assert_eq!(clamp_index("", 10), 0);
+    }
+
+    #[test]
+    fn clamp_range_orders_and_bounds_ime_ranges() {
+        assert_eq!(clamp_range(0..3, "abc"), 0..3);
+        assert_eq!(clamp_range(5..2, "abc"), 3..3);
+        assert_eq!(clamp_range(0..99, "abc"), 0..3);
+        assert_eq!(clamp_range(99..100, "abc"), 3..3);
+        // IME 标记落在多字节字符中间时也不会 panic
+        assert_eq!(clamp_range(2..5, "你好"), 0..3);
     }
 }
 
@@ -383,8 +447,10 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.display_content();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        // IME marked_range 记录的是 content 字节下标；password 模式 / 内容被外部替换后
+        // 可能超出 display_text 长度，这里全部夹到合法字符边界，避免渲染越界 panic。
+        let selected_range = clamp_range(input.selected_range.clone(), &content);
+        let cursor = clamp_index(&content, input.cursor_offset());
         let style = window.text_style();
 
         // 从 AppState 拿主题色（TextInput 是 gpui::Global，prepaint 用 &mut App）
@@ -399,33 +465,42 @@ impl Element for TextElement {
         } else {
             (content, text_color)
         };
+        let display_len = display_text.len();
 
         let run = TextRun {
-            len: display_text.len(),
+            len: display_len,
             font: style.font(),
             color: color.into(),
             background_color: None,
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
-            if !marked_range.is_empty() {
-                vec![
-                    TextRun { len: marked_range.start, ..run.clone() },
-                    TextRun {
-                        len: marked_range.end - marked_range.start,
-                        underline: Some(UnderlineStyle {
-                            color: Some(run.color),
-                            thickness: px(1.0),
-                            wavy: false,
-                        }),
-                        ..run.clone()
-                    },
-                    TextRun { len: display_text.len() - marked_range.end, ..run },
-                ].into_iter().filter(|r| r.len > 0).collect()
-            } else {
-                vec![run]
-            }
+        let marked_range = if input.content.is_empty() || input.password_mode {
+            None
+        } else {
+            input
+                .marked_range
+                .as_ref()
+                .map(|range| clamp_range(range.clone(), &display_text))
+                .filter(|range| !range.is_empty())
+        };
+        let runs = if let Some(marked_range) = marked_range {
+            vec![
+                TextRun { len: marked_range.start, ..run.clone() },
+                TextRun {
+                    len: marked_range.end - marked_range.start,
+                    underline: Some(UnderlineStyle {
+                        color: Some(run.color),
+                        thickness: px(1.0),
+                        wavy: false,
+                    }),
+                    ..run.clone()
+                },
+                TextRun { len: display_len - marked_range.end, ..run },
+            ]
+            .into_iter()
+            .filter(|run| run.len > 0)
+            .collect()
         } else {
             vec![run]
         };
