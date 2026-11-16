@@ -16,7 +16,7 @@ use gpui::{
 use uuid::Uuid;
 
 use crate::event::{AppEvent, EventBusHost};
-use crate::state::AppState;
+use crate::state::{lock_or_recover, AppState};
 use crate::ui::theme;
 
 use super::text_input::TextInput;
@@ -168,9 +168,7 @@ impl ImportExportDialog {
                     self.failure("请至少勾选一个会话", cx);
                     return;
                 }
-                rterm_session::ExportScope::Selection(
-                    self.selected_ids.iter().copied().collect(),
-                )
+                rterm_session::ExportScope::Selection(self.selected_ids.iter().copied().collect())
             }
         };
 
@@ -191,21 +189,19 @@ impl ImportExportDialog {
             }
         };
 
-        let sessions = cx.global::<AppState>().session_store.lock().unwrap().list().to_vec();
+        let sessions = lock_or_recover(&cx.global::<AppState>().session_store)
+            .list()
+            .to_vec();
         let count = count_scope(&sessions, &scope);
 
-        let result = rterm_session::export::export_json(
-            &sessions,
-            scope,
-            passphrase.as_deref(),
-        )
-        .map_err(|e| format!("{e:#}"))
-        .and_then(|json| {
-            if let Some(parent) = std::path::Path::new(&path_str).parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            std::fs::write(&path_str, json).map_err(|e| format!("写入文件失败: {e}"))
-        });
+        let result = rterm_session::export::export_json(&sessions, scope, passphrase.as_deref())
+            .map_err(|e| format!("{e:#}"))
+            .and_then(|json| {
+                if let Some(parent) = std::path::Path::new(&path_str).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::write(&path_str, json).map_err(|e| format!("写入文件失败: {e}"))
+            });
 
         match result {
             Ok(()) => {
@@ -247,9 +243,15 @@ impl ImportExportDialog {
         };
         let passphrase = {
             let p = self.text(&self.import_pass, cx);
-            if p.is_empty() { None } else { Some(p) }
+            if p.is_empty() {
+                None
+            } else {
+                Some(p)
+            }
         };
-        let existing = cx.global::<AppState>().session_store.lock().unwrap().list().to_vec();
+        let existing = lock_or_recover(&cx.global::<AppState>().session_store)
+            .list()
+            .to_vec();
 
         match rterm_session::export::preview_import(
             &json,
@@ -284,9 +286,15 @@ impl ImportExportDialog {
         };
         let passphrase = {
             let p = self.text(&self.import_pass, cx);
-            if p.is_empty() { None } else { Some(p) }
+            if p.is_empty() {
+                None
+            } else {
+                Some(p)
+            }
         };
-        let existing = cx.global::<AppState>().session_store.lock().unwrap().list().to_vec();
+        let existing = lock_or_recover(&cx.global::<AppState>().session_store)
+            .list()
+            .to_vec();
 
         match rterm_session::export::import_json(
             &json,
@@ -297,7 +305,7 @@ impl ImportExportDialog {
             Ok((merged, report)) => {
                 {
                     let state = cx.global_mut::<AppState>();
-                    let mut store = state.session_store.lock().unwrap();
+                    let mut store = lock_or_recover(&state.session_store);
                     store.clear();
                     for s in merged {
                         store.upsert(s);
@@ -387,8 +395,16 @@ impl ImportExportDialog {
     ) -> gpui::AnyElement {
         let t = theme(cx);
         let label = label.to_string();
-        let bg = if primary { t.primary() } else { t.secondary_btn_bg() };
-        let hover = if primary { t.primary_hover() } else { t.secondary_btn_hover() };
+        let bg = if primary {
+            t.primary()
+        } else {
+            t.secondary_btn_bg()
+        };
+        let hover = if primary {
+            t.primary_hover()
+        } else {
+            t.secondary_btn_hover()
+        };
         let fg = if primary {
             t.text_on_primary_btn()
         } else {
@@ -408,9 +424,11 @@ impl ImportExportDialog {
             .cursor_pointer()
             .id(id)
             .hover(move |s| s.bg(hover))
-            .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                on_click(this, cx);
-            }))
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                    on_click(this, cx);
+                }),
+            )
             .child(label)
             .into_any_element()
     }
@@ -424,7 +442,11 @@ impl ImportExportDialog {
         on_click: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
         let t = theme(cx);
-        let bg = if selected { t.row_selected_bg() } else { t.secondary_btn_bg() };
+        let bg = if selected {
+            t.row_selected_bg()
+        } else {
+            t.secondary_btn_bg()
+        };
         let fg = if selected {
             t.text_on_row_selected_bg()
         } else {
@@ -443,10 +465,12 @@ impl ImportExportDialog {
             .justify_center()
             .cursor_pointer()
             .id(id)
-            .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                on_click(this, cx);
-                cx.notify();
-            }))
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                    on_click(this, cx);
+                    cx.notify();
+                }),
+            )
             .child(format!("{} {}", if selected { "●" } else { "○" }, label))
             .into_any_element()
     }
@@ -454,13 +478,21 @@ impl ImportExportDialog {
     fn mode_tab(&self, mode: IoMode, label: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme(cx);
         let active = self.mode == mode;
-        let bg = if active { t.row_selected_bg() } else { t.card_header_bg() };
+        let bg = if active {
+            t.row_selected_bg()
+        } else {
+            t.card_header_bg()
+        };
         let fg = if active {
             t.text_on_row_selected_bg()
         } else {
             t.text_subtle()
         };
-        let border = if active { t.primary() } else { t.card_header_bg() };
+        let border = if active {
+            t.primary()
+        } else {
+            t.card_header_bg()
+        };
 
         div()
             .h(px(30.))
@@ -475,12 +507,14 @@ impl ImportExportDialog {
             .border_b_2()
             .border_color(border)
             .id(format!("io-mode-{label}"))
-            .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                this.mode = mode;
-                this.message = None;
-                this.preview = None;
-                cx.notify();
-            }))
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                    this.mode = mode;
+                    this.message = None;
+                    this.preview = None;
+                    cx.notify();
+                }),
+            )
             .child(label.to_string())
             .into_any_element()
     }
@@ -493,38 +527,39 @@ impl ImportExportDialog {
         let mut body = div().w_full().flex().flex_col().gap_2();
 
         body = body.child(self.section("导出范围", cx));
-        body = body
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .gap_1()
-                    .child(self.radio(
-                        "io-scope-all".into(),
-                        "全部会话",
-                        self.scope == ScopeKind::All,
-                        cx,
-                        |this, _cx| this.scope = ScopeKind::All,
-                    ))
-                    .child(self.radio(
-                        "io-scope-folder".into(),
-                        "某个文件夹",
-                        self.scope == ScopeKind::Folder,
-                        cx,
-                        |this, _cx| this.scope = ScopeKind::Folder,
-                    ))
-                    .child(self.radio(
-                        "io-scope-selection".into(),
-                        "选择会话",
-                        self.scope == ScopeKind::Selection,
-                        cx,
-                        |this, _cx| this.scope = ScopeKind::Selection,
-                    )),
-            );
+        body = body.child(
+            div()
+                .w_full()
+                .flex()
+                .gap_1()
+                .child(self.radio(
+                    "io-scope-all".into(),
+                    "全部会话",
+                    self.scope == ScopeKind::All,
+                    cx,
+                    |this, _cx| this.scope = ScopeKind::All,
+                ))
+                .child(self.radio(
+                    "io-scope-folder".into(),
+                    "某个文件夹",
+                    self.scope == ScopeKind::Folder,
+                    cx,
+                    |this, _cx| this.scope = ScopeKind::Folder,
+                ))
+                .child(self.radio(
+                    "io-scope-selection".into(),
+                    "选择会话",
+                    self.scope == ScopeKind::Selection,
+                    cx,
+                    |this, _cx| this.scope = ScopeKind::Selection,
+                )),
+        );
 
         if self.scope == ScopeKind::Folder {
             let folders = {
-                let sessions = cx.global::<AppState>().session_store.lock().unwrap().list().to_vec();
+                let sessions = lock_or_recover(&cx.global::<AppState>().session_store)
+                    .list()
+                    .to_vec();
                 let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
                 for s in &sessions {
                     if let Some(f) = s.folder.as_ref().filter(|f| !f.is_empty()) {
@@ -549,7 +584,11 @@ impl ImportExportDialog {
                 for f in folders {
                     let selected = self.selected_folder.as_deref() == Some(f.as_str());
                     let id = format!("io-folder-{f}");
-                    let bg = if selected { t.primary() } else { t.secondary_btn_bg() };
+                    let bg = if selected {
+                        t.primary()
+                    } else {
+                        t.secondary_btn_bg()
+                    };
                     let fg = if selected {
                         t.text_on_primary_btn()
                     } else {
@@ -583,7 +622,9 @@ impl ImportExportDialog {
         }
 
         if self.scope == ScopeKind::Selection {
-            let sessions = cx.global::<AppState>().session_store.lock().unwrap().list().to_vec();
+            let sessions = lock_or_recover(&cx.global::<AppState>().session_store)
+                .list()
+                .to_vec();
             if sessions.is_empty() {
                 body = body.child(
                     div()
@@ -599,7 +640,11 @@ impl ImportExportDialog {
                 for s in sessions.iter().take(24) {
                     let checked = self.selected_ids.contains(&s.id);
                     let id = format!("io-sel-{}", s.id);
-                    let bg = if checked { t.row_selected_bg() } else { t.card_header_bg() };
+                    let bg = if checked {
+                        t.row_selected_bg()
+                    } else {
+                        t.card_header_bg()
+                    };
                     let sid = s.id;
                     grid = grid.child(
                         div()
@@ -622,7 +667,11 @@ impl ImportExportDialog {
                                     cx.notify();
                                 },
                             ))
-                            .child(format!("{} {}", if checked { "☑" } else { "☐" }, s.display_label())),
+                            .child(format!(
+                                "{} {}",
+                                if checked { "☑" } else { "☐" },
+                                s.display_label()
+                            )),
                     );
                 }
                 if sessions.len() > 24 {
@@ -667,25 +716,27 @@ impl ImportExportDialog {
         if self.encryption == EncryptionKind::Passphrase {
             body = body
                 .child(Self::field("口令", self.export_pass.clone(), cx))
-                .child(Self::field("确认口令", self.export_pass_confirm.clone(), cx));
+                .child(Self::field(
+                    "确认口令",
+                    self.export_pass_confirm.clone(),
+                    cx,
+                ));
         }
 
-        body = body
-            .child(self.section("输出文件", cx))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .gap_2()
-                    .child(div().flex_1().child(self.export_path.clone()))
-                    .child(self.action_button(
-                        "io-browse-export",
-                        "浏览…",
-                        false,
-                        cx,
-                        |this, cx| this.browse_export(cx),
-                    )),
-            );
+        body = body.child(self.section("输出文件", cx)).child(
+            div()
+                .w_full()
+                .flex()
+                .gap_2()
+                .child(div().flex_1().child(self.export_path.clone()))
+                .child(self.action_button(
+                    "io-browse-export",
+                    "浏览…",
+                    false,
+                    cx,
+                    |this, cx| this.browse_export(cx),
+                )),
+        );
 
         body.into_any_element()
     }
@@ -711,7 +762,11 @@ impl ImportExportDialog {
                         |this, cx| this.browse_import(cx),
                     )),
             )
-            .child(Self::field("口令（空 = 按 DPAPI 解密）", self.import_pass.clone(), cx))
+            .child(Self::field(
+                "口令（空 = 按 DPAPI 解密）",
+                self.import_pass.clone(),
+                cx,
+            ))
             .child(self.section("冲突策略", cx))
             .child(
                 div()
@@ -764,18 +819,12 @@ impl ImportExportDialog {
             Some(items) if !items.is_empty() => {
                 for item in items.iter().take(12) {
                     let (dot, label, color) = match item.status {
-                        rterm_session::ImportPreviewStatus::Added => {
-                            ("🟢", "新增", t.success())
-                        }
-                        rterm_session::ImportPreviewStatus::Updated => {
-                            ("🟡", "更新", t.primary())
-                        }
+                        rterm_session::ImportPreviewStatus::Added => ("🟢", "新增", t.success()),
+                        rterm_session::ImportPreviewStatus::Updated => ("🟡", "更新", t.primary()),
                         rterm_session::ImportPreviewStatus::Skipped => {
                             ("⚪", "跳过", t.text_subtle())
                         }
-                        rterm_session::ImportPreviewStatus::Renamed => {
-                            ("🔵", "改名", t.primary())
-                        }
+                        rterm_session::ImportPreviewStatus::Renamed => ("🔵", "改名", t.primary()),
                     };
                     list = list.child(
                         div()
@@ -836,10 +885,9 @@ fn count_scope(sessions: &[rterm_session::Session], scope: &rterm_session::Expor
             .iter()
             .filter(|s| s.folder.as_deref() == Some(f.as_str()))
             .count(),
-        rterm_session::ExportScope::Selection(ids) => sessions
-            .iter()
-            .filter(|s| ids.contains(&s.id))
-            .count(),
+        rterm_session::ExportScope::Selection(ids) => {
+            sessions.iter().filter(|s| ids.contains(&s.id)).count()
+        }
     }
 }
 
@@ -891,9 +939,11 @@ impl Render for ImportExportDialog {
                     .justify_center()
                     .child(msg_text),
             )
-            .child(self.action_button("io-cancel", "取消", false, cx, |this, cx| {
-                this.emit(cx, AppEvent::ImportExportCloseRequested);
-            }));
+            .child(
+                self.action_button("io-cancel", "取消", false, cx, |this, cx| {
+                    this.emit(cx, AppEvent::ImportExportCloseRequested);
+                }),
+            );
 
         if self.mode == IoMode::Import {
             footer = footer.child(self.action_button(

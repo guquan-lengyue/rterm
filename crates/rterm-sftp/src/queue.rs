@@ -11,6 +11,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// 获取 Mutex 守卫；锁中毒（工作线程 panic）时记录错误并恢复内部数据。
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::error!("[sftp] Mutex poisoned，恢复内部状态继续运行");
+            poisoned.into_inner()
+        }
+    }
+}
+
 /// 每次读写的块大小。
 pub const CHUNK_SIZE: usize = 64 * 1024;
 /// 单任务最多尝试次数（含首次）。
@@ -194,7 +205,7 @@ impl TransferTask {
             total: self.total,
             transferred: self.transferred.load(Ordering::Relaxed),
             state: self.state(),
-            error: self.error.lock().unwrap().clone(),
+            error: lock_or_recover(&self.error).clone(),
         }
     }
 }
@@ -273,7 +284,7 @@ impl TransferQueue {
     ) -> Uuid {
         let task = Arc::new(TransferTask::new(direction, remote_path, local_path, total));
         let id = task.id;
-        self.tasks.lock().unwrap().push(task.clone());
+        lock_or_recover(&self.tasks).push(task.clone());
         // 轮询分发到各 worker，使多个任务能真正并行。
         let index = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.worker_txs.len();
         let _ = self.worker_txs[index].send(Command::Run(task));
@@ -282,9 +293,7 @@ impl TransferQueue {
 
     /// 当前队列快照（含历史任务）。
     pub fn snapshots(&self) -> Vec<TransferSnapshot> {
-        self.tasks
-            .lock()
-            .unwrap()
+        lock_or_recover(&self.tasks)
             .iter()
             .map(|task| task.snapshot())
             .collect()
@@ -322,7 +331,7 @@ impl TransferQueue {
     /// 关闭队列：取消所有任务、通知 worker 退出并等待线程结束。
     pub fn shutdown(&self) {
         {
-            let tasks = self.tasks.lock().unwrap();
+            let tasks = lock_or_recover(&self.tasks);
             for task in tasks.iter() {
                 task.cancel.store(true, Ordering::SeqCst);
             }
@@ -333,7 +342,7 @@ impl TransferQueue {
         // 不在调用线程（UI）里 join：后台线程可能正卡在 libssh2 网络读写，
         // 同步 join 会冻结界面。交给一个短生命周期的回收线程等待退出。
         let handles = {
-            let mut workers = self.workers.lock().unwrap();
+            let mut workers = lock_or_recover(&self.workers);
             std::mem::take(&mut *workers)
         };
         if !handles.is_empty() {
@@ -377,7 +386,11 @@ fn worker_loop(
     }
 }
 
-fn run_task(service: &SftpService, task: &Arc<TransferTask>, events: &UnboundedSender<TransferEvent>) {
+fn run_task(
+    service: &SftpService,
+    task: &Arc<TransferTask>,
+    events: &UnboundedSender<TransferEvent>,
+) {
     if task.cancel.load(Ordering::SeqCst) {
         task.set_state(TransferState::Cancelled);
         let _ = events.unbounded_send(TransferEvent::Cancelled { id: task.id });
@@ -419,7 +432,7 @@ fn run_task(service: &SftpService, task: &Arc<TransferTask>, events: &UnboundedS
                 );
                 if attempt >= MAX_ATTEMPTS {
                     let reason = err.to_string();
-                    *task.error.lock().unwrap() = Some(reason.clone());
+                    *lock_or_recover(&task.error) = Some(reason.clone());
                     task.set_state(TransferState::Failed);
                     // 失败时只清理临时文件，不动目标路径上的已有文件。
                     cleanup_partial(service, task);
@@ -485,10 +498,8 @@ fn transfer_once(
                     break;
                 }
                 remote.write_all(&buffer[..read])?;
-                let transferred = task
-                    .transferred
-                    .fetch_add(read as u64, Ordering::Relaxed)
-                    + read as u64;
+                let transferred =
+                    task.transferred.fetch_add(read as u64, Ordering::Relaxed) + read as u64;
                 maybe_emit_progress(task, events, transferred, &mut last_emit);
             }
             remote.flush()?;
@@ -519,10 +530,8 @@ fn transfer_once(
                     break;
                 }
                 local.write_all(&buffer[..read])?;
-                let transferred = task
-                    .transferred
-                    .fetch_add(read as u64, Ordering::Relaxed)
-                    + read as u64;
+                let transferred =
+                    task.transferred.fetch_add(read as u64, Ordering::Relaxed) + read as u64;
                 maybe_emit_progress(task, events, transferred, &mut last_emit);
             }
             local.flush()?;

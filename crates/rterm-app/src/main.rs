@@ -14,7 +14,6 @@ pub mod views;
 
 use gpui::prelude::*;
 use gpui::{App, KeyBinding, WindowHandle, WindowOptions};
-use gpui_platform;
 
 use state::AppState;
 use views::main_window::MainWindow;
@@ -43,10 +42,14 @@ fn main() {
     // 用 Arc<Mutex<>> 包装，AppState 和退出保存共享同一份。
     // SessionEditDialog.save() 修改时写入 AppState.session_store，
     // 退出时 save_store() 从同一个 Arc 读出——两边永远一致。
-    let shared_store: Arc<Mutex<rterm_session::SessionStore>> =
-        Arc::new(Mutex::new(store));
+    let shared_store: Arc<Mutex<rterm_session::SessionStore>> = Arc::new(Mutex::new(store));
 
     let shared_store_for_app = shared_store.clone();
+
+    // 1.5 panic hook：异常退出前尽量把会话落盘。
+    //     必须在共享 store 构造之后安装，且用 try_lock —— panic 可能发生在
+    //     已持有 store 锁的代码路径里，再 lock() 会直接死锁。
+    install_panic_hook(shared_store.clone(), loaded_ok);
 
     // 2. gpui run
     gpui_platform::application().run(move |app: &mut App| {
@@ -81,9 +84,11 @@ fn main() {
         bindings.extend(views::main_window::key_bindings());
         app.bind_keys(bindings);
 
-        let window_handle = app.open_window(WindowOptions::default(), |_window, app| {
-            app.new(|cx| MainWindow::new(cx))
-        }).unwrap();
+        let window_handle = app
+            .open_window(WindowOptions::default(), |_window, app| {
+                app.new(MainWindow::new)
+            })
+            .unwrap();
 
         // Ctrl+, → 全局打开设置。
         // 不能挂根节点的 on_action：窗口没有聚焦元素时，action 只在
@@ -121,7 +126,8 @@ fn main() {
         app.on_action(move |_: &views::main_window::CloseTab, app: &mut App| {
             app.defer(move |app| {
                 let handle = WindowHandle::<MainWindow>::new(window_id);
-                if let Err(e) = handle.update(app, |main, _window, cx| main.close_tab_shortcut(cx)) {
+                if let Err(e) = handle.update(app, |main, _window, cx| main.close_tab_shortcut(cx))
+                {
                     log::error!("[shortcut] 关闭标签失败: {e:#}");
                 }
             });
@@ -150,7 +156,11 @@ fn load_store() -> (rterm_session::SessionStore, Option<String>, bool) {
         rterm_session::crypto_bridge::decrypt_session_dpapi(s)
     }) {
         Ok((store, issues)) => {
-            log::info!("Loaded {} sessions ({} issues)", store.count(), issues.len());
+            log::info!(
+                "Loaded {} sessions ({} issues)",
+                store.count(),
+                issues.len()
+            );
             let startup_error = if issues.is_empty() {
                 None
             } else {
@@ -205,6 +215,37 @@ fn backup_corrupt_sessions(path: &std::path::Path) -> Option<std::path::PathBuf>
             None
         }
     }
+}
+
+/// 安装 panic hook：记录日志 → 尝试落盘会话 → 调用原 hook。
+///
+/// 只 clone 一个 `Arc` 进闭包，不引入全局可变状态；`try_lock` 保证
+/// panic 发生在持锁期间时不会二次死锁。
+fn install_panic_hook(store: Arc<Mutex<rterm_session::SessionStore>>, loaded_ok: bool) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("rterm panic: {info}");
+        if !loaded_ok {
+            // 启动加载已失败，当前 store 是空库；此时落盘会覆盖损坏文件。
+            log::warn!("启动加载失败，panic 时跳过保存以避免覆盖原文件");
+            previous(info);
+            return;
+        }
+        match store.try_lock() {
+            Ok(mut guard) => {
+                let result = guard.save(
+                    &state::sessions_path(),
+                    rterm_session::crypto_bridge::encrypt_session_dpapi,
+                );
+                match result {
+                    Ok(()) => log::info!("panic 时已保存会话"),
+                    Err(e) => log::error!("panic 时保存会话失败: {e:#}"),
+                }
+            }
+            Err(_) => log::warn!("panic 时会话存储被占用，跳过保存以避免死锁"),
+        }
+        previous(info);
+    }));
 }
 
 /// 退出兜底保存：复用 state::persist_sessions。

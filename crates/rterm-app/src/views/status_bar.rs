@@ -9,7 +9,7 @@ use gpui::prelude::*;
 use gpui::{div, px, Context, IntoElement, Render, Window};
 
 use crate::event::AppEvent;
-use crate::state::AppState;
+use crate::state::{lock_or_recover, AppState};
 use crate::ui::theme;
 
 use super::STATUS_BAR_H;
@@ -35,8 +35,10 @@ impl StatusBar {
                 AppEvent::SessionConnected { session_id } => {
                     let label = {
                         let state = cx.global::<AppState>();
-                        let store = state.session_store.lock().unwrap();
-                        store.get(*session_id).map(|session| session.display_label())
+                        let store = lock_or_recover(&state.session_store);
+                        store
+                            .get(*session_id)
+                            .map(|session| session.display_label())
                     };
                     this.host = label.or_else(|| this.host.clone());
                     this.reconnect_attempt = None;
@@ -87,9 +89,7 @@ impl StatusBar {
         // 时钟：每秒刷新
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_secs(1))
-                    .await;
+                cx.background_executor().timer(Duration::from_secs(1)).await;
                 let now = chrono::Local::now().format("%H:%M:%S").to_string();
                 if this
                     .update(cx, |this, cx| {

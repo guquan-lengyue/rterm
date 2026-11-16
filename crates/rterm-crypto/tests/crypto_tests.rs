@@ -6,7 +6,11 @@ use rterm_crypto::{aesgcm_decrypt, aesgcm_encrypt, dpapi_decrypt, dpapi_encrypt}
 fn dpapi_roundtrip() {
     let plain = b"hello rterm";
     let enc = dpapi_encrypt(plain).expect("encrypt should succeed");
-    assert_ne!(enc, plain.as_slice(), "ciphertext must differ from plaintext");
+    assert_ne!(
+        enc,
+        plain.as_slice(),
+        "ciphertext must differ from plaintext"
+    );
     assert!(!enc.is_empty());
     let dec = dpapi_decrypt(&enc).expect("decrypt should succeed");
     assert_eq!(dec, plain);

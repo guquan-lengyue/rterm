@@ -34,8 +34,8 @@ fn encrypt_auth_dpapi(auth: &mut AuthMethod) -> Result<()> {
     match auth {
         AuthMethod::Password { password } => {
             if !password.is_empty() && password.version == 0 {
-                let cipher = rterm_crypto::dpapi_encrypt(&password.data)
-                    .context("DPAPI 加密密码失败")?;
+                let cipher =
+                    rterm_crypto::dpapi_encrypt(&password.data).context("DPAPI 加密密码失败")?;
                 password.data = cipher;
                 password.version = 1;
             }
@@ -43,8 +43,8 @@ fn encrypt_auth_dpapi(auth: &mut AuthMethod) -> Result<()> {
         AuthMethod::PrivateKey { passphrase, .. } => {
             if let Some(pp) = passphrase.as_mut() {
                 if !pp.is_empty() && pp.version == 0 {
-                    let cipher = rterm_crypto::dpapi_encrypt(&pp.data)
-                        .context("DPAPI 加密密钥口令失败")?;
+                    let cipher =
+                        rterm_crypto::dpapi_encrypt(&pp.data).context("DPAPI 加密密钥口令失败")?;
                     pp.data = cipher;
                     pp.version = 1;
                 }
@@ -82,8 +82,8 @@ fn decrypt_auth_dpapi(auth: &mut AuthMethod) -> Result<()> {
         AuthMethod::PrivateKey { passphrase, .. } => {
             if let Some(pp) = passphrase.as_mut() {
                 if !pp.is_empty() && pp.version == 1 {
-                    let plain = rterm_crypto::dpapi_decrypt(&pp.data)
-                        .context("DPAPI 解密密钥口令失败")?;
+                    let plain =
+                        rterm_crypto::dpapi_decrypt(&pp.data).context("DPAPI 解密密钥口令失败")?;
                     pp.data = plain;
                     pp.version = 0;
                 }
@@ -126,10 +126,13 @@ fn encrypt_auth_aesgcm(auth: &mut AuthMethod, passphrase: &str) -> Result<()> {
                 let cipher = rterm_crypto::aesgcm_encrypt(&plain, passphrase)
                     .context("AES-GCM 加密导出密码失败")?;
                 password.data = cipher;
-                password.version = 2;  // version=2 表示 AES-GCM
+                password.version = 2; // version=2 表示 AES-GCM
             }
         }
-        AuthMethod::PrivateKey { passphrase: Some(pp), .. } if !pp.is_empty() => {
+        AuthMethod::PrivateKey {
+            passphrase: Some(pp),
+            ..
+        } if !pp.is_empty() => {
             let plain = if pp.version == 1 {
                 rterm_crypto::dpapi_decrypt(&pp.data).context("导出时 DPAPI 解密钥口令失败")?
             } else {
@@ -168,9 +171,10 @@ fn decrypt_auth_aesgcm(auth: &mut AuthMethod, passphrase: &str) -> Result<()> {
                 password.version = 0;
             }
         }
-        AuthMethod::PrivateKey { passphrase: Some(pp), .. }
-            if !pp.is_empty() && pp.version == 2 =>
-        {
+        AuthMethod::PrivateKey {
+            passphrase: Some(pp),
+            ..
+        } if !pp.is_empty() && pp.version == 2 => {
             let plain = rterm_crypto::aesgcm_decrypt(&pp.data, passphrase)?;
             pp.data = plain;
             pp.version = 0;

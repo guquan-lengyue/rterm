@@ -31,7 +31,7 @@
 - **后果**：
   - 正面：成熟稳定、SFTP 原生支持、PTY 全功能、压缩/keepalive/agent 完整
   - 风险：需要 C 工具链（cmake + perl 编译 OpenSSL）、ssh2 crate 是同步的
-  - 缓解：在 `rterm-ssh` 里用 `tokio::task::spawn_blocking` 包装所有 ssh2 调用，通过 mpsc channel 与 gpui 主线程桥接
+  - 缓解：在 `rterm-ssh` 里用独立 `std::thread` 包装 ssh2 调用，通过 mpsc / futures channel 与 gpui 主线程桥接（实际实现见 ADR-007 修订）
 
 ## ADR-003：终端仿真 — 选用 alacritty_terminal 作为后端
 
@@ -80,32 +80,35 @@
   - 风险：DPAPI 在另一台 Windows 机器上无法解密；主密码丢失无法恢复
   - 缓解：导入导出时强制要求口令；UI 有明显警告提示
 
-## ADR-006：错误处理策略 — Service 层 anyhow + View 层 thiserror 映射
+## ADR-006：错误处理策略 — Service 层 anyhow + View 层字符串边界
 
 - **日期**：2026-11-13
-- **状态**：已接受
+- **状态**：已接受（2026-11-16 修订：暂不引入 `AppError`）
 - **上下文**：分层架构下错误如何传播。
 - **决策**：
-  - Service / Infrastructure 层：`anyhow::Result<T>` 方便写
-  - Application 层和事件总线：定义 `rterm-app::AppError`（thiserror），在 Service → App 边界做 `.map_err()` 转换
-  - View 层：只接收到已经格式好的 `AppEvent::{XxxFailed}`，不再接触原始 Error 对象
+  - Service / Infrastructure 层：`anyhow::Result<T>` + `.context()` 保留错误链
+  - 应用边界：当前直接在后台任务/事件构造点把错误格式化为中文文案，通过 `PtyEvent::{Failed,Closed}`、`AppEvent::{SessionFailed,...}` 传给 View
+  - View 层：只接收面向用户的字符串，不接触原始 ssh2 / io Error
+  - `rterm-app::AppError`（thiserror）暂不实现：当前错误主要一次性展示，没有分类重试/告警需求；等 S9/S10 出现结构化错误消费方再引入
 - **后果**：
-  - 正面：View 层不关心底层 ssh2 错误细节，只看面向用户的错误文案
-  - 错误链完整保留，Debug 时用 `.with_context()` 可追溯
+  - 正面：实现简单，View 层只关心文案；错误链在 log 中完整保留
+  - 风险：跨层字符串边界丢失错误类型，未来若需要按错误类型重试需补 `AppError` 映射
 
-## ADR-007：异步线程模型 — ssh2 blocking + tokio mpsc 桥接 gpui 主线程
+## ADR-007：异步线程模型 — ssh2 blocking + 独立线程 + channel 桥接 gpui 主线程
 
 - **日期**：2026-11-13
-- **状态**：已接受
+- **状态**：已接受（2026-11-16 修订：实际使用 std::thread，而非 tokio spawn_blocking）
 - **上下文**：ssh2 crate 所有调用都是同步的，gpui 有自己的事件循环不能阻塞。
-- **决策**：
-  - ssh2 操作（connect / open_pty / exec / sftp.put_file）：`tokio::task::spawn_blocking`
-  - 后台 blocking 任务与 gpui 主线程之间：`tokio::sync::mpsc::channel` 发消息
-  - gpui 侧用 `App::spawn` 或 `Window::spawn` 接收 channel 消息（`await` 在 gpui 主线程的 tokio Runtime 上）
-  - **TerminalEngine / SyncBridge** 必须在 gpui 主线程（因为 alacritty_terminal::Term 是 !Send），收到 PTY 字节后直接 `engine.input_bytes()`
+- **决策（实际实现）**：
+  - 每个 SSH 连接 / PTY IO / SFTP 传输 worker 使用独立 `std::thread`，不占用 gpui 主线程
+  - 后台 → UI：`futures::channel::mpsc`（PTY 输出，有界背压）或 `std::sync::mpsc`（SFTP 导航/操作结果、主机密钥应答）
+  - UI → 后台：`std::sync::mpsc` 命令通道（输入 / resize / close / transfer command）
+  - gpui 侧用 `cx.spawn` 驱动 receiver（在 gpui 自带 Runtime 上 await），收到消息后 `this.update(...)`
+  - **TerminalEngine / SyncBridge** 必须在 gpui 主线程（`alacritty_terminal::Term` 是 `!Send`），收到 PTY 字节后直接 `engine.input_bytes()`
 - **后果**：
-  - 正面：充分利用多核，UI 不卡顿，符合 gpui 推荐模式
-  - 注意：gpui_platform::application() 内部自带 tokio Runtime（从 bezel-gpui 0.3 起默认创建），不需要我们自己建 Runtime
+  - 正面：UI 不阻塞；不需要自己建 tokio Runtime；线程生命周期可控（Tab 关闭时 shutdown/join）
+  - 风险：阻塞的 libssh2 网络调用不可中断，关闭 Tab 时回收线程可能等待当前调用返回（已用后台 reaper 线程避免卡 UI）
+  - 注意：`gpui_platform::application()` 内部自带 Runtime（bezel-gpui 0.3 起）
 
 ## ADR-008：跨平台支持策略 — MVP 优先 Windows，macOS/Linux 源码可构建
 
@@ -130,13 +133,23 @@
   - B. PuTTY 注册表格式导入
   - C. OpenSSH ~/.ssh/config 导入
 - **决策**：v1.0 A + C（OpenSSH 导入作为补充），B 延后。JSON schema 带 `version` 字段，未来迁移用 serde 的 default / tag。
-- **示例 JSON（未加密结构）**：
+- **实际格式（2026-11-16 修订）**：
+  - 顶层为 `ExportWrapper { tag: ExportTag { version, exported_at, sessions } }`
+  - `sessions` 内每个敏感字段是 `EncryptedString { version, data(base64) }`：
+    - `version=0` 明文（仅内存）
+    - `version=1` DPAPI（本机导出）
+    - `version=2` AES-256-GCM（口令导出）
+  - AES-GCM 的 salt/nonce 编码在对应字段的 `data` 内；KDF 参数当前固定为 PBKDF2-SHA256 600k，未写入文件
+  - 未实现 ADR 初稿中的全局 `passphrase.kdf` 元数据块
+- **后果**：
+  - 正面：字段级加密，导入时逐字段解密，单条失败可保留其余
+  - 风险：KDF 参数/算法没有文件级版本元数据，未来升级参数时需要兼容旧数据（按 `EncryptedString.version` 或探测数据长度处理）
+- **示例 JSON（结构示意，敏感字段已加密）**：
   ```json
   {
-    "rterm-export": {
+    "tag": {
       "version": 1,
       "exported_at": "2026-11-13T10:00:00Z",
-      "passphrase": { "kdf": "pbkdf2-sha256", "salt": "...", "iter": 600_000 },
       "sessions": [
         {
           "id": "019f...",
@@ -144,7 +157,7 @@
           "host": "10.0.0.5",
           "port": 22,
           "username": "deploy",
-          "auth": { "$type": "password", "ciphertext_base64": "<AES-GCM>" }
+          "auth": { "Password": { "password": { "version": 2, "data": "<base64>" } } }
         }
       ]
     }

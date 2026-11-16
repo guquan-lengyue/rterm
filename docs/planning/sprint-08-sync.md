@@ -1,6 +1,6 @@
 # Sprint 8 — 路径同步
 
-> **状态**：**待开始**（S7.5 技术债清偿完成后启动）
+> **状态**：⏳ **下一个**（S7.5 技术债清偿已完成）
 > **前置**：[Sprint 6](./sprint-06-terminal-render.md)（Terminal PTY 输出 ✅）+ [Sprint 7](./sprint-07-sftp.md)（SFTP 导航；Perl ✅ 已完成）+ **[Sprint 7.5](./sprint-07.5-tech-debt.md)（技术债清偿；强制前置）** + [Sprint 4](./sprint-04-settings-io.md)（`Settings.sftp_sync_mode` 已持久化）
 > **目标**：SyncBridge + PS1 正则 + ignore 防回环
 > **定位**：rterm 独有杀手功能

@@ -23,7 +23,10 @@ pub struct SessionStore {
 
 impl SessionStore {
     pub fn new() -> Self {
-        Self { sessions: Vec::new(), dirty: false }
+        Self {
+            sessions: Vec::new(),
+            dirty: false,
+        }
     }
 
     /// 列出所有会话（不可变引用）。
@@ -56,6 +59,7 @@ impl SessionStore {
     /// 插入或更新会话。
     /// - 若 id 已存在 → 更新 + 刷新 last_modified
     /// - 若 id 不存在 → 追加
+    ///
     /// 返回本次操作类型（给上层发 EventBus 事件）。
     pub fn upsert(&mut self, mut session: Session) -> UpsertResult {
         let existing_idx = self.sessions.iter().position(|s| s.id == session.id);
@@ -109,12 +113,12 @@ impl SessionStore {
         Ok(())
     }
 
-    fn save_inner<F>(&self, path: &Path, mut encrypt_fn: F) -> Result<()>
+    fn save_inner<F>(&self, path: &Path, encrypt_fn: F) -> Result<()>
     where
         F: FnMut(&Session) -> Result<Session>,
     {
         // 加密后再序列化，避免明文落盘。
-        let encrypted: Result<Vec<_>> = self.sessions.iter().map(|s| encrypt_fn(s)).collect();
+        let encrypted: Result<Vec<_>> = self.sessions.iter().map(encrypt_fn).collect();
         let encrypted = encrypted.context("加密会话失败")?;
 
         let wrapper = SessionFile {
@@ -123,8 +127,7 @@ impl SessionStore {
             sessions: encrypted,
         };
 
-        let json = serde_json::to_string_pretty(&wrapper)
-            .context("序列化会话 JSON 失败")?;
+        let json = serde_json::to_string_pretty(&wrapper).context("序列化会话 JSON 失败")?;
 
         // 原子写：父目录 → tmp → rename
         if let Some(parent) = path.parent() {
@@ -133,8 +136,10 @@ impl SessionStore {
             }
         }
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &json).with_context(|| format!("写临时文件失败: {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("重命名到目标失败: {}", path.display()))?;
+        std::fs::write(&tmp, &json)
+            .with_context(|| format!("写临时文件失败: {}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("重命名到目标失败: {}", path.display()))?;
 
         Ok(())
     }
@@ -162,7 +167,10 @@ impl SessionStore {
         let decrypted: Result<Vec<_>> = wrapper.sessions.iter().map(&mut decrypt_fn).collect();
         let sessions = decrypted.context("解密会话失败 — 密码或密钥可能不匹配")?;
 
-        Ok(Self { sessions, dirty: false })
+        Ok(Self {
+            sessions,
+            dirty: false,
+        })
     }
 
     /// 容错加载：逐条解密，单条失败只记录 `LoadIssue`，不整体失败。
@@ -201,7 +209,13 @@ impl SessionStore {
             }
         }
 
-        Ok((Self { sessions, dirty: false }, issues))
+        Ok((
+            Self {
+                sessions,
+                dirty: false,
+            },
+            issues,
+        ))
     }
 
     /// save + load 往返验证（测试用）。
@@ -257,7 +271,8 @@ fn read_session_file(path: &Path) -> Result<SessionFile> {
     if wrapper.version > FILE_VERSION {
         anyhow::bail!(
             "会话文件版本 {} 高于当前支持的 {}，可能来自新版本 rterm",
-            wrapper.version, FILE_VERSION
+            wrapper.version,
+            FILE_VERSION
         );
     }
 

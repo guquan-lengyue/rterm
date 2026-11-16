@@ -98,9 +98,15 @@ pub fn export_json(
     let picked = apply_scope(sessions, scope);
 
     let encrypted: Result<Vec<_>> = if let Some(pw) = passphrase {
-        picked.iter().map(|s| crypto_bridge::encrypt_session_aesgcm(s, pw)).collect()
+        picked
+            .iter()
+            .map(|s| crypto_bridge::encrypt_session_aesgcm(s, pw))
+            .collect()
     } else {
-        picked.iter().map(|s| crypto_bridge::encrypt_session_dpapi(s)).collect()
+        picked
+            .iter()
+            .map(|s| crypto_bridge::encrypt_session_dpapi(s))
+            .collect()
     };
     let encrypted = encrypted.context("导出加密失败")?;
 
@@ -115,7 +121,7 @@ pub fn export_json(
     serde_json::to_string_pretty(&wrapper).context("序列化导出 JSON 失败")
 }
 
-fn apply_scope<'a>(sessions: &'a [Session], scope: ExportScope) -> Vec<&'a Session> {
+fn apply_scope(sessions: &[Session], scope: ExportScope) -> Vec<&Session> {
     match scope {
         ExportScope::All => sessions.iter().collect(),
         ExportScope::Folder(ref folder) => sessions
@@ -169,7 +175,11 @@ pub fn preview_import(
             } else {
                 ImportPreviewStatus::Added
             };
-            ImportPreviewItem { id: s.id, name: s.display_label(), status }
+            ImportPreviewItem {
+                id: s.id,
+                name: s.display_label(),
+                status,
+            }
         })
         .collect())
 }
@@ -180,9 +190,15 @@ fn parse_and_decrypt(json: &str, passphrase: Option<&str>) -> Result<Vec<Session
     let tag = wrapper.tag.context("缺少 rterm-export 标记")?;
 
     let decrypted: Result<Vec<_>> = if let Some(pw) = passphrase {
-        tag.sessions.iter().map(|s| crypto_bridge::decrypt_session_aesgcm(s, pw)).collect()
+        tag.sessions
+            .iter()
+            .map(|s| crypto_bridge::decrypt_session_aesgcm(s, pw))
+            .collect()
     } else {
-        tag.sessions.iter().map(|s| crypto_bridge::decrypt_session_dpapi(s)).collect()
+        tag.sessions
+            .iter()
+            .map(crypto_bridge::decrypt_session_dpapi)
+            .collect()
     };
     decrypted.context("导入解密失败 — 可能需要口令")
 }
@@ -218,7 +234,11 @@ pub fn import_json(
             }
             (Some(_), ConflictPolicy::Rename) => {
                 let mut renamed = incoming.clone();
-                renamed.name = format!("{}_imported_{}", renamed.name, Utc::now().format("%Y%m%d%H%M%S"));
+                renamed.name = format!(
+                    "{}_imported_{}",
+                    renamed.name,
+                    Utc::now().format("%Y%m%d%H%M%S")
+                );
                 renamed.id = Uuid::new_v4();
                 merged.push(renamed);
                 report.renamed += 1;

@@ -1,6 +1,6 @@
 //! store_tests — SessionStore CRUD + save/load 往返 + 加密字段
 
-use rterm_session::{Session, SessionStore, AuthMethod, EncryptedString};
+use rterm_session::{AuthMethod, EncryptedString, Session, SessionStore};
 use std::path::PathBuf;
 
 fn tmp_path(name: &str) -> PathBuf {
@@ -110,15 +110,22 @@ fn encrypted_password_survives_roundtrip() {
     #[cfg(target_os = "windows")]
     {
         store
-            .save(&path, |s| rterm_session::crypto_bridge::encrypt_session_dpapi(s))
+            .save(&path, |s| {
+                rterm_session::crypto_bridge::encrypt_session_dpapi(s)
+            })
             .expect("save with dpapi");
 
         let cipher_json = std::fs::read_to_string(&path).unwrap();
         // 密码字节应该是 DPAPI 密文（base64），不是明文 "hunter2"
-        assert!(!cipher_json.contains("hunter2"), "密码明文不应出现在 JSON 中");
+        assert!(
+            !cipher_json.contains("hunter2"),
+            "密码明文不应出现在 JSON 中"
+        );
 
-        let loaded = SessionStore::load(&path, |s| rterm_session::crypto_bridge::decrypt_session_dpapi(s))
-            .expect("load with dpapi");
+        let loaded = SessionStore::load(&path, |s| {
+            rterm_session::crypto_bridge::decrypt_session_dpapi(s)
+        })
+        .expect("load with dpapi");
         let got = loaded.get(s.id).unwrap();
         if let AuthMethod::Password { password } = &got.auth {
             assert_eq!(password.data, b"hunter2");

@@ -19,7 +19,10 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-pub use known_hosts::{HostKeyDecision, HostKeyInfo, HostKeyPolicy};
+pub use known_hosts::{HostKeyChoice, HostKeyDecision, HostKeyInfo, HostKeyPolicy};
+
+/// 主机密钥确认回调：未知 / 变更时由 UI 三选一后回传结果。
+pub type HostKeyVerifier = Box<dyn Fn(&HostKeyInfo) -> HostKeyChoice + Send>;
 
 /// 连接状态机。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,12 +66,29 @@ impl SshSession {
         self.last_host_key.as_ref()
     }
 
-    /// 连接 + 主机密钥校验 + 认证。阻塞调用。
+    /// 连接 + 主机密钥校验 + 认证（未知 / 变更时按 TOFU 处理）。阻塞调用。
     pub fn connect(&mut self, config: &rterm_session::Session) -> Result<()> {
+        self.connect_with_verifier(config, None)
+    }
+
+    /// 连接 + 主机密钥校验 + 认证；`verifier` 用于未知 / 变更时三选一。
+    pub fn connect_with_verifier(
+        &mut self,
+        config: &rterm_session::Session,
+        verifier: Option<HostKeyVerifier>,
+    ) -> Result<()> {
         self.state = ConnectionState::Connecting;
         self.last_host_key = None;
 
-        match self.connect_inner(config) {
+        // 去掉 Send 约束后再传给 connect_inner（校验发生在同一线程内）。
+        let borrowed_verifier: Option<&dyn Fn(&HostKeyInfo) -> HostKeyChoice> = match &verifier {
+            Some(verifier) => {
+                let verifier: &dyn Fn(&HostKeyInfo) -> HostKeyChoice = verifier.as_ref();
+                Some(verifier)
+            }
+            None => None,
+        };
+        match self.connect_inner(config, borrowed_verifier) {
             Ok(()) => {
                 self.state = ConnectionState::Connected;
                 Ok(())
@@ -81,7 +101,11 @@ impl SshSession {
         }
     }
 
-    fn connect_inner(&mut self, config: &rterm_session::Session) -> Result<()> {
+    fn connect_inner(
+        &mut self,
+        config: &rterm_session::Session,
+        verifier: Option<&dyn Fn(&HostKeyInfo) -> HostKeyChoice>,
+    ) -> Result<()> {
         if config.host.trim().is_empty() {
             bail!("主机地址为空");
         }
@@ -103,16 +127,18 @@ impl SshSession {
             .handshake()
             .with_context(|| format!("SSH 握手失败: {}:{}", config.host, config.port))?;
 
-        let info = known_hosts::check_and_record(
+        let info = known_hosts::verify_host_key(
             &session,
             &config.host,
             config.port,
             &known_hosts::default_path(),
             HostKeyPolicy::TrustOnFirstUse,
+            verifier,
         )?;
         let decision = info.decision;
         self.last_host_key = Some(info.clone());
 
+        // Changed 且用户未确认时由 verify_host_key 原样返回，这里继续拒绝。
         if decision == HostKeyDecision::Changed {
             bail!(
                 "主机密钥已变更（{}:{}，{} {}），已拒绝连接",
@@ -178,6 +204,5 @@ fn connect_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
         }
     }
 
-    Err(last_error.unwrap())
-        .with_context(|| format!("TCP 连接失败: {host}:{port}"))
+    Err(last_error.unwrap()).with_context(|| format!("TCP 连接失败: {host}:{port}"))
 }

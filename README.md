@@ -2,7 +2,8 @@
 
 一个用 **Rust + bezel-gpui** 构建的跨平台远程终端管理工具，对标 sshxterm / Xshell。
 
-核心特性：SSH 会话管理、远程终端（xterm-256color）、SFTP 文件管理、远程性能监控、**SFTP ↔ 终端路径双向同步**、会话加密导入导出。
+核心特性：SSH 会话管理、远程终端（xterm-256color）、SFTP 文件管理、会话加密导入导出。
+规划中：远程性能监控（S9）、**SFTP ↔ 终端路径双向同步**（S8）。
 
 > **MVP 开发中。v1.0 目标：Windows 完整验证，macOS/Linux 源码可构建。**
 
@@ -64,8 +65,8 @@ crates/
 ├── rterm-ssh      # ssh2 crate 封装 + 重连 + keepalive
 ├── rterm-terminal # PTY + alacritty_terminal glue + 输入输出桥接
 ├── rterm-sftp     # SFTP 浏览 + 传输队列
-├── rterm-monitor  # 远程采集 + 时序聚合 + 告警
-├── rterm-sync     # 终端 ↔ SFTP 路径同步核心（SyncBridge）
+├── rterm-monitor  # S9 占位：远程采集 + 时序聚合 + 告警（未接入）
+├── rterm-sync     # S8 占位：终端 ↔ SFTP 路径同步核心（未接入）
 └── rterm-crypto   # DPAPI + AES-GCM 加解密
 ```
 

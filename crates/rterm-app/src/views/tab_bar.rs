@@ -5,16 +5,14 @@
 //! 由 MainWindow 统一管理 Tab 生命周期。
 
 use gpui::prelude::*;
-use gpui::{
-    div, px, Context, IntoElement, MouseButton, MouseDownEvent, Render, Window,
-};
+use gpui::{div, px, Context, IntoElement, MouseButton, MouseDownEvent, Render, Window};
 use uuid::Uuid;
 
 use crate::event::{AppEvent, EventBusHost};
 use crate::state::{AppState, TabInfo, TabKind};
 use crate::ui::theme;
 
-use super::{CONTENT_BORDER_W, SIDEBAR_W, TAB_BAR_H};
+use super::{CONTENT_BORDER_W, MENU_ITEM_H, SIDEBAR_W, TAB_BAR_H, TAB_MENU_W};
 
 /// 右键菜单
 #[derive(Clone, Copy)]
@@ -42,9 +40,11 @@ impl TabBar {
     pub fn set_tabs(&mut self, tabs: Vec<TabInfo>, active: usize, cx: &mut Context<Self>) {
         self.tabs = tabs;
         self.active = active;
-        if self.menu.as_ref().is_some_and(|menu| {
-            !self.tabs.iter().any(|tab| tab.id == menu.tab_id)
-        }) {
+        if self
+            .menu
+            .as_ref()
+            .is_some_and(|menu| !self.tabs.iter().any(|tab| tab.id == menu.tab_id))
+        {
             self.menu = None;
         }
         cx.notify();
@@ -101,7 +101,11 @@ impl Render for TabBar {
             let is_active = index == active;
             let tab_id = tab.id;
             let title = format!("{} {}", Self::icon(&tab.kind), tab.title);
-            let bg = if is_active { t.app_bg() } else { t.toolbar_bg() };
+            let bg = if is_active {
+                t.app_bg()
+            } else {
+                t.toolbar_bg()
+            };
             let text_color = if is_active {
                 t.text_on_app_bg()
             } else {
@@ -130,8 +134,7 @@ impl Render for TabBar {
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
-                        let x = (f32::from(ev.position.x) - SIDEBAR_W - CONTENT_BORDER_W)
-                            .max(0.0);
+                        let x = (f32::from(ev.position.x) - SIDEBAR_W - CONTENT_BORDER_W).max(0.0);
                         this.menu = Some(TabMenu { tab_id, x });
                         cx.notify();
                     }),
@@ -150,9 +153,7 @@ impl Render for TabBar {
                         .text_color(t.text_placeholder())
                         .cursor_pointer()
                         .id(format!("rterm-tab-close-{tab_id}"))
-                        .hover(move |style| {
-                            style.bg(close_hover_bg).text_color(close_hover_text)
-                        })
+                        .hover(move |style| style.bg(close_hover_bg).text_color(close_hover_text))
                         .on_click(cx.listener(move |this, _ev: &gpui::ClickEvent, _w, cx| {
                             this.emit(cx, AppEvent::TabCloseRequested { tab_id });
                         }))
@@ -167,7 +168,7 @@ impl Render for TabBar {
                 .absolute()
                 .left(px(menu.x))
                 .top(px(TAB_BAR_H))
-                .w(px(150.))
+                .w(px(TAB_MENU_W))
                 .py_1()
                 .bg(t.card_bg())
                 .border_1()
@@ -185,7 +186,7 @@ impl Render for TabBar {
                 items = items.child(
                     div()
                         .w_full()
-                        .h(px(28.))
+                        .h(px(MENU_ITEM_H))
                         .px_3()
                         .flex()
                         .items_center()
@@ -195,18 +196,16 @@ impl Render for TabBar {
                         .cursor_pointer()
                         .id(format!("rterm-tab-menu-item-{index}"))
                         .hover(move |style| style.bg(hover))
-                        .on_click(cx.listener(
-                            move |this, _ev: &gpui::ClickEvent, _w, cx| {
-                                let event = match index {
-                                    0 => AppEvent::TabCloseRequested { tab_id },
-                                    1 => AppEvent::TabCloseOthersRequested { tab_id },
-                                    _ => AppEvent::TabCloseRightRequested { tab_id },
-                                };
-                                this.emit(cx, event);
-                                this.menu = None;
-                                cx.notify();
-                            },
-                        ))
+                        .on_click(cx.listener(move |this, _ev: &gpui::ClickEvent, _w, cx| {
+                            let event = match index {
+                                0 => AppEvent::TabCloseRequested { tab_id },
+                                1 => AppEvent::TabCloseOthersRequested { tab_id },
+                                _ => AppEvent::TabCloseRightRequested { tab_id },
+                            };
+                            this.emit(cx, event);
+                            this.menu = None;
+                            cx.notify();
+                        }))
                         .child(label),
                 );
             }

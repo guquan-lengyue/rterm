@@ -4610,7 +4610,6 @@ dependencies = [
  "rterm-terminal",
  "serde",
  "serde_json",
- "tokio",
  "uuid",
  "windows 0.58.0",
 ]
@@ -4647,7 +4646,6 @@ dependencies = [
  "rterm-crypto",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
  "uuid",
 ]
 
@@ -4659,8 +4657,6 @@ dependencies = [
  "futures",
  "log",
  "ssh2",
- "thiserror 1.0.69",
- "tokio",
  "uuid",
 ]
 
@@ -4670,13 +4666,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
- "bytes",
  "futures",
  "log",
  "rterm-session",
+ "sha2",
  "ssh2",
- "thiserror 1.0.69",
- "tokio",
 ]
 
 [[package]]

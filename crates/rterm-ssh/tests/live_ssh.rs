@@ -21,22 +21,22 @@ fn connect_open_pty_and_run_pwd() {
     let user = std::env::var("RTERM_TEST_USER").expect("RTERM_TEST_USER");
     let password = std::env::var("RTERM_TEST_PASSWORD").expect("RTERM_TEST_PASSWORD");
 
-    let known_hosts = std::env::temp_dir().join(format!(
-        "rterm-known-hosts-{}.txt",
-        std::process::id()
-    ));
+    let known_hosts =
+        std::env::temp_dir().join(format!("rterm-known-hosts-{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&known_hosts);
     std::env::set_var("RTERM_KNOWN_HOSTS", &known_hosts);
 
-    let mut config = Session::default();
-    config.name = "live-smoke".into();
-    config.host = host;
-    config.port = 22;
-    config.username = user;
-    config.auth = AuthMethod::Password {
-        password: EncryptedString::new(&password),
+    let config = Session {
+        name: "live-smoke".into(),
+        host,
+        port: 22,
+        username: user,
+        auth: AuthMethod::Password {
+            password: EncryptedString::new(&password),
+        },
+        connect_timeout_secs: 10,
+        ..Session::default()
     };
-    config.connect_timeout_secs = 10;
 
     let mut ssh = SshSession::new();
     ssh.connect(&config).expect("SSH connect failed");

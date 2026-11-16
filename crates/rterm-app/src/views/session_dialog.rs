@@ -11,7 +11,7 @@ use gpui::{div, px, Entity, IntoElement, Render, Window};
 use uuid::Uuid;
 
 use crate::event::{AppEvent, EventBusHost};
-use crate::state::AppState;
+use crate::state::{lock_or_recover, AppState};
 use crate::ui::theme;
 
 use super::text_input::TextInput;
@@ -155,17 +155,31 @@ impl SessionEditDialog {
                         Some(p) if !p.is_empty() => PASSWORD_SENTINEL.to_string(),
                         _ => String::new(),
                     };
-                    (AuthType::PrivateKey, String::new(), path.to_string_lossy().into(), pp)
+                    (
+                        AuthType::PrivateKey,
+                        String::new(),
+                        path.to_string_lossy().into(),
+                        pp,
+                    )
                 }
                 rterm_session::AuthMethod::Agent { .. } => {
                     (AuthType::Agent, String::new(), String::new(), String::new())
                 }
             },
-            None => (AuthType::Password, String::new(), String::new(), String::new()),
+            None => (
+                AuthType::Password,
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
         };
 
         let (keepalive, timeout, compress) = match session {
-            Some(s) => (s.keepalive_secs.to_string(), s.connect_timeout_secs.to_string(), s.compress),
+            Some(s) => (
+                s.keepalive_secs.to_string(),
+                s.connect_timeout_secs.to_string(),
+                s.compress,
+            ),
             None => (
                 settings.keepalive_secs.to_string(),
                 settings.connect_timeout_secs.to_string(),
@@ -195,65 +209,41 @@ impl SessionEditDialog {
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
         // —— 表单校验：任一项失败都不 upsert / 落盘 ——
-        let name = self.name_input.read(cx).content.trim().to_string();
-        if name.is_empty() {
-            self.form_error = Some("会话名称不能为空".into());
-            cx.notify();
-            return;
-        }
-        let host = self.host_input.read(cx).content.trim().to_string();
-        if host.is_empty() {
-            self.form_error = Some("主机地址不能为空".into());
-            cx.notify();
-            return;
-        }
-        let port_text = self.port_input.read(cx).content.trim().to_string();
-        let port: u16 = match port_text.parse::<u16>() {
-            Ok(p) if p >= 1 => p,
-            _ => {
-                self.form_error = Some("端口必须是 1–65535 的数字".into());
+        let form = match validate_session_form(
+            &self.name_input.read(cx).content,
+            &self.host_input.read(cx).content,
+            &self.port_input.read(cx).content,
+            &self.keepalive_input.read(cx).content,
+            &self.timeout_input.read(cx).content,
+        ) {
+            Ok(form) => form,
+            Err(error) => {
+                self.form_error = Some(error);
                 cx.notify();
                 return;
             }
         };
-        let keepalive_text = self.keepalive_input.read(cx).content.trim().to_string();
-        let keepalive_secs: u32 = if keepalive_text.is_empty() {
-            30
-        } else {
-            match keepalive_text.parse::<u32>() {
-                Ok(v) if v > 0 => v,
-                _ => {
-                    self.form_error = Some("KeepAlive 必须是正整数秒".into());
-                    cx.notify();
-                    return;
-                }
-            }
-        };
-        let timeout_text = self.timeout_input.read(cx).content.trim().to_string();
-        let connect_timeout_secs: u32 = if timeout_text.is_empty() {
-            10
-        } else {
-            match timeout_text.parse::<u32>() {
-                Ok(v) if v > 0 => v,
-                _ => {
-                    self.form_error = Some("连接超时必须正整数秒".into());
-                    cx.notify();
-                    return;
-                }
-            }
-        };
+        let name = form.name;
+        let host = form.host;
+        let port = form.port;
+        let keepalive_secs = form.keepalive_secs;
+        let connect_timeout_secs = form.connect_timeout_secs;
 
         self.form_error = None;
         let username = self.username_input.read(cx).content.to_string();
         let folder_val = self.folder_input.read(cx).content.to_string();
-        let folder = if folder_val.is_empty() { None } else { Some(folder_val) };
+        let folder = if folder_val.is_empty() {
+            None
+        } else {
+            Some(folder_val)
+        };
 
         let session_id = self.editing_id.unwrap_or_else(Uuid::new_v4);
 
         // 先取旧会话：保留 created_at / last_connected / 未修改的原密码
         let old = {
             let state = cx.global::<AppState>();
-            let store = state.session_store.lock().unwrap();
+            let store = lock_or_recover(&state.session_store);
             store.get(session_id).cloned()
         };
 
@@ -264,10 +254,7 @@ impl SessionEditDialog {
                     // 密码框未被修改（仍是掩码占位）→ 沿用旧密码
                     match old.as_ref() {
                         Some(s)
-                            if matches!(
-                                &s.auth,
-                                rterm_session::AuthMethod::Password { .. }
-                            ) =>
+                            if matches!(&s.auth, rterm_session::AuthMethod::Password { .. }) =>
                         {
                             s.auth.clone()
                         }
@@ -282,7 +269,8 @@ impl SessionEditDialog {
                 }
             }
             AuthType::PrivateKey => {
-                let path = std::path::PathBuf::from(self.key_path_input.read(cx).content.to_string());
+                let path =
+                    std::path::PathBuf::from(self.key_path_input.read(cx).content.to_string());
                 let pp = self.passphrase_input.read(cx).content.to_string();
                 let passphrase = if pp == PASSWORD_SENTINEL {
                     // 口令框未被修改（仍是掩码占位）→ 原样保留旧口令
@@ -299,7 +287,9 @@ impl SessionEditDialog {
                 };
                 rterm_session::AuthMethod::PrivateKey { path, passphrase }
             }
-            AuthType::Agent => rterm_session::AuthMethod::Agent { key_comment: String::new() },
+            AuthType::Agent => rterm_session::AuthMethod::Agent {
+                key_comment: String::new(),
+            },
         };
 
         let (created_at, last_connected) = match &old {
@@ -307,24 +297,26 @@ impl SessionEditDialog {
             None => (rterm_session::default_now(), None),
         };
 
-        let mut session = rterm_session::Session::default();
-        session.id = session_id;
-        session.name = name;
-        session.host = host;
-        session.port = port;
-        session.username = username;
-        session.auth = auth;
-        session.keepalive_secs = keepalive_secs;
-        session.connect_timeout_secs = connect_timeout_secs;
-        session.folder = folder;
-        session.compress = self.compress_enabled;
-        session.created_at = created_at;
-        session.last_modified = rterm_session::default_now();
-        session.last_connected = last_connected;
+        let session = rterm_session::Session {
+            id: session_id,
+            name,
+            host,
+            port,
+            username,
+            auth,
+            keepalive_secs,
+            connect_timeout_secs,
+            folder,
+            compress: self.compress_enabled,
+            created_at,
+            last_modified: rterm_session::default_now(),
+            last_connected,
+            ..rterm_session::Session::default()
+        };
 
         {
             let state = cx.global_mut::<AppState>();
-            let mut store = state.session_store.lock().unwrap();
+            let mut store = lock_or_recover(&state.session_store);
             store.upsert(session);
         }
 
@@ -346,7 +338,11 @@ impl SessionEditDialog {
             cx.emit(AppEvent::SessionTreeOpenEditDialog { session_id: None });
         });
 
-        log::info!("SessionEditDialog saved session {} (new={})", session_id, is_new);
+        log::info!(
+            "SessionEditDialog saved session {} (new={})",
+            session_id,
+            is_new
+        );
     }
 
     pub fn cancel(&mut self, cx: &mut Context<Self>) {
@@ -390,6 +386,65 @@ impl SessionEditDialog {
     }
 }
 
+/// 校验并规整后的会话表单字段。
+#[derive(Debug, PartialEq, Eq)]
+struct ValidatedSessionForm {
+    name: String,
+    host: String,
+    port: u16,
+    keepalive_secs: u32,
+    connect_timeout_secs: u32,
+}
+
+/// 纯函数表单校验：成功返回规整后的字段，失败返回展示用错误文案。
+///
+/// 端口必须是 1–65535；KeepAlive / 连接超时留空时用默认值（30 / 10），
+/// 非空则必须是正整数。
+fn validate_session_form(
+    name: &str,
+    host: &str,
+    port: &str,
+    keepalive: &str,
+    timeout: &str,
+) -> Result<ValidatedSessionForm, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("会话名称不能为空".into());
+    }
+
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        return Err("主机地址不能为空".into());
+    }
+
+    let port = match port.trim().parse::<u16>() {
+        Ok(port) if port >= 1 => port,
+        _ => return Err("端口必须是 1–65535 的数字".into()),
+    };
+
+    let keepalive_secs = parse_positive_or_default(keepalive, 30, "KeepAlive 必须是正整数秒")?;
+    let connect_timeout_secs = parse_positive_or_default(timeout, 10, "连接超时必须正整数秒")?;
+
+    Ok(ValidatedSessionForm {
+        name,
+        host,
+        port,
+        keepalive_secs,
+        connect_timeout_secs,
+    })
+}
+
+fn parse_positive_or_default(value: &str, default: u32, error: &str) -> Result<u32, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(default);
+    }
+    match value.parse::<u32>() {
+        Ok(parsed) if parsed > 0 => Ok(parsed),
+        _ => Err(error.to_string()),
+    }
+}
+
 /// 阻塞式 TCP 连接检查，返回结果状态。
 fn tcp_check(host: &str, port: u16) -> TestStatus {
     use std::net::{TcpStream, ToSocketAddrs};
@@ -416,7 +471,11 @@ fn tcp_check(host: &str, port: u16) -> TestStatus {
 impl Render for SessionEditDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        let title = if self.editing_id.is_some() { "编辑会话" } else { "新建会话" };
+        let title = if self.editing_id.is_some() {
+            "编辑会话"
+        } else {
+            "新建会话"
+        };
 
         div()
             .size_full()
@@ -486,16 +545,24 @@ impl Render for SessionEditDialog {
 }
 
 impl SessionEditDialog {
-    fn render_tab_header(
-        &self,
-        tab: DialogTab,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_tab_header(&self, tab: DialogTab, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme(cx);
         let is_active = self.active_tab == tab;
-        let bg = if is_active { t.row_selected_bg() } else { t.card_header_bg() };
-        let text_color = if is_active { t.text_on_row_selected_bg() } else { t.text_subtle() };
-        let border_color = if is_active { t.primary() } else { t.border_subtle() };
+        let bg = if is_active {
+            t.row_selected_bg()
+        } else {
+            t.card_header_bg()
+        };
+        let text_color = if is_active {
+            t.text_on_row_selected_bg()
+        } else {
+            t.text_subtle()
+        };
+        let border_color = if is_active {
+            t.primary()
+        } else {
+            t.border_subtle()
+        };
         let label = tab.label().to_string();
         let id_str = format!("rterm-tab-{:?}", tab.label());
 
@@ -513,10 +580,12 @@ impl SessionEditDialog {
             .border_color(border_color)
             .hover(|s| s.text_color(t.text_on_card_header_bg()))
             .id(id_str)
-            .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                this.active_tab = tab;
-                cx.notify();
-            }))
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                    this.active_tab = tab;
+                    cx.notify();
+                }),
+            )
             .child(label)
             .into_any_element()
     }
@@ -558,10 +627,22 @@ impl SessionEditDialog {
             .flex_1()
             .px_4()
             .py_4()
-            .child(Self::render_field("会话名称 *", self.name_input.clone(), cx))
-            .child(Self::render_field("主机地址 *", self.host_input.clone(), cx))
+            .child(Self::render_field(
+                "会话名称 *",
+                self.name_input.clone(),
+                cx,
+            ))
+            .child(Self::render_field(
+                "主机地址 *",
+                self.host_input.clone(),
+                cx,
+            ))
             .child(Self::render_field("端口", self.port_input.clone(), cx))
-            .child(Self::render_field("用户名", self.username_input.clone(), cx))
+            .child(Self::render_field(
+                "用户名",
+                self.username_input.clone(),
+                cx,
+            ))
             .child(Self::render_field("分组", self.folder_input.clone(), cx))
             .into_any_element()
     }
@@ -574,7 +655,11 @@ impl SessionEditDialog {
         let radio = |label_str: &str, variant: AuthType, selected: bool, cx: &mut Context<Self>| {
             let label_owned = label_str.to_string();
             let dot_color = if selected { selected_fg } else { unselected_fg };
-            let label_color = if selected { t.text_on_card_bg() } else { t.text_subtle() };
+            let label_color = if selected {
+                t.text_on_card_bg()
+            } else {
+                t.text_subtle()
+            };
             let id_str = format!("rterm-auth-{:?}", variant);
             div()
                 .flex()
@@ -583,10 +668,12 @@ impl SessionEditDialog {
                 .cursor_pointer()
                 .mb_2()
                 .id(id_str)
-                .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                    this.auth_type = variant;
-                    cx.notify();
-                }))
+                .on_click(
+                    cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                        this.auth_type = variant;
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
                         .w(px(12.))
@@ -615,18 +702,42 @@ impl SessionEditDialog {
                     .mb_2()
                     .child("认证方式"),
             )
-            .child(radio("密码", AuthType::Password, self.auth_type == AuthType::Password, cx))
-            .child(radio("私钥", AuthType::PrivateKey, self.auth_type == AuthType::PrivateKey, cx))
-            .child(radio("SSH Agent", AuthType::Agent, self.auth_type == AuthType::Agent, cx));
+            .child(radio(
+                "密码",
+                AuthType::Password,
+                self.auth_type == AuthType::Password,
+                cx,
+            ))
+            .child(radio(
+                "私钥",
+                AuthType::PrivateKey,
+                self.auth_type == AuthType::PrivateKey,
+                cx,
+            ))
+            .child(radio(
+                "SSH Agent",
+                AuthType::Agent,
+                self.auth_type == AuthType::Agent,
+                cx,
+            ));
 
         match self.auth_type {
             AuthType::Password => {
-                container = container.child(Self::render_field("密码", self.password_input.clone(), cx));
+                container =
+                    container.child(Self::render_field("密码", self.password_input.clone(), cx));
             }
             AuthType::PrivateKey => {
                 container = container
-                    .child(Self::render_field("密钥文件路径", self.key_path_input.clone(), cx))
-                    .child(Self::render_field("密钥口令", self.passphrase_input.clone(), cx));
+                    .child(Self::render_field(
+                        "密钥文件路径",
+                        self.key_path_input.clone(),
+                        cx,
+                    ))
+                    .child(Self::render_field(
+                        "密钥口令",
+                        self.passphrase_input.clone(),
+                        cx,
+                    ));
             }
             AuthType::Agent => {
                 container = container.child(
@@ -650,8 +761,16 @@ impl SessionEditDialog {
             .flex_1()
             .px_4()
             .py_4()
-            .child(Self::render_field("KeepAlive 秒数", self.keepalive_input.clone(), cx))
-            .child(Self::render_field("连接超时秒数", self.timeout_input.clone(), cx))
+            .child(Self::render_field(
+                "KeepAlive 秒数",
+                self.keepalive_input.clone(),
+                cx,
+            ))
+            .child(Self::render_field(
+                "连接超时秒数",
+                self.timeout_input.clone(),
+                cx,
+            ))
             .child(
                 div()
                     .flex()
@@ -660,10 +779,12 @@ impl SessionEditDialog {
                     .cursor_pointer()
                     .mb_2()
                     .id(compress_id)
-                    .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                        this.compress_enabled = !this.compress_enabled;
-                        cx.notify();
-                    }))
+                    .on_click(cx.listener(
+                        move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                            this.compress_enabled = !this.compress_enabled;
+                            cx.notify();
+                        },
+                    ))
                     .child(
                         div()
                             .w(px(14.))
@@ -671,7 +792,11 @@ impl SessionEditDialog {
                             .rounded(px(3.))
                             .border_1()
                             .border_color(t.border_input_idle())
-                            .bg(if self.compress_enabled { t.primary() } else { t.input_bg() }),
+                            .bg(if self.compress_enabled {
+                                t.primary()
+                            } else {
+                                t.input_bg()
+                            }),
                     )
                     .child(
                         div()
@@ -693,8 +818,16 @@ impl SessionEditDialog {
         let label_owned = label.to_string();
         let id_str = format!("rterm-dialog-btn-{}", label);
 
-        let bg = if is_primary { t.primary() } else { t.secondary_btn_bg() };
-        let hover_bg = if is_primary { t.primary_hover() } else { t.secondary_btn_hover() };
+        let bg = if is_primary {
+            t.primary()
+        } else {
+            t.secondary_btn_bg()
+        };
+        let hover_bg = if is_primary {
+            t.primary_hover()
+        } else {
+            t.secondary_btn_hover()
+        };
         let text_color = if is_primary {
             t.text_on_primary_btn()
         } else {
@@ -714,13 +847,15 @@ impl SessionEditDialog {
             .flex()
             .items_center()
             .justify_center()
-            .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                if is_primary {
-                    this.save(cx);
-                } else {
-                    this.cancel(cx);
-                }
-            }))
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                    if is_primary {
+                        this.save(cx);
+                    } else {
+                        this.cancel(cx);
+                    }
+                }),
+            )
             .child(label_owned)
             .into_any_element()
     }
@@ -744,9 +879,11 @@ impl SessionEditDialog {
             .flex()
             .items_center()
             .justify_center()
-            .on_click(cx.listener(|this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                this.test_connection(cx);
-            }))
+            .on_click(
+                cx.listener(|this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                    this.test_connection(cx);
+                }),
+            )
             .child("测试连接")
             .into_any_element()
     }
@@ -779,5 +916,60 @@ impl SessionEditDialog {
             .text_color(t.danger())
             .child(text)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_session_form;
+
+    fn valid() -> Result<super::ValidatedSessionForm, String> {
+        validate_session_form("prod", "example.com", "22", "30", "10")
+    }
+
+    #[test]
+    fn rejects_empty_name() {
+        assert!(validate_session_form("  ", "example.com", "22", "", "").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_host() {
+        assert!(validate_session_form("prod", "  ", "22", "", "").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_port() {
+        assert!(validate_session_form("prod", "example.com", "0", "", "").is_err());
+        assert!(validate_session_form("prod", "example.com", "65536", "", "").is_err());
+        assert!(validate_session_form("prod", "example.com", "abc", "", "").is_err());
+        assert!(validate_session_form("prod", "example.com", "", "", "").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_keepalive_or_timeout() {
+        assert!(validate_session_form("prod", "example.com", "22", "0", "").is_err());
+        assert!(validate_session_form("prod", "example.com", "22", "abc", "").is_err());
+        assert!(validate_session_form("prod", "example.com", "22", "", "0").is_err());
+    }
+
+    #[test]
+    fn accepts_valid_form() {
+        let form = valid().expect("合法输入应通过校验");
+        assert_eq!(form.name, "prod");
+        assert_eq!(form.host, "example.com");
+        assert_eq!(form.port, 22);
+        assert_eq!(form.keepalive_secs, 30);
+        assert_eq!(form.connect_timeout_secs, 10);
+    }
+
+    #[test]
+    fn trims_inputs_and_defaults_empty_numbers() {
+        let form = validate_session_form("  prod  ", " example.com ", " 2222 ", "", "")
+            .expect("空白数值应使用默认值");
+        assert_eq!(form.name, "prod");
+        assert_eq!(form.host, "example.com");
+        assert_eq!(form.port, 2222);
+        assert_eq!(form.keepalive_secs, 30);
+        assert_eq!(form.connect_timeout_secs, 10);
     }
 }

@@ -79,10 +79,7 @@ fn parse_openssh_inner(
                 match std::fs::read_to_string(&inc_path) {
                     Ok(inc_raw) => match parse_openssh_inner(&inc_raw, &inc_path, home, false) {
                         Ok(mut incs) => sessions.append(&mut incs),
-                        Err(e) => log::warn!(
-                            "解析 Include 文件失败 {}: {e:#}",
-                            inc_path.display()
-                        ),
+                        Err(e) => log::warn!("解析 Include 文件失败 {}: {e:#}", inc_path.display()),
                     },
                     Err(e) => log::warn!("读取 Include 文件失败 {}: {e}", inc_path.display()),
                 }
@@ -108,7 +105,9 @@ fn parse_openssh_inner(
                 passphrase: None,
             }
         } else {
-            AuthMethod::Agent { key_comment: String::new() }
+            AuthMethod::Agent {
+                key_comment: String::new(),
+            }
         };
 
         let proxy_jump = kv.get("proxyjump").map(|pj| {
@@ -118,7 +117,9 @@ fn parse_openssh_inner(
             let mut j = Session::new(jump_host.clone(), jump_host, jump_user);
             j.port = jump_port;
             j.folder = Some("OpenSSH Import".to_string());
-            j.auth = AuthMethod::Agent { key_comment: String::new() };
+            j.auth = AuthMethod::Agent {
+                key_comment: String::new(),
+            };
             Box::new(j)
         });
 

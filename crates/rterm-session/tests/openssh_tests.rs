@@ -26,19 +26,29 @@ Host prod-*
     let home = Path::new("C:\\Users\\wst_k");
     let sessions = parse_openssh_str(raw, Path::new("test.conf"), home).expect("parse");
 
-    assert_eq!(sessions.len(), 2, "只应解析 myserver + bastion，跳过 prod-*");
+    assert_eq!(
+        sessions.len(),
+        2,
+        "只应解析 myserver + bastion，跳过 prod-*"
+    );
 
     let myserver = sessions.iter().find(|s| s.name == "myserver").unwrap();
     assert_eq!(myserver.host, "192.168.1.95");
     assert_eq!(myserver.port, 2222);
     assert_eq!(myserver.username, "ubuntu");
     assert_eq!(myserver.keepalive_secs, 60);
-    assert!(matches!(myserver.auth, rterm_session::AuthMethod::PrivateKey { .. }));
+    assert!(matches!(
+        myserver.auth,
+        rterm_session::AuthMethod::PrivateKey { .. }
+    ));
 
     let bastion = sessions.iter().find(|s| s.name == "bastion").unwrap();
     assert_eq!(bastion.host, "bastion.example.com");
     assert_eq!(bastion.username, "admin");
-    assert!(bastion.proxy_jump.is_some(), "ProxyJump 应解析为嵌套 Session");
+    assert!(
+        bastion.proxy_jump.is_some(),
+        "ProxyJump 应解析为嵌套 Session"
+    );
 }
 
 #[test]
@@ -46,8 +56,8 @@ fn hostname_defaults_to_host() {
     let raw = "Host just-a-host\n    User me\n";
     let sessions = parse_openssh_str(raw, Path::new("test.conf"), Path::new(".")).unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].host, "just-a-host");  // HostName 默认 = Host
-    assert_eq!(sessions[0].port, 22);              // 默认端口
+    assert_eq!(sessions[0].host, "just-a-host"); // HostName 默认 = Host
+    assert_eq!(sessions[0].port, 22); // 默认端口
 }
 
 #[test]
@@ -114,7 +124,11 @@ Host alpha beta prod-*
     Port 2022
 ";
     let sessions = parse_openssh_str(raw, Path::new("test.conf"), Path::new(".")).unwrap();
-    assert_eq!(sessions.len(), 2, "两个明确模式各生成一个会话，通配模式跳过");
+    assert_eq!(
+        sessions.len(),
+        2,
+        "两个明确模式各生成一个会话，通配模式跳过"
+    );
 
     for s in &sessions {
         assert_eq!(s.host, "shared.example");
@@ -172,7 +186,10 @@ Host after
 
     let keep = sessions.iter().find(|s| s.name == "keep").unwrap();
     assert_eq!(keep.host, "keep.example");
-    assert!(keep.username.is_empty(), "Match 块内的 User 不应影响上一个 Host");
+    assert!(
+        keep.username.is_empty(),
+        "Match 块内的 User 不应影响上一个 Host"
+    );
     assert_eq!(keep.port, 22, "Match 块内的 Port 不应影响上一个 Host");
 
     let after = sessions.iter().find(|s| s.name == "after").unwrap();

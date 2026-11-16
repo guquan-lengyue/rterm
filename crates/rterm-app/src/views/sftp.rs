@@ -13,8 +13,9 @@ use futures::channel::mpsc::unbounded;
 use futures::StreamExt;
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgba, AnyElement, ClickEvent, Context, Entity, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, Render, ScrollWheelEvent, SharedString, Window,
+    div, px, transparent_black, AnyElement, ClickEvent, Context, Entity, FocusHandle, Focusable,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Render, ScrollWheelEvent, SharedString,
+    Window,
 };
 use uuid::Uuid;
 
@@ -25,11 +26,13 @@ use rterm_sftp::{
 };
 use rterm_ssh::SshSession;
 
+use super::{
+    CONTENT_BORDER_W, MENU_ITEM_H, MENU_PADDING_Y, SFTP_MENU_W, SIDEBAR_W, TAB_BAR_H, TOOLBAR_H,
+};
 use crate::event::{AppEvent, EventBusHost};
-use crate::state::AppState;
+use crate::state::{lock_or_recover, AppState};
 use crate::ui::theme;
 use crate::views::text_input::TextInput;
-use super::{CONTENT_BORDER_W, SIDEBAR_W, TAB_BAR_H, TOOLBAR_H};
 
 const PANE_HEADER_H: f32 = 34.0;
 const BREADCRUMB_H: f32 = 22.0;
@@ -198,9 +201,7 @@ impl SftpView {
             input.content = SharedString::from(local_home.clone());
             input
         });
-        let remote_address = cx.new(|cx| {
-            TextInput::new(cx).with_placeholder("/home/user")
-        });
+        let remote_address = cx.new(|cx| TextInput::new(cx).with_placeholder("/home/user"));
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -259,7 +260,7 @@ impl SftpView {
     pub fn connect(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let stored = {
             let state = cx.global::<AppState>();
-            let store = state.session_store.lock().unwrap();
+            let store = lock_or_recover(&state.session_store);
             store.get(session_id).cloned()
         };
         let Some(stored) = stored else {
@@ -301,12 +302,12 @@ impl SftpView {
             .spawn(move || {
                 let result = (|| -> Result<ConnectedSftp, String> {
                     let mut ssh = SshSession::new();
-                    ssh.connect(&session).map_err(|error| format!("{error:#}"))?;
+                    ssh.connect(&session)
+                        .map_err(|error| format!("{error:#}"))?;
                     let raw = ssh
                         .session_clone()
                         .ok_or_else(|| "SSH 会话不可用".to_string())?;
-                    let service =
-                        SftpService::new(raw).map_err(|error| format!("{error:#}"))?;
+                    let service = SftpService::new(raw).map_err(|error| format!("{error:#}"))?;
                     let home = match service.home_dir() {
                         Ok(home) => home,
                         Err(error) => {
@@ -325,9 +326,7 @@ impl SftpView {
 
         cx.spawn(async move |this, cx| {
             if let Some(result) = rx.next().await {
-                let _ = this.update(cx, |this, cx| {
-                    this.handle_connected(generation, result, cx)
-                });
+                let _ = this.update(cx, |this, cx| this.handle_connected(generation, result, cx));
             }
         })
         .detach();
@@ -352,7 +351,12 @@ impl SftpView {
         self.status = SftpStatus::Failed;
         self.status_text = "已断开".to_string();
         self.transfers.clear();
-        self.emit(cx, AppEvent::SftpClosed { tab_id: self.tab_id });
+        self.emit(
+            cx,
+            AppEvent::SftpClosed {
+                tab_id: self.tab_id,
+            },
+        );
         cx.notify();
     }
 
@@ -470,9 +474,7 @@ impl SftpView {
             let spawned = std::thread::Builder::new()
                 .name("rterm-sftp-nav".into())
                 .spawn(move || {
-                    let result = service
-                        .listdir(&path)
-                        .map_err(|error| format!("{error:#}"));
+                    let result = service.listdir(&path).map_err(|error| format!("{error:#}"));
                     let _ = tx.unbounded_send(RemoteNavResult {
                         generation: nav_generation,
                         path,
@@ -573,10 +575,7 @@ impl SftpView {
                 let _ = tx.unbounded_send(result);
             });
         if let Err(error) = spawned {
-            self.set_status(
-                format!("{failure_prefix}: 无法启动后台任务 ({error})"),
-                cx,
-            );
+            self.set_status(format!("{failure_prefix}: 无法启动后台任务 ({error})"), cx);
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -618,12 +617,7 @@ impl SftpView {
         cx.notify();
     }
 
-    fn on_pane_scroll(
-        &mut self,
-        side: PaneSide,
-        event: &ScrollWheelEvent,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_pane_scroll(&mut self, side: PaneSide, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let pixel = event.delta.pixel_delta(px(ROW_H));
         let dy = f32::from(pixel.y);
         let lines = if event.delta.precise() {
@@ -830,14 +824,18 @@ impl SftpView {
                 let remote_dir = self.remote.path.clone();
                 self.request_upload(&entry, &remote_dir, cx);
             }
-            MenuAction::Rename(index) => self.open_dialog_for_row(DialogKind::Rename(self.active_side, index), cx),
+            MenuAction::Rename(index) => {
+                self.open_dialog_for_row(DialogKind::Rename(self.active_side, index), cx)
+            }
             MenuAction::Delete(index) => {
                 // 不立即删除：先弹出确认卡片。记录文件名而不是行号，避免列表刷新后删错。
                 if let Some(entry) = self.pane(self.active_side).rows.get(index) {
                     self.pending_delete = Some((self.active_side, entry.name.clone()));
                 }
             }
-            MenuAction::Chmod(index) => self.open_dialog_for_row(DialogKind::Chmod(self.active_side, index), cx),
+            MenuAction::Chmod(index) => {
+                self.open_dialog_for_row(DialogKind::Chmod(self.active_side, index), cx)
+            }
             MenuAction::Properties(index) => self.show_properties(self.active_side, index, cx),
             MenuAction::NewFolder => {
                 let side = self.active_side;
@@ -880,9 +878,7 @@ impl SftpView {
             return;
         }
         let content = initial.to_string();
-        let input = cx.new(|cx| {
-            TextInput::new(cx).with_content(content.clone())
-        });
+        let input = cx.new(|cx| TextInput::new(cx).with_content(content.clone()));
         input.update(cx, |input, _cx| {
             input.selected_range = 0..input.content.len();
         });
@@ -1010,7 +1006,12 @@ impl SftpView {
             return;
         };
         // 列表可能在确认期间刷新；按文件名重新定位，找不到就放弃删除。
-        if let Some(index) = self.pane(side).rows.iter().position(|entry| entry.name == name) {
+        if let Some(index) = self
+            .pane(side)
+            .rows
+            .iter()
+            .position(|entry| entry.name == name)
+        {
             self.perform_delete_row(side, index, cx);
         } else {
             cx.notify();
@@ -1180,7 +1181,13 @@ fn normalize_remote(raw: &str, current: &str, home: Option<&str>) -> String {
     }
     let home = home
         .filter(|home| !home.trim().is_empty())
-        .unwrap_or_else(|| if current.trim().is_empty() { "/" } else { current });
+        .unwrap_or_else(|| {
+            if current.trim().is_empty() {
+                "/"
+            } else {
+                current
+            }
+        });
     let expanded = if trimmed == "~" {
         home.to_string()
     } else if let Some(rest) = trimmed.strip_prefix("~/") {
@@ -1216,7 +1223,8 @@ fn normalize_local(raw: &str, current: &str) -> String {
 
 fn list_local(path: &str) -> Result<Vec<FileEntry>, String> {
     let dir = PathBuf::from(path);
-    let read = std::fs::read_dir(&dir).map_err(|error| format!("无法读取 {}: {error}", dir.display()))?;
+    let read =
+        std::fs::read_dir(&dir).map_err(|error| format!("无法读取 {}: {error}", dir.display()))?;
     let mut rows = Vec::new();
     for entry in read.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -1282,7 +1290,9 @@ fn local_breadcrumbs(path: &str) -> Vec<(String, String)> {
     for component in PathBuf::from(path).components() {
         current.push(component.as_os_str());
         let label = match component {
-            std::path::Component::Prefix(prefix) => prefix.as_os_str().to_string_lossy().into_owned(),
+            std::path::Component::Prefix(prefix) => {
+                prefix.as_os_str().to_string_lossy().into_owned()
+            }
             std::path::Component::RootDir => "\\".to_string(),
             std::path::Component::CurDir => ".".to_string(),
             std::path::Component::ParentDir => "..".to_string(),
@@ -1394,18 +1404,8 @@ impl Render for SftpView {
             .w_full()
             .flex_1()
             .flex()
-            .child(self.render_pane(
-                PaneSide::Local,
-                pane_width(window),
-                name_width(window),
-                cx,
-            ))
-            .child(self.render_pane(
-                PaneSide::Remote,
-                pane_width(window),
-                name_width(window),
-                cx,
-            ));
+            .child(self.render_pane(PaneSide::Local, pane_width(window), name_width(window), cx))
+            .child(self.render_pane(PaneSide::Remote, pane_width(window), name_width(window), cx));
 
         let mut content = root
             .child(header)
@@ -1469,11 +1469,7 @@ impl SftpView {
         let t = theme(cx);
         let pane = self.pane(side);
         let active = self.active_side == side;
-        let pane_bg = if active {
-            t.card_bg()
-        } else {
-            t.card_bg()
-        };
+        let pane_bg = t.card_bg();
         let header_bg = t.card_header_bg();
 
         // 列头
@@ -1542,7 +1538,11 @@ impl SftpView {
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(if active { t.primary() } else { t.text_on_card_header_bg() })
+                            .text_color(if active {
+                                t.primary()
+                            } else {
+                                t.text_on_card_header_bg()
+                            })
                             .child(side.label()),
                     )
                     .child(
@@ -1632,11 +1632,9 @@ impl SftpView {
                     .overflow_hidden()
                     .flex()
                     .flex_col()
-                    .on_scroll_wheel(cx.listener(
-                        move |this, event: &ScrollWheelEvent, _w, cx| {
-                            this.on_pane_scroll(side, event, cx);
-                        },
-                    ))
+                    .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _w, cx| {
+                        this.on_pane_scroll(side, event, cx);
+                    }))
                     .children(rows),
             )
             .children(error)
@@ -1663,11 +1661,7 @@ impl SftpView {
             .text_size(px(10.));
         for (index, (label, path)) in crumbs.into_iter().enumerate() {
             if index > 0 {
-                row = row.child(
-                    div()
-                        .text_color(t.text_placeholder())
-                        .child("›"),
-                );
+                row = row.child(div().text_color(t.text_placeholder()).child("›"));
             }
             let id = format!("sftp-crumb-{}-{}-{index}", side_key(side), label);
             row = row.child(
@@ -1732,7 +1726,7 @@ impl SftpView {
         let row_bg = if selected {
             t.row_selected_bg()
         } else {
-            rgba(0x00000000)
+            transparent_black().to_rgb()
         };
         let hover_bg = t.row_hover_bg();
         let text_color = if selected {
@@ -1779,21 +1773,16 @@ impl SftpView {
                     this.open_menu(side, Some(index), x.max(0.), y.max(0.), cx);
                 }),
             )
-            .child(
-                div()
-                    .w(px(20.))
-                    .child(icon),
-            )
-            .child(
-                div()
-                    .w(px(name_w))
-                    .truncate()
-                    .child(name),
-            )
+            .child(div().w(px(20.)).child(icon))
+            .child(div().w(px(name_w)).truncate().child(name))
             .child(
                 div()
                     .w(px(70.))
-                    .text_color(if selected { text_color } else { t.text_subtle() })
+                    .text_color(if selected {
+                        text_color
+                    } else {
+                        t.text_subtle()
+                    })
                     .child(if entry.is_dir {
                         "-".to_string()
                     } else {
@@ -1803,13 +1792,21 @@ impl SftpView {
             .child(
                 div()
                     .w(px(80.))
-                    .text_color(if selected { text_color } else { t.text_subtle() })
+                    .text_color(if selected {
+                        text_color
+                    } else {
+                        t.text_subtle()
+                    })
                     .child(format_mode(entry)),
             )
             .child(
                 div()
                     .w(px(110.))
-                    .text_color(if selected { text_color } else { t.text_subtle() })
+                    .text_color(if selected {
+                        text_color
+                    } else {
+                        t.text_subtle()
+                    })
                     .child(format_time(entry.mtime)),
             )
             .into_any_element()
@@ -1822,10 +1819,10 @@ impl SftpView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        let width = 190.0;
-        let item_h = 28.0;
+        let width = SFTP_MENU_W;
+        let item_h = MENU_ITEM_H;
         let items = menu_items(menu);
-        let height = items.len() as f32 * item_h + 8.0;
+        let height = items.len() as f32 * item_h + MENU_PADDING_Y;
         let viewport = window.viewport_size();
         let max_x = (f32::from(viewport.width) - width - 4.0).max(0.0);
         let max_y = (f32::from(viewport.height) - height - 4.0).max(0.0);
@@ -1845,12 +1842,12 @@ impl SftpView {
             .flex()
             .flex_col()
             .id("sftp-context-menu")
-            .on_mouse_down_out(cx.listener(
-                |this: &mut Self, _ev: &MouseDownEvent, _w, cx| {
+            .on_mouse_down_out(
+                cx.listener(|this: &mut Self, _ev: &MouseDownEvent, _w, cx| {
                     this.menu = None;
                     cx.notify();
-                },
-            ));
+                }),
+            );
 
         for (index, (label, danger, action)) in items.into_iter().enumerate() {
             let color = if danger {
@@ -1942,12 +1939,7 @@ impl SftpView {
                 .items_center()
                 .gap_2()
                 .text_size(px(10.))
-                .child(
-                    div()
-                        .w(px(14.))
-                        .text_color(t.text_subtle())
-                        .child(arrow),
-                )
+                .child(div().w(px(14.)).text_color(t.text_subtle()).child(arrow))
                 .child(
                     div()
                         .w(px(160.))
@@ -1956,25 +1948,15 @@ impl SftpView {
                         .child(name),
                 )
                 .child(
-                    div()
-                        .flex_1()
-                        .h(px(6.))
-                        .rounded_full()
-                        .bg(bar_bg)
-                        .child(
-                            div()
-                                .h_full()
-                                .w(gpui::relative(progress))
-                                .rounded_full()
-                                .bg(bar_fg),
-                        ),
+                    div().flex_1().h(px(6.)).rounded_full().bg(bar_bg).child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(progress))
+                            .rounded_full()
+                            .bg(bar_fg),
+                    ),
                 )
-                .child(
-                    div()
-                        .w(px(110.))
-                        .text_color(state_color)
-                        .child(state_text),
-                );
+                .child(div().w(px(110.)).text_color(state_color).child(state_text));
             if active {
                 row = row
                     .child(
@@ -1993,9 +1975,7 @@ impl SftpView {
                                         .transfers
                                         .iter()
                                         .find(|snapshot| snapshot.id == id)
-                                        .map(|snapshot| {
-                                            snapshot.state == TransferState::Paused
-                                        })
+                                        .map(|snapshot| snapshot.state == TransferState::Paused)
                                         .unwrap_or(false);
                                     if paused {
                                         queue.resume(id);
@@ -2069,11 +2049,7 @@ impl SftpView {
                             .text_color(t.text_on_card_bg())
                             .child(title),
                     )
-                    .child(
-                        div()
-                            .h(px(30.))
-                            .child(input),
-                    )
+                    .child(div().h(px(30.)).child(input))
                     .child(
                         div()
                             .flex()
@@ -2254,5 +2230,48 @@ fn menu_items(menu: &MenuState) -> Vec<(String, bool, MenuAction)> {
             ("📁 新建文件夹…".into(), false, MenuAction::NewFolder),
             ("⟳ 刷新".into(), false, MenuAction::Refresh),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_remote;
+
+    const HOME: Option<&str> = Some("/home/alice");
+
+    #[test]
+    fn tilde_expands_to_home() {
+        assert_eq!(normalize_remote("~", "/srv", HOME), "/home/alice");
+        assert_eq!(normalize_remote(" ~ ", "/srv", HOME), "/home/alice");
+    }
+
+    #[test]
+    fn tilde_prefix_expands_below_home() {
+        assert_eq!(normalize_remote("~/tmp", "/srv", HOME), "/home/alice/tmp");
+        assert_eq!(normalize_remote("~/a/b/", "/srv", HOME), "/home/alice/a/b");
+    }
+
+    #[test]
+    fn absolute_path_is_unchanged() {
+        assert_eq!(normalize_remote("/var/log", "/srv", HOME), "/var/log");
+        // 仅去掉多余的尾部斜杠。
+        assert_eq!(normalize_remote("/var/log/", "/srv", HOME), "/var/log");
+    }
+
+    #[test]
+    fn relative_path_is_based_on_current_dir() {
+        assert_eq!(normalize_remote("tmp", "/srv", HOME), "/srv/tmp");
+        assert_eq!(normalize_remote("a/b", "/srv/", HOME), "/srv/a/b");
+    }
+
+    #[test]
+    fn empty_input_keeps_current_dir() {
+        assert_eq!(normalize_remote("   ", "/srv", HOME), "/srv");
+    }
+
+    #[test]
+    fn missing_home_falls_back_to_current_dir() {
+        assert_eq!(normalize_remote("~", "/srv", None), "/srv");
+        assert_eq!(normalize_remote("~/tmp", "/srv", None), "/srv/tmp");
     }
 }

@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use crate::event::{AppEvent, EventBusHost};
-use crate::state::{AppState, CursorStyle, Settings};
+use crate::state::{lock_or_recover, AppState, CursorStyle, Settings};
 use crate::theme;
 use crate::ui::theme;
 
@@ -150,9 +150,21 @@ impl SettingsView {
             self.draft.default_username.clone().unwrap_or_default(),
             cx,
         );
-        self.set_input(&self.keepalive_input, self.draft.keepalive_secs.to_string(), cx);
-        self.set_input(&self.timeout_input, self.draft.connect_timeout_secs.to_string(), cx);
-        self.set_input(&self.font_size_input, self.draft.default_font_size.to_string(), cx);
+        self.set_input(
+            &self.keepalive_input,
+            self.draft.keepalive_secs.to_string(),
+            cx,
+        );
+        self.set_input(
+            &self.timeout_input,
+            self.draft.connect_timeout_secs.to_string(),
+            cx,
+        );
+        self.set_input(
+            &self.font_size_input,
+            self.draft.default_font_size.to_string(),
+            cx,
+        );
         self.set_input(
             &self.scrollback_input,
             self.draft.terminal_scrollback_lines.to_string(),
@@ -178,7 +190,11 @@ impl SettingsView {
             self.draft.terminal_log_dir.clone().unwrap_or_default(),
             cx,
         );
-        self.set_input(&self.data_dir_input, self.draft.data_dir.clone().unwrap_or_default(), cx);
+        self.set_input(
+            &self.data_dir_input,
+            self.draft.data_dir.clone().unwrap_or_default(),
+            cx,
+        );
     }
 
     /// 把输入框内容解析进 draft，失败返回中文错误。
@@ -231,7 +247,11 @@ impl SettingsView {
         let data_dir = text(&self.data_dir_input, cx);
 
         self.draft.default_port = port;
-        self.draft.default_username = if username.is_empty() { None } else { Some(username) };
+        self.draft.default_username = if username.is_empty() {
+            None
+        } else {
+            Some(username)
+        };
         self.draft.keepalive_secs = keepalive;
         self.draft.connect_timeout_secs = timeout;
         self.draft.default_font_size = font_size;
@@ -239,8 +259,16 @@ impl SettingsView {
         self.draft.monitor_interval_secs = interval;
         self.draft.monitor_cpu_threshold = cpu;
         self.draft.monitor_mem_threshold = mem;
-        self.draft.terminal_log_dir = if log_dir.is_empty() { None } else { Some(log_dir) };
-        self.draft.data_dir = if data_dir.is_empty() { None } else { Some(data_dir) };
+        self.draft.terminal_log_dir = if log_dir.is_empty() {
+            None
+        } else {
+            Some(log_dir)
+        };
+        self.draft.data_dir = if data_dir.is_empty() {
+            None
+        } else {
+            Some(data_dir)
+        };
 
         Ok(())
     }
@@ -289,12 +317,7 @@ impl SettingsView {
         // 取消时把实时预览的主题还原成已保存的主题
         let saved_theme = cx.global::<AppState>().settings.default_theme.clone();
         cx.global_mut::<AppState>().theme = theme::theme_by_name(&saved_theme);
-        self.emit(
-            cx,
-            AppEvent::AppThemeChanged {
-                name: saved_theme,
-            },
-        );
+        self.emit(cx, AppEvent::AppThemeChanged { name: saved_theme });
         self.emit(cx, AppEvent::SettingsCloseRequested { saved: false });
     }
 
@@ -342,8 +365,16 @@ impl SettingsView {
     ) -> gpui::AnyElement {
         let t = theme(cx);
         let label = label.to_string();
-        let bg = if primary { t.primary() } else { t.secondary_btn_bg() };
-        let hover = if primary { t.primary_hover() } else { t.secondary_btn_hover() };
+        let bg = if primary {
+            t.primary()
+        } else {
+            t.secondary_btn_bg()
+        };
+        let hover = if primary {
+            t.primary_hover()
+        } else {
+            t.secondary_btn_hover()
+        };
         let fg = if primary {
             t.text_on_primary_btn()
         } else {
@@ -363,9 +394,11 @@ impl SettingsView {
             .justify_center()
             .id(id)
             .hover(move |s| s.bg(hover))
-            .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                on_click(this, cx);
-            }))
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                    on_click(this, cx);
+                }),
+            )
             .child(label)
             .into_any_element()
     }
@@ -380,7 +413,11 @@ impl SettingsView {
     ) -> gpui::AnyElement {
         let t = theme(cx);
         let label = label.to_string();
-        let bg = if selected { t.row_selected_bg() } else { t.secondary_btn_bg() };
+        let bg = if selected {
+            t.row_selected_bg()
+        } else {
+            t.secondary_btn_bg()
+        };
         let fg = if selected {
             t.text_on_row_selected_bg()
         } else {
@@ -399,10 +436,12 @@ impl SettingsView {
             .items_center()
             .justify_center()
             .id(id)
-            .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                on_click(this, cx);
-                cx.notify();
-            }))
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                    on_click(this, cx);
+                    cx.notify();
+                }),
+            )
             .child(format!("{} {}", if selected { "●" } else { "○" }, label))
             .into_any_element()
     }
@@ -424,7 +463,7 @@ impl SettingsView {
 
     fn render_general(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme(cx);
-        let session_count = cx.global::<AppState>().session_store.lock().unwrap().count();
+        let session_count = lock_or_recover(&cx.global::<AppState>().session_store).count();
         let path = crate::state::settings_path();
 
         div()
@@ -500,9 +539,21 @@ impl SettingsView {
             .flex_col()
             .child(Self::section_title("新建会话时的 SSH 默认参数", cx))
             .child(Self::field("默认端口", self.port_input.clone(), cx))
-            .child(Self::field("默认用户名（可空）", self.username_input.clone(), cx))
-            .child(Self::field("KeepAlive（秒）", self.keepalive_input.clone(), cx))
-            .child(Self::field("连接超时（秒）", self.timeout_input.clone(), cx))
+            .child(Self::field(
+                "默认用户名（可空）",
+                self.username_input.clone(),
+                cx,
+            ))
+            .child(Self::field(
+                "KeepAlive（秒）",
+                self.keepalive_input.clone(),
+                cx,
+            ))
+            .child(Self::field(
+                "连接超时（秒）",
+                self.timeout_input.clone(),
+                cx,
+            ))
             .child(
                 div()
                     .text_size(px(10.))
@@ -526,7 +577,11 @@ impl SettingsView {
             let name = th.name().to_string();
             let selected = self.draft.default_theme == name;
             let id = format!("settings-theme-{name}");
-            let bg = if selected { t.primary() } else { t.secondary_btn_bg() };
+            let bg = if selected {
+                t.primary()
+            } else {
+                t.secondary_btn_bg()
+            };
             let fg = if selected {
                 t.text_on_primary_btn()
             } else {
@@ -546,16 +601,18 @@ impl SettingsView {
                     .justify_center()
                     .cursor_pointer()
                     .id(id)
-                    .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                        this.draft.default_theme = click_name.clone();
-                        // 主题即时生效（取消时还原）
-                        cx.global_mut::<AppState>().theme =
-                            crate::theme::theme_by_name(&this.draft.default_theme);
-                        // 终端调色板跟随预览（Sprint 6）
-                        let name = this.draft.default_theme.clone();
-                        this.emit(cx, AppEvent::AppThemeChanged { name });
-                        cx.notify();
-                    }))
+                    .on_click(cx.listener(
+                        move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                            this.draft.default_theme = click_name.clone();
+                            // 主题即时生效（取消时还原）
+                            cx.global_mut::<AppState>().theme =
+                                crate::theme::theme_by_name(&this.draft.default_theme);
+                            // 终端调色板跟随预览（Sprint 6）
+                            let name = this.draft.default_theme.clone();
+                            this.emit(cx, AppEvent::AppThemeChanged { name });
+                            cx.notify();
+                        },
+                    ))
                     .child(if selected {
                         format!("✓ {name}")
                     } else {
@@ -570,7 +627,11 @@ impl SettingsView {
         for font in FONT_CHOICES {
             let selected = self.draft.default_font_family == font;
             let id = format!("settings-font-{font}");
-            let bg = if selected { t.row_selected_bg() } else { t.secondary_btn_bg() };
+            let bg = if selected {
+                t.row_selected_bg()
+            } else {
+                t.secondary_btn_bg()
+            };
             let fg = if selected {
                 t.text_on_row_selected_bg()
             } else {
@@ -589,17 +650,23 @@ impl SettingsView {
                     .justify_center()
                     .cursor_pointer()
                     .id(id)
-                    .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                        this.draft.default_font_family = font.to_string();
-                        cx.notify();
-                    }))
+                    .on_click(cx.listener(
+                        move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                            this.draft.default_font_family = font.to_string();
+                            cx.notify();
+                        },
+                    ))
                     .child(font.to_string()),
             );
         }
         form = form.child(font_row);
 
         form = form
-            .child(Self::field("字号（10–24）", self.font_size_input.clone(), cx))
+            .child(Self::field(
+                "字号（10–24）",
+                self.font_size_input.clone(),
+                cx,
+            ))
             .child(
                 div()
                     .w_full()
@@ -646,7 +713,11 @@ impl SettingsView {
                             )),
                     ),
             )
-            .child(Self::field("滚动缓冲行数", self.scrollback_input.clone(), cx));
+            .child(Self::field(
+                "滚动缓冲行数",
+                self.scrollback_input.clone(),
+                cx,
+            ));
 
         // ---- 右侧预览 ----
         let preview = self.render_preview();
@@ -690,24 +761,14 @@ impl SettingsView {
                     .text_color(t.text_subtle())
                     .child("Terminal Preview"),
             )
-            .child(
-                div()
-                    .w_full()
-                    .text_color(t.success())
-                    .child("$ echo hello"),
-            )
+            .child(div().w_full().text_color(t.success()).child("$ echo hello"))
             .child(
                 div()
                     .w_full()
                     .text_color(t.text_on_app_bg())
                     .child("hello world"),
             )
-            .child(
-                div()
-                    .w_full()
-                    .text_color(t.primary())
-                    .child("$ ls -la"),
-            )
+            .child(div().w_full().text_color(t.primary()).child("$ ls -la"))
             .child(
                 div()
                     .w_full()
@@ -762,9 +823,21 @@ impl SettingsView {
             .flex()
             .flex_col()
             .child(Self::section_title("监控采样与告警阈值", cx))
-            .child(Self::field("采样间隔（秒）", self.monitor_interval_input.clone(), cx))
-            .child(Self::field("CPU 告警阈值（%）", self.cpu_threshold_input.clone(), cx))
-            .child(Self::field("内存告警阈值（%）", self.mem_threshold_input.clone(), cx))
+            .child(Self::field(
+                "采样间隔（秒）",
+                self.monitor_interval_input.clone(),
+                cx,
+            ))
+            .child(Self::field(
+                "CPU 告警阈值（%）",
+                self.cpu_threshold_input.clone(),
+                cx,
+            ))
+            .child(Self::field(
+                "内存告警阈值（%）",
+                self.mem_threshold_input.clone(),
+                cx,
+            ))
             .child(
                 div()
                     .w_full()
@@ -856,13 +929,21 @@ impl SettingsView {
     fn render_tab_button(&self, tab: SettingsTab, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme(cx);
         let active = self.active_tab == tab;
-        let bg = if active { t.row_selected_bg() } else { t.card_header_bg() };
+        let bg = if active {
+            t.row_selected_bg()
+        } else {
+            t.card_header_bg()
+        };
         let fg = if active {
             t.text_on_row_selected_bg()
         } else {
             t.text_subtle()
         };
-        let border = if active { t.primary() } else { t.card_header_bg() };
+        let border = if active {
+            t.primary()
+        } else {
+            t.card_header_bg()
+        };
 
         div()
             .w_full()
@@ -878,10 +959,12 @@ impl SettingsView {
             .border_color(border)
             .id(format!("settings-tab-{:?}", tab))
             .hover(|s| s.text_color(t.text_on_card_header_bg()))
-            .on_click(cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                this.active_tab = tab;
-                cx.notify();
-            }))
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                    this.active_tab = tab;
+                    cx.notify();
+                }),
+            )
             .child(tab.label())
             .into_any_element()
     }
@@ -936,15 +1019,21 @@ impl Render for SettingsView {
                     .justify_center()
                     .child(error_text),
             )
-            .child(self.action_button("settings-reset", "恢复默认", false, cx, |this, cx| {
-                this.reset_defaults(cx);
-            }))
-            .child(self.action_button("settings-cancel", "取消", false, cx, |this, cx| {
-                this.cancel(cx);
-            }))
-            .child(self.action_button("settings-save", "保存", true, cx, |this, cx| {
-                this.save(cx);
-            }));
+            .child(
+                self.action_button("settings-reset", "恢复默认", false, cx, |this, cx| {
+                    this.reset_defaults(cx);
+                }),
+            )
+            .child(
+                self.action_button("settings-cancel", "取消", false, cx, |this, cx| {
+                    this.cancel(cx);
+                }),
+            )
+            .child(
+                self.action_button("settings-save", "保存", true, cx, |this, cx| {
+                    this.save(cx);
+                }),
+            );
 
         div()
             .size_full()
@@ -989,22 +1078,17 @@ impl Render for SettingsView {
                             .child("⚙ 设置"),
                     )
                     .child(
-                        div()
-                            .w_full()
-                            .flex_1()
-                            .flex()
-                            .child(tabs)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .h_full()
-                                    .px_4()
-                                    .py_3()
-                                    .flex()
-                                    .flex_col()
-                                    .overflow_hidden()
-                                    .child(content),
-                            ),
+                        div().w_full().flex_1().flex().child(tabs).child(
+                            div()
+                                .flex_1()
+                                .h_full()
+                                .px_4()
+                                .py_3()
+                                .flex()
+                                .flex_col()
+                                .overflow_hidden()
+                                .child(content),
+                        ),
                     )
                     .child(footer),
             )

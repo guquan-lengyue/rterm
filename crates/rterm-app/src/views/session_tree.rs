@@ -7,7 +7,7 @@ use gpui::*;
 use gpui::{div, px, ClickEvent, IntoElement, MouseButton, MouseDownEvent, Render, Window};
 
 use crate::event::{AppEvent, EventBusHost};
-use crate::state::AppState;
+use crate::state::{lock_or_recover, AppState};
 use crate::ui::theme;
 
 use std::collections::{HashMap, HashSet};
@@ -130,40 +130,39 @@ impl SessionTreeView {
     pub fn new(cx: &mut Context<Self>) -> Self {
         // 只在构造时订阅一次，避免 render 每次重绘泄漏订阅
         let host = cx.global::<AppState>().event_bus_host.clone();
-        cx.subscribe(&host, |this: &mut Self, _host_entity, ev, cx| {
-            match ev {
-                AppEvent::SessionCreated { .. }
-                | AppEvent::SessionUpdated { .. }
-                | AppEvent::SessionDeleted { .. }
-                | AppEvent::SessionImported { .. } => cx.notify(),
-                AppEvent::SessionTreeSelectRequested { session_id } => {
-                    this.selected = *session_id;
-                    cx.notify();
-                }
-                AppEvent::SessionConnectRequested { session_id } => {
-                    this.connection
-                        .insert(*session_id, ConnectionBadge::Connecting);
-                    cx.notify();
-                }
-                AppEvent::SessionConnected { session_id } => {
-                    this.connection.insert(*session_id, ConnectionBadge::Connected);
-                    cx.notify();
-                }
-                AppEvent::SessionFailed { session_id, .. } => {
-                    this.connection.insert(*session_id, ConnectionBadge::Failed);
-                    cx.notify();
-                }
-                AppEvent::SessionDisconnected { session_id, .. } => {
-                    this.connection.insert(*session_id, ConnectionBadge::None);
-                    cx.notify();
-                }
-                AppEvent::SessionReconnecting { session_id, .. } => {
-                    this.connection
-                        .insert(*session_id, ConnectionBadge::Reconnecting);
-                    cx.notify();
-                }
-                _ => {}
+        cx.subscribe(&host, |this: &mut Self, _host_entity, ev, cx| match ev {
+            AppEvent::SessionCreated { .. }
+            | AppEvent::SessionUpdated { .. }
+            | AppEvent::SessionDeleted { .. }
+            | AppEvent::SessionImported { .. } => cx.notify(),
+            AppEvent::SessionTreeSelectRequested { session_id } => {
+                this.selected = *session_id;
+                cx.notify();
             }
+            AppEvent::SessionConnectRequested { session_id } => {
+                this.connection
+                    .insert(*session_id, ConnectionBadge::Connecting);
+                cx.notify();
+            }
+            AppEvent::SessionConnected { session_id } => {
+                this.connection
+                    .insert(*session_id, ConnectionBadge::Connected);
+                cx.notify();
+            }
+            AppEvent::SessionFailed { session_id, .. } => {
+                this.connection.insert(*session_id, ConnectionBadge::Failed);
+                cx.notify();
+            }
+            AppEvent::SessionDisconnected { session_id, .. } => {
+                this.connection.insert(*session_id, ConnectionBadge::None);
+                cx.notify();
+            }
+            AppEvent::SessionReconnecting { session_id, .. } => {
+                this.connection
+                    .insert(*session_id, ConnectionBadge::Reconnecting);
+                cx.notify();
+            }
+            _ => {}
         })
         .detach();
 
@@ -187,7 +186,7 @@ impl Render for SessionTreeView {
         let t = theme(cx);
 
         let state = cx.global::<AppState>();
-        let sessions = state.session_store.lock().unwrap().list().to_vec();
+        let sessions = lock_or_recover(&state.session_store).list().to_vec();
         let sessions_refs: Vec<&rterm_session::Session> = sessions.iter().collect();
         let tree = TreeNode::build(&sessions_refs);
 
@@ -265,16 +264,22 @@ impl SessionTreeView {
                             );
                         }),
                     )
-                    .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                        let f = path_clone.clone();
-                        if this.expanded.contains(&f) {
-                            this.expanded.remove(&f);
-                        } else {
-                            this.expanded.insert(f);
-                        }
-                        cx.notify();
-                    }))
-                    .child(format!("{} 📁 {}", if is_expanded { "▼" } else { "▶" }, name));
+                    .on_click(
+                        cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                            let f = path_clone.clone();
+                            if this.expanded.contains(&f) {
+                                this.expanded.remove(&f);
+                            } else {
+                                this.expanded.insert(f);
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .child(format!(
+                        "{} 📁 {}",
+                        if is_expanded { "▼" } else { "▶" },
+                        name
+                    ));
 
                 let mut container = row.into_element();
                 if is_expanded {
@@ -293,7 +298,11 @@ impl SessionTreeView {
             } => {
                 let id_copy = *id;
                 let selected = self.selected == Some(id_copy);
-                let bg = if selected { t.row_selected_bg() } else { t.sidebar_bg() };
+                let bg = if selected {
+                    t.row_selected_bg()
+                } else {
+                    t.sidebar_bg()
+                };
                 let badge = self
                     .connection
                     .get(&id_copy)
@@ -339,33 +348,38 @@ impl SessionTreeView {
                             );
                         }),
                     )
-                    .on_click(cx.listener(move |this: &mut Self, ev: &ClickEvent, _w, cx| {
-                        let sid = id_copy;
-                        let click_count = match ev {
-                            ClickEvent::Mouse(m) => m.down.click_count,
-                            ClickEvent::Touch(t) => t.tap_count,
-                            ClickEvent::Keyboard(_) => 1,
-                        };
-                        this.selected = Some(sid);
-                        cx.notify();
-                        this.emit_event(cx, AppEvent::SessionTreeSelectRequested { session_id: Some(sid) });
-                        // 双击才发起连接，单击仅选中，避免误触
-                        if click_count >= 2 {
-                            log::info!("SessionTree double-click connect {}", sid);
-                            this.emit_event(cx, AppEvent::SessionConnectRequested { session_id: sid });
-                        }
-                    }))
+                    .on_click(
+                        cx.listener(move |this: &mut Self, ev: &ClickEvent, _w, cx| {
+                            let sid = id_copy;
+                            let click_count = match ev {
+                                ClickEvent::Mouse(m) => m.down.click_count,
+                                ClickEvent::Touch(t) => t.tap_count,
+                                ClickEvent::Keyboard(_) => 1,
+                            };
+                            this.selected = Some(sid);
+                            cx.notify();
+                            this.emit_event(
+                                cx,
+                                AppEvent::SessionTreeSelectRequested {
+                                    session_id: Some(sid),
+                                },
+                            );
+                            // 双击才发起连接，单击仅选中，避免误触
+                            if click_count >= 2 {
+                                log::info!("SessionTree double-click connect {}", sid);
+                                this.emit_event(
+                                    cx,
+                                    AppEvent::SessionConnectRequested { session_id: sid },
+                                );
+                            }
+                        }),
+                    )
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(9.))
-                                    .text_color(dot_color)
-                                    .child(dot),
-                            )
+                            .child(div().text_size(px(9.)).text_color(dot_color).child(dot))
                             .child(format!("🖥️ {}", name)),
                     )
                     .child(

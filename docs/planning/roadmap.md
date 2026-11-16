@@ -62,16 +62,16 @@
 #### 1.3 rterm-app 设置与持久化 ✅（S3 + S4）
 - [x] `dirs::data_dir()` → `%APPDATA%\rterm\` 路径
 - [x] `Settings` 结构体 + 默认值（`serde(default)` 向后兼容）
-- [x] `AppState { session_store, settings, tab_registry, event_bus }`
+- [x] `AppState { session_store, settings, event_bus, theme, startup_error }`
 - [x] 启动时自动 load sessions.json + settings.json
 - [x] 退出时自动 save SessionStore（S3）；Settings 保存时原子写盘（S4）
 
 #### 1.4 SessionTree View（gpui）——S3 已完成主体
 - [x] 左侧 `SessionTreeView`：树形（folder → session），带图标
 - [x] 右键菜单：新建 / 编辑 / 删除 / 导入 / 导出（S3 + S4）
-- [ ] 右键菜单：复制 / 打开终端 / 打开 SFTP（S5–S7）
+- [x] 右键菜单：打开终端 / 打开 SFTP（复制未排期）
 - [x] 双击会话 → 广播 `AppEvent::SessionConnectRequested`
-- [ ] 会话状态图标（未连接 / 连接中 / 在线 / 失败）→ S5 5.5.2
+- [x] 会话状态图标（未连接 / 连接中 / 在线 / 失败）+ 关闭最后 Tab 复位
 - [ ] 收藏夹区域（顶部）→ 未排期
 
 #### 1.5 Session 编辑对话框——S3 已完成主体
@@ -83,7 +83,7 @@
 - [ ] Agent：读取 `ssh-add -l` 输出枚举 key → S5 5.1.2 先做认证
 - [ ] 跳板机：模型已支持 `proxy_jump`，连接链待 S5 接
 - [x] 连接测试按钮：后台异步 TCP（S5 升级为 SSH 握手）
-- [x] 全局默认配置界面：S4 Settings 已提供默认值；新建会话接线 → S5 5.5.4
+- [x] 全局默认配置界面：端口/用户名/keepalive/timeout 已接入新建会话；data_dir 已接入 sessions/导出路径
 
 #### 1.6 导入导出对话框 ✅（S4，OpenSSH 导入 S2）
 - [x] 导出：`rfd` 路径选择 + 范围（全部 / 文件夹 / 多选）+ DPAPI 或 AES-GCM 口令
@@ -109,7 +109,7 @@
 
 #### 2.1 rterm-ssh 核心 ✅（S5）
 - [x] `SshSession::connect(session: &Session)`：密码 / 密钥 / agent（跳板机链式待补）
-- [x] 主机密钥校验：known_hosts TOFU 记录；变更检测拒绝连接（三选一 Modal → S10）
+- [x] 主机密钥校验：未知/变更三选一 Modal（接受并保存 / 仅本次 / 拒绝）；known_hosts 原子写 + 进程内串行
 - [x] KeepAlive：PTY IO 循环调用 `keepalive_send()`
 - [x] 连接状态机：Disconnected → Connecting → Connected → Reconnecting（退避）
 - [x] 重连策略：5 次指数退避 + 全部失败广播 `SessionDisconnected`
@@ -141,7 +141,7 @@
 - [x] 字体 + Nerd Font 字形支持（gpui 自带 DirectWrite）
 
 #### 2.5 标签页框架 ✅（S6）
-- [x] `TabRegistry`：Vec<TabInfo> + active_index
+- [x] 标签模型：`MainWindow.tabs: Vec<TabEntry>` + active_index（`TabRegistry` 已移除）
 - [x] TabBar View：水平标签 + 关闭按钮 + 关闭菜单
 - [x] 标签 kinds：Terminal / Sftp / Monitor
 - [x] 快捷键：Ctrl+T 新标签 / Ctrl+Tab 切换 / Ctrl+W 关闭
@@ -150,7 +150,7 @@
 
 ## Phase 3 — SFTP 文件管理 🚧（S7 核心完成）
 
-> **S8 前插入 S7.5 技术债清偿**：S7 核心交付后先执行 [sprint-07.5-tech-debt.md](./sprint-07.5-tech-debt.md)，清偿数据安全、线程生命周期、状态一致性债，再进入 Phase 4。详见该 Sprint 的完成定义与回归清单。
+> **S7.5 技术债清偿已完成（2026-11-16）**：[sprint-07.5-tech-debt.md](./sprint-07.5-tech-debt.md) 已完成数据安全、线程生命周期、状态一致性与主机密钥收口；自动化门禁 92 passed / 1 ignored、clippy 0 warning、fmt 通过。Phase 4 可开始。
 
 ### 前置条件
 - [x] P1（SessionStore）
@@ -189,7 +189,7 @@
 ### 前置条件
 - [x] P2（Terminal 输出字节流 + PS1 解析）
 - [x] P3（SFTP 文件浏览 + 导航事件）
-- [ ] S7.5 技术债清偿（S8 前强制门禁）
+- [x] S7.5 技术债清偿（S8 前强制门禁）
 
 ### 任务清单
 

@@ -27,19 +27,18 @@ pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
     unsafe {
         CryptProtectData(
             &input,
-            None,  // description
-            None,  // entropy
-            None,  // reserved
-            None,  // prompt
-            0,     // 用户级作用域（不带 CRYPTPROTECT_LOCAL_MACHINE）
+            None, // description
+            None, // entropy
+            None, // reserved
+            None, // prompt
+            0,    // 用户级作用域（不带 CRYPTPROTECT_LOCAL_MACHINE）
             &mut output,
         )
         .context("CryptProtectData failed")?;
     }
 
-    let result = unsafe {
-        std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
-    };
+    let result =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
     // DPAPI 用 LocalAlloc 分配输出缓冲区，复制后立即用 LocalFree 释放。
     unsafe {
         if !output.pbData.is_null() {
@@ -53,9 +52,7 @@ pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
 #[cfg(target_os = "windows")]
 pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<Vec<u8>> {
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
-    use windows::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPT_INTEGER_BLOB,
-    };
+    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
 
     let input = CRYPT_INTEGER_BLOB {
         cbData: ciphertext.len() as u32,
@@ -66,19 +63,18 @@ pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<Vec<u8>> {
     unsafe {
         CryptUnprotectData(
             &input,
-            None,  // description out
-            None,  // entropy
-            None,  // reserved
-            None,  // prompt
+            None, // description out
+            None, // entropy
+            None, // reserved
+            None, // prompt
             0,
             &mut output,
         )
         .context("CryptUnprotectData failed — ciphertext invalid or from different user/machine")?;
     }
 
-    let result = unsafe {
-        std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
-    };
+    let result =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
     // 输出缓冲区由 LocalAlloc 分配，复制后用 LocalFree 释放，避免内存泄漏。
     unsafe {
         if !output.pbData.is_null() {
@@ -120,10 +116,10 @@ pub fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; 32]> {
     type HmacSha256 = Hmac<Sha256>;
 
     let mut key = [0u8; 32];
-    let mut u = [0u8; 32];
-    let mut t = [0u8; 32];
+    let mut u: [u8; 32];
+    let mut t: [u8; 32];
 
-    let blocks_needed = (key.len() as u32 + 31) / 32;
+    let blocks_needed = (key.len() as u32).div_ceil(32);
 
     for block_idx in 1..=blocks_needed {
         // U_1 = HMAC-SHA256(password, salt || INT_32_BE(block_idx))
@@ -159,8 +155,8 @@ pub fn aesgcm_encrypt(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>> {
     rand::thread_rng().fill_bytes(&mut nonce);
 
     let key = derive_key(passphrase, &salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| anyhow::anyhow!("AES key error: {e}"))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("AES key error: {e}"))?;
     let ciphertext = cipher
         .encrypt(Nonce::from_slice(&nonce), plaintext)
         .map_err(|e| anyhow::anyhow!("AES-GCM encrypt failed: {e}"))?;
@@ -184,9 +180,11 @@ pub fn aesgcm_decrypt(packed: &[u8], passphrase: &str) -> Result<Vec<u8>> {
     let (nonce, ciphertext) = rest.split_at(NONCE_LEN);
 
     let key = derive_key(passphrase, salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| anyhow::anyhow!("AES key error: {e}"))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&key).map_err(|e| anyhow::anyhow!("AES key error: {e}"))?;
     cipher
         .decrypt(Nonce::from_slice(nonce), ciphertext)
-        .map_err(|e| anyhow::anyhow!("AES-GCM decrypt failed — wrong passphrase or tampered data: {e}"))
+        .map_err(|e| {
+            anyhow::anyhow!("AES-GCM decrypt failed — wrong passphrase or tampered data: {e}")
+        })
 }

@@ -23,11 +23,17 @@ pub struct EncryptedString {
 impl EncryptedString {
     pub fn new(plaintext: &str) -> Self {
         // 正常不应存明文；这里留给迁移/临时调试。
-        Self { version: 0, data: plaintext.as_bytes().to_vec() }
+        Self {
+            version: 0,
+            data: plaintext.as_bytes().to_vec(),
+        }
     }
 
     pub fn empty() -> Self {
-        Self { version: 1, data: Vec::new() }
+        Self {
+            version: 1,
+            data: Vec::new(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -55,7 +61,9 @@ pub enum AuthMethod {
 
 impl Default for AuthMethod {
     fn default() -> Self {
-        Self::Password { password: EncryptedString::empty() }
+        Self::Password {
+            password: EncryptedString::empty(),
+        }
     }
 }
 
@@ -113,12 +121,20 @@ pub struct Session {
     pub last_connected: Option<DateTime<Utc>>,
 }
 
-fn default_port() -> u16 { 22 }
-fn default_keepalive() -> u32 { 30 }
-fn default_timeout() -> u32 { 10 }
+fn default_port() -> u16 {
+    22
+}
+fn default_keepalive() -> u32 {
+    30
+}
+fn default_timeout() -> u32 {
+    10
+}
 
 /// 供外部 crate 获取当前时间（避免每个 crate 都直接依赖 chrono）
-pub fn default_now() -> DateTime<Utc> { Utc::now() }
+pub fn default_now() -> DateTime<Utc> {
+    Utc::now()
+}
 
 impl Default for Session {
     fn default() -> Self {

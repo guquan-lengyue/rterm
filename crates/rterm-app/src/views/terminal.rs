@@ -33,11 +33,11 @@ use uuid::Uuid;
 
 use rterm_ssh::pty::{self, PtyCommand, PtyEvent};
 use rterm_ssh::reconnect::ReconnectPolicy;
-use rterm_ssh::SshSession;
+use rterm_ssh::{HostKeyChoice, HostKeyDecision, HostKeyInfo, SshSession};
 use rterm_terminal::{TerminalEngine, TerminalKey};
 
 use crate::event::{AppEvent, EventBusHost};
-use crate::state::{AppState, CursorStyle};
+use crate::state::{lock_or_recover, AppState, CursorStyle};
 use crate::theme::TerminalPalette;
 use crate::ui::theme as ui_theme;
 
@@ -45,6 +45,15 @@ use super::{CONTENT_BORDER_W, SIDEBAR_W, STATUS_BAR_H, TAB_BAR_H, TERMINAL_HEADE
 
 /// PTY 输出有界队列容量：队列满时后台线程阻塞等待 UI 消费（背压）。
 const PTY_OUTPUT_QUEUE_CAPACITY: usize = 256;
+
+/// 单元格背景分段上色的内部哨兵色：仅用于强制 flush 最后一段 run，
+/// 永远不会真正绘制（`paint_row` 只处理 end > start 的真实区间）。
+const BG_RUN_SENTINEL: Rgba = Rgba {
+    r: -1.0,
+    g: -1.0,
+    b: -1.0,
+    a: -1.0,
+};
 
 // ---------------------------------------------------------------------------
 // 状态
@@ -77,6 +86,12 @@ struct ViewMetrics {
     bounds: Option<Bounds<Pixels>>,
     cell_w: f32,
     line_h: f32,
+}
+
+/// 未知 / 变更主机密钥弹窗状态：info 用于渲染，reply 用于把用户选择送回后台线程。
+struct HostKeyPromptState {
+    info: HostKeyInfo,
+    reply: Sender<HostKeyChoice>,
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +181,8 @@ pub struct TerminalView {
 
     attempt_started: Option<Instant>,
     last_latency_ms: Option<u64>,
+    /// 未知 / 变更主机密钥三选一弹窗（打开期间暂停连接）。
+    host_key_prompt: Option<HostKeyPromptState>,
 }
 
 impl TerminalView {
@@ -186,8 +203,9 @@ impl TerminalView {
 
         // 主题 / 设置变更 → 即时重绘
         let host = cx.global::<AppState>().event_bus_host.clone();
-        cx.subscribe(&host, |this: &mut Self, _host, event: &AppEvent, cx| {
-            match event {
+        cx.subscribe(
+            &host,
+            |this: &mut Self, _host, event: &AppEvent, cx| match event {
                 AppEvent::AppThemeChanged { name } => {
                     this.palette = crate::theme::terminal_palette(name);
                     this.glyph_cache.borrow_mut().clear();
@@ -197,25 +215,23 @@ impl TerminalView {
                     this.apply_settings(cx);
                 }
                 _ => {}
-            }
-        })
+            },
+        )
         .detach();
 
         // 光标 blink：500ms 翻转一次
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(500))
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        this.blink_on = !this.blink_on;
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            if this
+                .update(cx, |this, cx| {
+                    this.blink_on = !this.blink_on;
+                    cx.notify();
+                })
+                .is_err()
+            {
+                break;
             }
         })
         .detach();
@@ -255,6 +271,7 @@ impl TerminalView {
             blink_on: true,
             attempt_started: None,
             last_latency_ms: None,
+            host_key_prompt: None,
         }
     }
 
@@ -264,6 +281,11 @@ impl TerminalView {
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    /// 主机密钥弹窗打开时屏蔽全局快捷键（Ctrl+W / Ctrl+T 等）。
+    pub fn has_host_key_prompt(&self) -> bool {
+        self.host_key_prompt.is_some()
     }
 
     pub fn session_label(&self) -> Option<String> {
@@ -297,7 +319,7 @@ impl TerminalView {
     pub fn connect(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let stored = {
             let state = cx.global::<AppState>();
-            let store = state.session_store.lock().unwrap();
+            let store = lock_or_recover(&state.session_store);
             store.get(session_id).cloned()
         };
 
@@ -332,8 +354,9 @@ impl TerminalView {
         self.tab_id = Uuid::new_v4();
         self.reconnect_attempt = 0;
         self.selection = None;
-        // 新连接：重置本地引擎（清空历史）并重建应答通道。
+        // 新连接：丢弃旧弹窗（drop sender 让旧连接 Reject），重置本地引擎并重建应答通道。
         // 重连走 start_attempt，不重置，保留已有 scrollback。
+        self.host_key_prompt = None;
         self.reset_engine();
         self.status = TerminalStatus::Connecting;
         self.start_attempt(cx);
@@ -342,6 +365,7 @@ impl TerminalView {
 
     /// 新建本地引擎并重建终端应答通道（仅新连接时调用）。
     fn reset_engine(&mut self) {
+        self.host_key_prompt = None;
         let (response_tx, response_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         self.engine = TerminalEngine::with_response_sender(
             self.cols as usize,
@@ -355,12 +379,18 @@ impl TerminalView {
     /// 关闭 Tab 时调用：通知后台线程退出 + 丢弃 Engine。
     pub fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
+        self.host_key_prompt = None;
         if let Some(tx) = self.input_tx.take() {
             let _ = tx.send(PtyCommand::Close);
         }
         self.status = TerminalStatus::Idle;
         self.selection = None;
-        self.emit(cx, AppEvent::TerminalClosed { tab_id: self.tab_id });
+        self.emit(
+            cx,
+            AppEvent::TerminalClosed {
+                tab_id: self.tab_id,
+            },
+        );
         cx.notify();
     }
 
@@ -413,34 +443,9 @@ impl TerminalView {
         }
 
         match event {
-            PtyEvent::HostKey(info) => {
-                let Some(session_id) = self.session_id else {
-                    return;
-                };
-                match info.decision {
-                    rterm_ssh::HostKeyDecision::Unknown => {
-                        self.emit(
-                            cx,
-                            AppEvent::HostKeyUnknown {
-                                session_id,
-                                host: info.host,
-                                fingerprint: format!("{} {}", info.key_type, info.fingerprint),
-                            },
-                        );
-                    }
-                    rterm_ssh::HostKeyDecision::Changed => {
-                        self.emit(
-                            cx,
-                            AppEvent::HostKeyChanged {
-                                session_id,
-                                host: info.host,
-                                old_fp: String::new(),
-                                new_fp: format!("{} {}", info.key_type, info.fingerprint),
-                            },
-                        );
-                    }
-                    rterm_ssh::HostKeyDecision::Match => {}
-                }
+            PtyEvent::HostKeyPrompt { info, reply } => {
+                self.host_key_prompt = Some(HostKeyPromptState { info, reply });
+                cx.notify();
             }
             PtyEvent::Connected => {
                 self.status = TerminalStatus::Connected;
@@ -450,7 +455,13 @@ impl TerminalView {
                     let latency = started.elapsed().as_millis() as u64;
                     self.last_latency_ms = Some(latency);
                     if let Some(session_id) = self.session_id {
-                        self.emit(cx, AppEvent::SessionLatency { session_id, latency_ms: latency });
+                        self.emit(
+                            cx,
+                            AppEvent::SessionLatency {
+                                session_id,
+                                latency_ms: latency,
+                            },
+                        );
                     }
                 }
                 if let Some(session_id) = self.session_id {
@@ -470,20 +481,11 @@ impl TerminalView {
                 self.engine.input_bytes(&bytes);
                 // DSR / DA 等查询会通过 Event::PtyWrite 产生应答，写回 PTY
                 self.drain_engine_responses();
-                if let Some(session_id) = self.session_id {
-                    self.emit(
-                        cx,
-                        AppEvent::TerminalData {
-                            tab_id: self.tab_id,
-                            session_id,
-                            bytes,
-                        },
-                    );
-                }
                 cx.notify();
             }
             PtyEvent::Closed { reason } => {
                 log::warn!("[terminal] PTY closed: {reason}");
+                self.host_key_prompt = None;
                 self.input_tx = None;
                 if let Some(session_id) = self.session_id {
                     self.emit(
@@ -498,6 +500,7 @@ impl TerminalView {
             }
             PtyEvent::Failed { reason, retryable } => {
                 log::warn!("[terminal] connect failed (retryable={retryable}): {reason}");
+                self.host_key_prompt = None;
                 self.input_tx = None;
                 if retryable {
                     self.schedule_reconnect_with_reason(reason, cx);
@@ -600,12 +603,9 @@ impl TerminalView {
     fn sync_grid_size(&mut self, window: &Window) {
         let viewport = window.viewport_size();
         let available_w = (f32::from(viewport.width) - SIDEBAR_W - CONTENT_BORDER_W).max(1.0);
-        let available_h = (f32::from(viewport.height)
-            - TOOLBAR_H
-            - STATUS_BAR_H
-            - TAB_BAR_H
-            - TERMINAL_HEADER_H)
-            .max(1.0);
+        let available_h =
+            (f32::from(viewport.height) - TOOLBAR_H - STATUS_BAR_H - TAB_BAR_H - TERMINAL_HEADER_H)
+                .max(1.0);
 
         let cols = ((available_w / self.cell_w).floor() as usize).clamp(1, 500);
         let rows = ((available_h / self.line_height).floor() as usize).clamp(1, 300);
@@ -787,11 +787,7 @@ impl TerminalView {
             };
         }
 
-        if key.is_none()
-            && !modifiers.control
-            && !modifiers.alt
-            && !modifiers.platform
-        {
+        if key.is_none() && !modifiers.control && !modifiers.alt && !modifiers.platform {
             if let Some(text) = &keystroke.key_char {
                 if !text.is_empty() {
                     key = Some(TerminalKey::Char(text.clone()));
@@ -1000,7 +996,9 @@ impl TerminalView {
         let cols = self.cols as usize;
         let rows = self.rows as usize;
 
-        let selection = self.selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
+        let selection = self
+            .selection
+            .map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
         let selection_bg = self.palette.selection_bg();
 
         let mut cells = Vec::with_capacity(cols * rows);
@@ -1063,6 +1061,162 @@ impl TerminalView {
             scroll_history: history,
         }
     }
+
+    /// 主机密钥弹窗按钮：统一样式 + 点击后把选择回传后台线程并关闭弹窗。
+    fn host_key_button(
+        &self,
+        label: &'static str,
+        id: &'static str,
+        colors: (Rgba, Rgba, Rgba),
+        choice: HostKeyChoice,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (bg, hover, text_color) = colors;
+        div()
+            .px_3()
+            .h(px(28.))
+            .rounded_md()
+            .bg(bg)
+            .text_size(px(11.))
+            .text_color(text_color)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .id(id)
+            .hover(move |style| style.bg(hover))
+            .on_click(
+                cx.listener(move |this, _ev: &gpui::ClickEvent, _window, cx| {
+                    if let Some(prompt) = this.host_key_prompt.take() {
+                        let _ = prompt.reply.send(choice);
+                    }
+                    cx.notify();
+                }),
+            )
+            .child(label)
+            .into_any_element()
+    }
+
+    /// 未知 / 变更主机密钥三选一弹窗（覆盖整个 Tab，阻止点击穿透）。
+    fn render_host_key_prompt(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = ui_theme(cx);
+        let Some(prompt) = &self.host_key_prompt else {
+            return div().into_any_element();
+        };
+        let info = &prompt.info;
+        let changed = info.decision == HostKeyDecision::Changed;
+        let title = if changed {
+            "主机密钥已变更"
+        } else {
+            "未知主机密钥"
+        };
+        let new_fingerprint = format!("SHA256:{}", info.fingerprint);
+        let old_fingerprint = info
+            .old_fingerprint
+            .as_ref()
+            .map(|fingerprint| format!("SHA256:{fingerprint}"))
+            .unwrap_or_else(|| "旧指纹不可读取".to_string());
+
+        let text_color = t.text_on_card_bg();
+        let meta_color = t.text_subtle();
+
+        let mut card = div()
+            .w(px(460.))
+            .bg(t.card_bg())
+            .border_1()
+            .border_color(t.border_medium())
+            .rounded_lg()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .w_full()
+                    .text_center()
+                    .text_size(px(14.))
+                    .text_color(text_color)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(meta_color)
+                    .child(format!("主机: {}", info.host)),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(meta_color)
+                    .child(format!("密钥类型: {}", info.key_type)),
+            );
+
+        if changed {
+            card = card
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(t.danger())
+                        .child("警告：主机密钥与上次记录不一致，可能存在中间人攻击"),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(meta_color)
+                        .child(format!("旧指纹: {old_fingerprint}")),
+                );
+        }
+
+        card = card
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(text_color)
+                    .child(format!("新指纹: {new_fingerprint}")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_center()
+                    .gap_2()
+                    .child(self.host_key_button(
+                        "接受并保存",
+                        "host-key-accept-save",
+                        (t.primary(), t.primary_hover(), t.text_on_primary_btn()),
+                        HostKeyChoice::AcceptAndSave,
+                        cx,
+                    ))
+                    .child(self.host_key_button(
+                        "仅本次",
+                        "host-key-accept-once",
+                        (
+                            t.secondary_btn_bg(),
+                            t.secondary_btn_hover(),
+                            t.text_on_secondary_btn(),
+                        ),
+                        HostKeyChoice::AcceptOnce,
+                        cx,
+                    ))
+                    .child(self.host_key_button(
+                        "拒绝",
+                        "host-key-reject",
+                        (t.danger(), t.danger(), t.text_on_primary_btn()),
+                        HostKeyChoice::Reject,
+                        cx,
+                    )),
+            );
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(t.modal_overlay())
+            .flex()
+            .items_center()
+            .justify_center()
+            .occlude()
+            .child(card)
+            .into_any_element()
+    }
 }
 
 fn is_function_key(key: &str) -> bool {
@@ -1114,12 +1268,7 @@ fn paint_snapshot(
                     snapshot.cells[row * snapshot.cols + col].bg
                 } else {
                     // 哨兵：强制 flush 最后一段
-                    Rgba {
-                        r: -1.0,
-                        g: -1.0,
-                        b: -1.0,
-                        a: -1.0,
-                    }
+                    BG_RUN_SENTINEL
                 };
                 if color != run_color {
                     paint_row(row, run_start, col, run_color);
@@ -1139,7 +1288,10 @@ fn paint_snapshot(
         let cursor: Hsla = palette.cursor.into();
         match &snapshot.cursor_style {
             CursorStyle::Block => {
-                window.paint_quad(fill(Bounds::new(origin, size(px(cell_w), px(line_h))), cursor));
+                window.paint_quad(fill(
+                    Bounds::new(origin, size(px(cell_w), px(line_h))),
+                    cursor,
+                ));
             }
             CursorStyle::Underline => {
                 window.paint_quad(fill(
@@ -1151,10 +1303,7 @@ fn paint_snapshot(
                 ));
             }
             CursorStyle::Bar => {
-                window.paint_quad(fill(
-                    Bounds::new(origin, size(px(2.0), px(line_h))),
-                    cursor,
-                ));
+                window.paint_quad(fill(Bounds::new(origin, size(px(2.0), px(line_h))), cursor));
             }
         }
     }
@@ -1165,7 +1314,7 @@ fn paint_snapshot(
     let primary_font_id = snapshot.font_id;
     let ascent = f32::from(text_system.ascent(primary_font_id, font_size));
     let descent = f32::from(text_system.descent(primary_font_id, font_size));
-    let baseline_padding = ((f32::from(line_h) - ascent - descent) / 2.0).max(0.0);
+    let baseline_padding = ((line_h - ascent - descent) / 2.0).max(0.0);
     let baseline = baseline_padding + ascent;
 
     for row in 0..snapshot.rows {
@@ -1253,18 +1402,12 @@ fn paint_snapshot(
 
         let track_color: Hsla = palette.fg.opacity(0.08).into();
         window.paint_quad(fill(
-            Bounds::new(
-                point(track_x, track_top),
-                size(px(6.0), px(track_h)),
-            ),
+            Bounds::new(point(track_x, track_top), size(px(6.0), px(track_h))),
             track_color,
         ));
         let thumb_color: Hsla = palette.fg.opacity(0.35).into();
         window.paint_quad(fill(
-            Bounds::new(
-                point(track_x, thumb_top),
-                size(px(6.0), px(thumb_h)),
-            ),
+            Bounds::new(point(track_x, thumb_top), size(px(6.0), px(thumb_h))),
             thumb_color,
         ));
     }
@@ -1436,11 +1579,9 @@ impl Render for TerminalView {
                         this.on_mouse_up(event, cx);
                     }),
                 )
-                .on_scroll_wheel(cx.listener(
-                    |this, event: &ScrollWheelEvent, _window, cx| {
-                        this.on_scroll_wheel(event, cx);
-                    },
-                ))
+                .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                    this.on_scroll_wheel(event, cx);
+                }))
                 .child(canvas_element);
 
             root = root.child(body);
@@ -1459,6 +1600,10 @@ impl Render for TerminalView {
             }
         }
 
+        if self.host_key_prompt.is_some() {
+            root = root.child(self.render_host_key_prompt(cx));
+        }
+
         root
     }
 }
@@ -1473,22 +1618,31 @@ fn run_connection(
 ) {
     let mut ssh = SshSession::new();
 
-    if let Err(error) = ssh.connect(&config) {
-        if let Some(info) = ssh.last_host_key() {
-            if !pty::send_event(&mut output, PtyEvent::HostKey(info.clone())) {
-                return;
-            }
+    // 未知 / 变更主机密钥：把选择请求发给 UI，最多等待 5 分钟；
+    // UI 关闭、超时或事件通道断开一律按拒绝处理。
+    let prompt_output = output.clone();
+    let verifier = move |info: &HostKeyInfo| -> HostKeyChoice {
+        let (reply, response) = std::sync::mpsc::channel::<HostKeyChoice>();
+        let mut sender = prompt_output.clone();
+        if !pty::send_event(
+            &mut sender,
+            PtyEvent::HostKeyPrompt {
+                info: info.clone(),
+                reply,
+            },
+        ) {
+            return HostKeyChoice::Reject;
         }
+        response
+            .recv_timeout(Duration::from_secs(300))
+            .unwrap_or(HostKeyChoice::Reject)
+    };
+
+    if let Err(error) = ssh.connect_with_verifier(&config, Some(Box::new(verifier))) {
         let reason = format!("{error:#}");
         let retryable = connect_error_is_retryable(&reason);
         let _ = pty::send_event(&mut output, PtyEvent::Failed { reason, retryable });
         return;
-    }
-
-    if let Some(info) = ssh.last_host_key() {
-        if !pty::send_event(&mut output, PtyEvent::HostKey(info.clone())) {
-            return;
-        }
     }
 
     let channel = match ssh.open_pty(cols as u32, rows as u32) {
@@ -1527,6 +1681,7 @@ fn connect_error_is_retryable(reason: &str) -> bool {
     !(reason.contains("认证失败")
         || reason.contains("认证未通过")
         || reason.contains("主机密钥已变更")
+        || reason.contains("用户拒绝接受主机密钥")
         || reason.contains("用户名为空")
         || reason.contains("密码为空")
         || reason.contains("主机地址为空")

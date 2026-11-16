@@ -1,8 +1,8 @@
 //! export_tests — 导出/导入 + AES-GCM + 冲突策略
 
 use rterm_session::{
-    ConflictPolicy, ExportScope, ImportReport, Session,
     export::{export_json, import_json},
+    ConflictPolicy, ExportScope, ImportReport, Session,
 };
 
 fn make_session(id_seed: u8, name: &str) -> Session {
@@ -15,25 +15,20 @@ fn make_session(id_seed: u8, name: &str) -> Session {
 
 #[test]
 fn export_dpapi_roundtrip() {
-    let sessions = vec![
-        make_session(1, "srv-a"),
-        make_session(2, "srv-b"),
-    ];
+    let sessions = vec![make_session(1, "srv-a"), make_session(2, "srv-b")];
     let json = export_json(&sessions, ExportScope::All, None).expect("export");
     assert!(json.contains("\"rterm-export\""));
     assert!(json.contains("\"version\": 1"));
 
-    let (merged, report) = import_json(&json, &[], ConflictPolicy::Overwrite, None).expect("import");
+    let (merged, report) =
+        import_json(&json, &[], ConflictPolicy::Overwrite, None).expect("import");
     assert_eq!(report.added, 2);
     assert_eq!(merged.len(), 2);
 }
 
 #[test]
 fn export_scope_selection() {
-    let sessions = vec![
-        make_session(1, "keep-me"),
-        make_session(2, "drop-me"),
-    ];
+    let sessions = vec![make_session(1, "keep-me"), make_session(2, "drop-me")];
     let ids = vec![sessions[0].id];
     let json = export_json(&sessions, ExportScope::Selection(ids), None).expect("export");
     let (merged, _) = import_json(&json, &[], ConflictPolicy::Overwrite, None).unwrap();
@@ -61,7 +56,9 @@ fn export_aesgcm_wrong_password_fails() {
     // Session::default() 密码是空的 — 必须手工塞明文密码让 AES-GCM 加密路径被走到
     let mut s = make_session(1, "x");
     use rterm_session::{AuthMethod, EncryptedString};
-    s.auth = AuthMethod::Password { password: EncryptedString::new("secret123") };
+    s.auth = AuthMethod::Password {
+        password: EncryptedString::new("secret123"),
+    };
 
     let json = export_json(&[s], ExportScope::All, Some("correct-pass")).expect("export");
 
@@ -74,7 +71,8 @@ fn export_aesgcm_correct_password_roundtrip() {
     let sessions = vec![make_session(1, "x"), make_session(2, "y")];
     let json = export_json(&sessions, ExportScope::All, Some("pw")).expect("export");
 
-    let (merged, report) = import_json(&json, &[], ConflictPolicy::Overwrite, Some("pw")).expect("import");
+    let (merged, report) =
+        import_json(&json, &[], ConflictPolicy::Overwrite, Some("pw")).expect("import");
     assert_eq!(report.added, 2);
     assert_eq!(merged.len(), 2);
 }
@@ -94,7 +92,7 @@ fn aesgcm_encrypted_payload_not_readable() {
 #[test]
 fn conflict_overwrite() {
     let existing = vec![make_session(1, "original")];
-    let incoming = vec![make_session(1, "imported")];  // 同 id
+    let incoming = vec![make_session(1, "imported")]; // 同 id
 
     let json = export_json(&incoming, ExportScope::All, None).expect("export");
     let (merged, report) = import_json(&json, &existing, ConflictPolicy::Overwrite, None).unwrap();
@@ -135,7 +133,12 @@ fn conflict_rename() {
 
 #[test]
 fn report_serializes() {
-    let r = ImportReport { added: 1, updated: 2, skipped: 3, renamed: 4 };
+    let r = ImportReport {
+        added: 1,
+        updated: 2,
+        skipped: 3,
+        renamed: 4,
+    };
     let j = serde_json::to_string(&r).unwrap();
     assert!(j.contains("\"added\":1"));
 }

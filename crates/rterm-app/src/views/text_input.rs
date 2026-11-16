@@ -13,10 +13,10 @@ use std::ops::Range;
 
 use gpui::prelude::*;
 use gpui::{
-    actions, App, Bounds, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, UnderlineStyle, Window, div, fill, point, px, relative, size,
+    actions, div, fill, point, px, relative, size, App, Bounds, Context, CursorStyle, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, PaintQuad, Pixels, ShapedLine,
+    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 
 // 键盘编辑动作。绑定在 main.rs 的 App::bind_keys。
@@ -277,9 +277,19 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let start = self.offset_to_utf16(clamp_index(&self.content, self.offset_from_utf16(range_utf16.start)));
-        let end = self.offset_to_utf16(clamp_index(&self.content, self.offset_from_utf16(range_utf16.end)));
-        let (start, end) = if start <= end { (start, end) } else { (end, start) };
+        let start = self.offset_to_utf16(clamp_index(
+            &self.content,
+            self.offset_from_utf16(range_utf16.start),
+        ));
+        let end = self.offset_to_utf16(clamp_index(
+            &self.content,
+            self.offset_from_utf16(range_utf16.end),
+        ));
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         actual_range.replace(start..end);
         let range = clamp_range(start..end, &self.content);
         Some(self.content[range].to_string())
@@ -298,7 +308,11 @@ impl EntityInputHandler for TextInput {
         })
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
         self.marked_range
             .as_ref()
             .map(|r| clamp_range(r.clone(), &self.content))
@@ -323,8 +337,12 @@ impl EntityInputHandler for TextInput {
             .unwrap_or(self.selected_range.clone());
         let range = clamp_range(raw, &self.content);
 
-        self.content =
-            SharedString::from(format!("{}{}{}", &self.content[..range.start], new_text, &self.content[range.end..]));
+        self.content = SharedString::from(format!(
+            "{}{}{}",
+            &self.content[..range.start],
+            new_text,
+            &self.content[range.end..]
+        ));
         let new_end = range.start + new_text.len();
         self.selected_range = new_end..new_end;
         self.marked_range = None;
@@ -346,8 +364,12 @@ impl EntityInputHandler for TextInput {
             .unwrap_or(self.selected_range.clone());
         let range = clamp_range(raw, &self.content);
 
-        self.content =
-            SharedString::from(format!("{}{}{}", &self.content[..range.start], new_text, &self.content[range.end..]));
+        self.content = SharedString::from(format!(
+            "{}{}{}",
+            &self.content[..range.start],
+            new_text,
+            &self.content[range.end..]
+        ));
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -440,44 +462,6 @@ fn utf16_to_utf8_offset(text: &str, utf16_offset: usize) -> usize {
     utf8
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{clamp_index, clamp_range, utf16_to_utf8_offset};
-
-    #[test]
-    fn clamp_index_handles_overflow_and_char_boundaries() {
-        assert_eq!(clamp_index("abc", 2), 2);
-        assert_eq!(clamp_index("abc", 99), 3);
-        // "你" 占 3 字节；落在中间时回退到字符起点
-        assert_eq!(clamp_index("你好", 4), 3);
-        assert_eq!(clamp_index("你好", 99), 6);
-        assert_eq!(clamp_index("", 10), 0);
-    }
-
-    #[test]
-    fn clamp_range_orders_and_bounds_ime_ranges() {
-        assert_eq!(clamp_range(0..3, "abc"), 0..3);
-        assert_eq!(clamp_range(5..2, "abc"), 3..3);
-        assert_eq!(clamp_range(0..99, "abc"), 0..3);
-        assert_eq!(clamp_range(99..100, "abc"), 3..3);
-        // IME 标记落在多字节字符中间时也不会 panic
-        assert_eq!(clamp_range(2..5, "你好"), 0..3);
-    }
-
-    #[test]
-    fn utf16_offset_maps_to_utf8_bytes() {
-        assert_eq!(utf16_to_utf8_offset("abc", 2), 2);
-        // 中文每字 1 个 UTF-16 单元、3 个字节
-        assert_eq!(utf16_to_utf8_offset("你好", 1), 3);
-        assert_eq!(utf16_to_utf8_offset("你好", 2), 6);
-        // emoji 是代理对：2 个 UTF-16 单元、4 个字节
-        assert_eq!(utf16_to_utf8_offset("😀", 2), 4);
-        // 落在代理对中间 → 回退到字符起点
-        assert_eq!(utf16_to_utf8_offset("😀", 1), 0);
-        assert_eq!(utf16_to_utf8_offset("", 3), 0);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // TextElement — 自定义绘制 Element（处理 layout + paint）
 // ---------------------------------------------------------------------------
@@ -494,15 +478,21 @@ struct TextElement {
 
 impl IntoElement for TextElement {
     type Element = Self;
-    fn into_element(self) -> Self { self }
+    fn into_element(self) -> Self {
+        self
+    }
 }
 
 impl Element for TextElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
 
-    fn id(&self) -> Option<ElementId> { None }
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
 
     fn request_layout(
         &mut self,
@@ -572,7 +562,10 @@ impl Element for TextElement {
         };
         let runs = if let Some(marked_range) = marked_range {
             vec![
-                TextRun { len: marked_range.start, ..run.clone() },
+                TextRun {
+                    len: marked_range.start,
+                    ..run.clone()
+                },
                 TextRun {
                     len: marked_range.end - marked_range.start,
                     underline: Some(UnderlineStyle {
@@ -582,7 +575,10 @@ impl Element for TextElement {
                     }),
                     ..run.clone()
                 },
-                TextRun { len: display_len - marked_range.end, ..run },
+                TextRun {
+                    len: display_len - marked_range.end,
+                    ..run
+                },
             ]
             .into_iter()
             .filter(|run| run.len > 0)
@@ -592,30 +588,48 @@ impl Element for TextElement {
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window.text_system().shape_line(display_text, font_size, &runs, None);
+        let line = window
+            .text_system()
+            .shape_line(display_text, font_size, &runs, None);
         let cursor_pos = line.x_for_index(cursor);
 
         let cursor_hsla: Hsla = cursor_color.into();
 
         let (selection, cursor) = if selected_range.is_empty() {
-            (None, Some(fill(
-                Bounds::new(
-                    point(bounds.left() + cursor_pos, bounds.top()),
-                    size(px(2.), bounds.bottom() - bounds.top()),
-                ),
-                cursor_hsla,
-            )))
+            (
+                None,
+                Some(fill(
+                    Bounds::new(
+                        point(bounds.left() + cursor_pos, bounds.top()),
+                        size(px(2.), bounds.bottom() - bounds.top()),
+                    ),
+                    cursor_hsla,
+                )),
+            )
         } else {
-            (Some(fill(
-                Bounds::from_corners(
-                    point(bounds.left() + line.x_for_index(selected_range.start), bounds.top()),
-                    point(bounds.left() + line.x_for_index(selected_range.end), bounds.bottom()),
-                ),
-                selection_color,
-            )), None)
+            (
+                Some(fill(
+                    Bounds::from_corners(
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.top(),
+                        ),
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.bottom(),
+                        ),
+                    ),
+                    selection_color,
+                )),
+                None,
+            )
         };
 
-        PrepaintState { line: Some(line), cursor, selection }
+        PrepaintState {
+            line: Some(line),
+            cursor,
+            selection,
+        }
     }
 
     fn paint(
@@ -629,12 +643,23 @@ impl Element for TextElement {
         cx: &mut App,
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
-        window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
+        window.handle_input(
+            &focus_handle,
+            ElementInputHandler::new(bounds, self.input.clone()),
+            cx,
+        );
         if let Some(sel) = prepaint.selection.take() {
             window.paint_quad(sel);
         }
         let line = prepaint.line.take().unwrap();
-        let _ = line.paint(bounds.origin, window.line_height(), gpui::TextAlign::Left, None, window, cx);
+        let _ = line.paint(
+            bounds.origin,
+            window.line_height(),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
 
         if focus_handle.is_focused(window) {
             if let Some(cur) = prepaint.cursor.take() {
@@ -667,9 +692,17 @@ impl Render for TextInput {
         let (border_idle, border_focused, input_bg) = {
             let state = cx.global::<crate::state::AppState>();
             let t = state.t();
-            (t.border_input_idle(), t.border_input_focused(), t.input_bg())
+            (
+                t.border_input_idle(),
+                t.border_input_focused(),
+                t.input_bg(),
+            )
         };
-        let border_color = if is_focused { border_focused } else { border_idle };
+        let border_color = if is_focused {
+            border_focused
+        } else {
+            border_idle
+        };
 
         div()
             .w_full()
@@ -698,5 +731,45 @@ impl Render for TextInput {
                     .px_2()
                     .child(TextElement { input: cx.entity() }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_index, clamp_range, utf16_to_utf8_offset};
+
+    #[test]
+    fn clamp_index_handles_overflow_and_char_boundaries() {
+        assert_eq!(clamp_index("abc", 2), 2);
+        assert_eq!(clamp_index("abc", 99), 3);
+        // "你" 占 3 字节；落在中间时回退到字符起点
+        assert_eq!(clamp_index("你好", 4), 3);
+        assert_eq!(clamp_index("你好", 99), 6);
+        assert_eq!(clamp_index("", 10), 0);
+    }
+
+    #[test]
+    fn clamp_range_orders_and_bounds_ime_ranges() {
+        assert_eq!(clamp_range(0..3, "abc"), 0..3);
+        // 反向 range：用变量构造，避免 clippy::reversed_empty_ranges 直接命中字面量
+        let (start, end) = (5usize, 2usize);
+        assert_eq!(clamp_range(start..end, "abc"), 3..3);
+        assert_eq!(clamp_range(0..99, "abc"), 0..3);
+        assert_eq!(clamp_range(99..100, "abc"), 3..3);
+        // IME 标记落在多字节字符中间时也不会 panic
+        assert_eq!(clamp_range(2..5, "你好"), 0..3);
+    }
+
+    #[test]
+    fn utf16_offset_maps_to_utf8_bytes() {
+        assert_eq!(utf16_to_utf8_offset("abc", 2), 2);
+        // 中文每字 1 个 UTF-16 单元、3 个字节
+        assert_eq!(utf16_to_utf8_offset("你好", 1), 3);
+        assert_eq!(utf16_to_utf8_offset("你好", 2), 6);
+        // emoji 是代理对：2 个 UTF-16 单元、4 个字节
+        assert_eq!(utf16_to_utf8_offset("😀", 2), 4);
+        // 落在代理对中间 → 回退到字符起点
+        assert_eq!(utf16_to_utf8_offset("😀", 1), 0);
+        assert_eq!(utf16_to_utf8_offset("", 3), 0);
     }
 }

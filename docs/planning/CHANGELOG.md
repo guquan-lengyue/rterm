@@ -4,6 +4,41 @@
 
 ---
 
+## Sprint 7.5 — 技术债清偿（S8 前插入）
+
+**状态**：✅ COMPLETED | **Commit**：`e77e480`（P0/P1）+ 工作区（P2/P3） | **时间**：2026-11-16
+**前置**：S7 核心完成
+**后续**：S8 路径同步（前置门禁已满足）
+
+### 交付清单
+
+| 分组 | 内容 |
+|------|------|
+| P0 数据可靠性 | 会话 CRUD 即时落盘；损坏 sessions.json 备份并阻止空库覆盖；`load_lossy` 单条解密容错；私钥口令 sentinel；DPAPI 用户级 + LocalFree；Windows 单实例锁 |
+| P1 线程/资源 | SFTP 远端 I/O 后台化；Tab 关闭队列/SSH 泄漏修复；TransferQueue 每 worker 独立通道真并发；`.part` 临时文件安全取消；PTY 有界背压 + 空闲退避；SessionTree 单订阅；Terminal render 去 emit |
+| P2 状态/交互 | StatusBarMessage 消费；关闭 Tab 状态点复位；设置默认值/data_dir 接线；表单校验；SFTP `~`；滚动条真实历史；重连保留 scrollback；TextInput 粘贴/鼠标定位/IME；内部弹窗屏蔽快捷键；删除/覆盖确认；DECCKM + DSR/DA；OpenSSH 解析修正；多级文件夹 |
+| 7.5.4 主机密钥 | 未知/变更三选一 Modal（保存/仅本次/拒绝）；旧/新指纹；known_hosts 原子写 + 进程互斥 |
+| 7.5.5 工程门禁 | `.lock().unwrap()` 清零 + panic hook；死代码/死事件/未用依赖清理；布局常量收敛；fmt + clippy + 本地 check.ps1 |
+
+### 验证
+
+| 项 | 结果 |
+|----|------|
+| `cargo test --workspace` | ✅ 92 passed / 0 failed / 1 ignored |
+| `cargo clippy --workspace --all-targets` | ✅ 0 warning / 0 error |
+| `cargo fmt --all -- --check` | ✅ 通过 |
+| 手工回归 | ⏳ 见 sprint-07.5-tech-debt.md 回归清单（真实 GUI/SSH 环境） |
+
+### 已知限制（转 S10）
+
+- hashed known_hosts 的旧指纹无法展示，变更接受后仍可能重复提示
+- Windows known_hosts 替换存在极短非原子窗口
+- SFTP 本地文件系统操作仍在 UI 线程（远端 I/O 已后台化）
+- 长空闲后 PTY 首键回显最坏约 50ms
+- 修改 data_dir 不自动迁移旧 sessions.json
+
+---
+
 ## Sprint 7 — SFTP 文件管理（核心完成）
 
 **状态**：🚧 IN PROGRESS | **Commit**：待提交 | **时间**：2026-11-16

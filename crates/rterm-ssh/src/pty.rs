@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use futures::channel::mpsc::Sender;
 
 use crate::keepalive::KeepAliveTimer;
-use crate::known_hosts::HostKeyInfo;
+use crate::known_hosts::{HostKeyChoice, HostKeyInfo};
 
 /// UI → 后台线程的命令。
 #[derive(Debug)]
@@ -27,12 +27,21 @@ pub enum PtyCommand {
 /// 后台线程 → UI 的事件。
 #[derive(Debug)]
 pub enum PtyEvent {
-    HostKey(HostKeyInfo),
+    /// 未知 / 变更主机密钥：暂停连接并等待 UI 三选一。
+    HostKeyPrompt {
+        info: HostKeyInfo,
+        reply: std::sync::mpsc::Sender<HostKeyChoice>,
+    },
     Connected,
     Data(Vec<u8>),
-    Closed { reason: String },
+    Closed {
+        reason: String,
+    },
     /// `retryable == false` 时（认证失败 / 主机密钥变更 / 配置错误）不应自动重连。
-    Failed { reason: String, retryable: bool },
+    Failed {
+        reason: String,
+        retryable: bool,
+    },
 }
 
 /// 向 UI 发送事件；队列满时阻塞重试（背压），不丢弃事件。

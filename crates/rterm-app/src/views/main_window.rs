@@ -19,24 +19,24 @@
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, AnyElement, ClickEvent, Context, Entity, FocusHandle, IntoElement, KeyBinding,
-    MouseDownEvent, Render, Window,
+    actions, div, px, AnyElement, ClickEvent, Context, Entity, FocusHandle, IntoElement,
+    KeyBinding, MouseDownEvent, Render, Window,
 };
 use uuid::Uuid;
 
 use crate::event::{AppEvent, EventBusHost};
-use crate::state::{AppState, TabInfo, TabKind};
+use crate::state::{lock_or_recover, AppState, TabInfo, TabKind};
 use crate::ui::theme;
 
 use super::import_export::{ImportExportDialog, IoMode};
 use super::session_dialog::SessionEditDialog;
 use super::session_tree::SessionTreeView;
-use super::sftp::SftpView;
 use super::settings::SettingsView;
+use super::sftp::SftpView;
 use super::status_bar::StatusBar;
 use super::tab_bar::TabBar;
 use super::terminal::TerminalView;
-use super::{SIDEBAR_W, TOOLBAR_H};
+use super::{CONTEXT_MENU_ITEM_H, CONTEXT_MENU_W, MENU_PADDING_Y, SIDEBAR_W, TOOLBAR_H};
 
 // ---------------------------------------------------------------------------
 // 标签页快捷键（main.rs 里 App::on_action 转发到 MainWindow）
@@ -109,12 +109,12 @@ impl TabContentView {
     /// Tab 内部是否有需要独占键盘的弹窗（S7.5.3.9：屏蔽全局快捷键）。
     fn blocks_global_shortcuts(&self, cx: &mut Context<MainWindow>) -> bool {
         match self {
-            Self::Terminal(_) => false,
+            Self::Terminal(view) => view.read(cx).has_host_key_prompt(),
             Self::Sftp(view) => view.read(cx).has_modal_dialog(),
         }
     }
 
-    fn into_element(&self) -> AnyElement {
+    fn element(&self) -> AnyElement {
         match self {
             Self::Terminal(view) => view.clone().into_any_element(),
             Self::Sftp(view) => view.clone().into_any_element(),
@@ -150,14 +150,15 @@ pub struct MainWindow {
 
 impl MainWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let session_tree = cx.new(|cx| SessionTreeView::new(cx));
-        let status_bar = cx.new(|cx| StatusBar::new(cx));
+        let session_tree = cx.new(SessionTreeView::new);
+        let status_bar = cx.new(StatusBar::new);
         let tab_bar = cx.new(|_cx| TabBar::new());
 
         let host = cx.global::<AppState>().event_bus_host.clone();
         let startup_error = cx.global::<AppState>().startup_error.clone();
-        cx.subscribe(&host, |this: &mut Self, _host, event: &AppEvent, cx| {
-            match event {
+        cx.subscribe(
+            &host,
+            |this: &mut Self, _host, event: &AppEvent, cx| match event {
                 AppEvent::SessionConnectRequested { session_id } => {
                     this.open_terminal_tab(*session_id, cx);
                 }
@@ -195,8 +196,8 @@ impl MainWindow {
                     this.close_import_export(cx);
                 }
                 _ => {}
-            }
-        })
+            },
+        )
         .detach();
 
         Self {
@@ -222,14 +223,14 @@ impl MainWindow {
     fn open_terminal_tab(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let title = {
             let state = cx.global::<AppState>();
-            let store = state.session_store.lock().unwrap();
+            let store = lock_or_recover(&state.session_store);
             store
                 .get(session_id)
                 .map(|session| session.display_label())
                 .unwrap_or_else(|| "终端".to_string())
         };
 
-        let view = cx.new(|cx| TerminalView::new(cx));
+        let view = cx.new(TerminalView::new);
         view.update(cx, |view, cx| view.connect(session_id, cx));
         let id = view.read(cx).tab_id();
 
@@ -249,14 +250,14 @@ impl MainWindow {
     fn open_sftp_tab(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let title = {
             let state = cx.global::<AppState>();
-            let store = state.session_store.lock().unwrap();
+            let store = lock_or_recover(&state.session_store);
             store
                 .get(session_id)
                 .map(|session| format!("{} · SFTP", session.display_label()))
                 .unwrap_or_else(|| "SFTP".to_string())
         };
 
-        let view = cx.new(|cx| SftpView::new(cx));
+        let view = cx.new(SftpView::new);
         view.update(cx, |view, cx| view.connect(session_id, cx));
         let id = view.read(cx).tab_id();
 
@@ -378,7 +379,8 @@ impl MainWindow {
             })
             .collect();
         let active = self.active_tab;
-        self.tab_bar.update(cx, |bar, cx| bar.set_tabs(tabs, active, cx));
+        self.tab_bar
+            .update(cx, |bar, cx| bar.set_tabs(tabs, active, cx));
     }
 
     /// 是否有任何弹窗 / 确认卡片打开（弹窗期间屏蔽全局 Tab 快捷键）。
@@ -446,12 +448,23 @@ impl MainWindow {
 
     fn close_settings(&mut self, saved: bool, cx: &mut Context<Self>) {
         self.settings_dialog = None;
-        self.set_status(if saved { "设置已保存" } else { "设置已取消" }, cx);
+        self.set_status(
+            if saved {
+                "设置已保存"
+            } else {
+                "设置已取消"
+            },
+            cx,
+        );
         cx.notify();
     }
 
     fn open_import_export(&mut self, export: bool, cx: &mut Context<Self>) {
-        let mode = if export { IoMode::Export } else { IoMode::Import };
+        let mode = if export {
+            IoMode::Export
+        } else {
+            IoMode::Import
+        };
         let dialog = cx.new(|cx| ImportExportDialog::new(cx, mode));
         self.import_export_dialog = Some(dialog);
         self.context_menu = None;
@@ -486,7 +499,9 @@ impl MainWindow {
     fn edit_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let session = {
             let state = cx.global::<AppState>();
-            state.session_store.lock().unwrap().get(session_id).cloned()
+            lock_or_recover(&state.session_store)
+                .get(session_id)
+                .cloned()
         };
         if let Some(s) = session {
             self.open_edit_dialog(Some(&s), cx);
@@ -496,7 +511,7 @@ impl MainWindow {
     fn delete_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         {
             let state = cx.global_mut::<AppState>();
-            state.session_store.lock().unwrap().delete(session_id);
+            lock_or_recover(&state.session_store).delete(session_id);
         }
 
         // 删除后立即写盘，失败只记日志（不阻断 UI）。
@@ -674,24 +689,25 @@ impl Render for MainWindow {
                             .px_2()
                             .cursor_pointer()
                             .child("✕")
-                            .on_click(cx.listener(
-                                |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                                    this.startup_error = None;
-                                    cx.notify();
-                                },
-                            )),
+                            .on_click(cx.listener(|this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                                this.startup_error = None;
+                                cx.notify();
+                            })),
                     ),
             );
         }
 
         if let Some(menu_state) = self.context_menu {
             let viewport = window.viewport_size();
-            let menu_w = 170.0_f32;
-            let menu_h = if menu_state.session_id.is_some() {
-                248.0_f32
+            let menu_w = CONTEXT_MENU_W;
+            // 有会话：新建/编辑/终端/SFTP/删除 + 导出/导入/设置 = 8 项；
+            // 空白处：新建 + 导出/导入/设置 = 4 项。
+            let menu_item_count = if menu_state.session_id.is_some() {
+                8
             } else {
-                128.0_f32
+                4
             };
+            let menu_h = menu_item_count as f32 * CONTEXT_MENU_ITEM_H + MENU_PADDING_Y;
             let x = (menu_state.x as f32)
                 .min(f32::from(viewport.width) - menu_w)
                 .max(0.);
@@ -712,12 +728,12 @@ impl Render for MainWindow {
                 .flex()
                 .flex_col()
                 .id("rterm-context-menu")
-                .on_mouse_down_out(cx.listener(
-                    |this: &mut Self, _ev: &MouseDownEvent, _w, cx| {
+                .on_mouse_down_out(
+                    cx.listener(|this: &mut Self, _ev: &MouseDownEvent, _w, cx| {
                         this.context_menu = None;
                         cx.notify();
-                    },
-                ))
+                    }),
+                )
                 .child(self.render_menu_item(
                     "rterm-ctx-new",
                     "＋ 新建会话",
@@ -900,7 +916,7 @@ impl Render for MainWindow {
 impl MainWindow {
     fn render_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            return tab.content.into_element();
+            return tab.content.element();
         }
 
         let t = theme(cx);
@@ -961,7 +977,7 @@ impl MainWindow {
 
         div()
             .w_full()
-            .h(px(30.))
+            .h(px(CONTEXT_MENU_ITEM_H))
             .px_3()
             .flex()
             .items_center()
@@ -971,8 +987,8 @@ impl MainWindow {
             .cursor_pointer()
             .id(id)
             .hover(move |s| s.bg(hover_bg))
-            .on_click(cx.listener(
-                move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
                     this.context_menu = None;
                     match action {
                         ContextMenuAction::NewSession => this.open_edit_dialog(None, cx),
@@ -988,8 +1004,8 @@ impl MainWindow {
                         ContextMenuAction::OpenSettingsDialog => this.open_settings(cx),
                     }
                     cx.notify();
-                },
-            ))
+                }),
+            )
             .child(label)
             .into_any_element()
     }

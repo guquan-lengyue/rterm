@@ -1,4 +1,4 @@
-    //! TerminalEngine — alacritty_terminal glue
+//! TerminalEngine — alacritty_terminal glue
 //!
 //! 职责：
 //! - 把 PTY 字节流喂给 `vte` 解析器 → `Term`
@@ -328,11 +328,8 @@ impl TerminalEngine {
     }
 
     pub fn scroll_page(&mut self, up: bool) {
-        self.term.scroll_display(if up {
-            Scroll::PageUp
-        } else {
-            Scroll::PageDown
-        });
+        self.term
+            .scroll_display(if up { Scroll::PageUp } else { Scroll::PageDown });
     }
 
     /// 回到最底部（有新输入时调用）。
@@ -355,11 +352,7 @@ impl TerminalEngine {
 
     /// 视口坐标区间 `(row, col)` 的文本（含端点），每行去尾部空格，
     /// 行间用 `\n` 连接。宽字符只取一次，跳过 spacer。
-    pub fn text_in_range(
-        &self,
-        start: (usize, usize),
-        end: (usize, usize),
-    ) -> String {
+    pub fn text_in_range(&self, start: (usize, usize), end: (usize, usize)) -> String {
         let (start, end) = if start <= end {
             (start, end)
         } else {
@@ -551,7 +544,10 @@ mod tests {
         engine.input_bytes(b"\x1b[6n");
         let response = rx.try_recv().expect("DSR 应产生 PtyWrite 应答");
         let text = String::from_utf8(response).unwrap();
-        assert!(text.starts_with("\x1b["), "unexpected DSR response: {text:?}");
+        assert!(
+            text.starts_with("\x1b["),
+            "unexpected DSR response: {text:?}"
+        );
         assert!(text.ends_with('R'), "unexpected DSR response: {text:?}");
     }
 }

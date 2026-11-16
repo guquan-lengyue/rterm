@@ -1,15 +1,30 @@
-//! AppState — 应用全局状态 + Settings 默认值 + TabRegistry
+//! AppState — 应用全局状态 + Settings 默认值
 //!
 //! SessionStore 已移到 `rterm_session::SessionStore`（Sprint 2 落地）。
 //! Theme 系统见 `crate::theme`。
 
-use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 use gpui::Entity;
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex, MutexGuard};
+use uuid::Uuid;
 
 use crate::event::EventBusHost;
 use crate::theme::{self, Theme};
+
+/// 获取 Mutex 守卫；锁中毒（持锁线程 panic）时记录错误并恢复内部数据。
+///
+/// UI / 业务路径统一走这里，避免一次 panic 导致后续所有加锁都
+/// `.unwrap()` 崩溃（白屏）。恢复后继续使用可能不一致的数据，
+/// 但比直接退出更利于用户保存现场。
+pub fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::error!("Mutex poisoned，恢复内部状态继续运行");
+            poisoned.into_inner()
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Settings（持久化 JSON，Sprint 4 落地：%APPDATA%\rterm\settings.json）
@@ -32,7 +47,7 @@ pub struct Settings {
     pub terminal_cursor_style: CursorStyle,
 
     // SFTP
-    pub sftp_sync_mode: String,  // "off", "term_to_sftp", "sftp_to_term", "bidirectional"
+    pub sftp_sync_mode: String, // "off", "term_to_sftp", "sftp_to_term", "bidirectional"
 
     // 监控
     pub monitor_interval_secs: u32,
@@ -115,9 +130,7 @@ pub fn sessions_path() -> std::path::PathBuf {
 /// 立即把当前 SessionStore 写盘（DPAPI 加密），用于 CRUD 后即时持久化。
 ///
 /// 调用方必须保证调用前已释放 store 的 MutexGuard，否则会死锁。
-pub fn persist_sessions(
-    store: &Arc<Mutex<rterm_session::SessionStore>>,
-) -> anyhow::Result<()> {
+pub fn persist_sessions(store: &Arc<Mutex<rterm_session::SessionStore>>) -> anyhow::Result<()> {
     let mut guard = store
         .lock()
         .map_err(|e| anyhow::anyhow!("会话存储锁已损坏: {e}"))?;
@@ -166,8 +179,7 @@ impl Settings {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| anyhow::anyhow!("序列化设置失败: {e}"))?;
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, json)
-            .map_err(|e| anyhow::anyhow!("写临时文件失败: {e}"))?;
+        std::fs::write(&tmp, json).map_err(|e| anyhow::anyhow!("写临时文件失败: {e}"))?;
         std::fs::rename(&tmp, &path)
             .map_err(|e| anyhow::anyhow!("重命名 settings.json 失败: {e}"))?;
         log::info!("Saved settings to {}", path.display());
@@ -182,8 +194,8 @@ impl Settings {
 // 用 crate 引用：state.rs 里 SessionStore 字段类型直接是 rterm_session::SessionStore
 
 // ---------------------------------------------------------------------------
-// TabRegistry（Sprint 6：TabInfo / TabKind 已被 TabBar 使用；
-// 实际 Tab 列表与生命周期在 MainWindow.tabs，此处保留给 S7/S9 抽公共 Registry）
+// Tab 展示模型（Sprint 6：TabInfo / TabKind 供 TabBar 使用；
+// 实际 Tab 列表与生命周期在 MainWindow.tabs）
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
@@ -199,22 +211,6 @@ pub struct TabInfo {
     pub kind: TabKind,
 }
 
-pub struct TabRegistry {
-    pub tabs: Vec<TabInfo>,
-    pub active: usize,
-}
-
-impl TabRegistry {
-    pub fn new() -> Self {
-        Self { tabs: Vec::new(), active: 0 }
-    }
-    pub fn count(&self) -> usize { self.tabs.len() }
-}
-
-impl Default for TabRegistry {
-    fn default() -> Self { Self::new() }
-}
-
 // ---------------------------------------------------------------------------
 // AppState — 顶层应用状态
 // ---------------------------------------------------------------------------
@@ -223,7 +219,6 @@ pub struct AppState {
     pub event_bus_host: Entity<EventBusHost>,
     pub settings: Settings,
     pub session_store: Arc<Mutex<rterm_session::SessionStore>>,
-    pub tab_registry: TabRegistry,
     /// 当前主题（Arc<dyn Theme> 方便 clone 传递）
     pub theme: Arc<dyn Theme>,
     /// 启动期加载会话时的错误提示（MainWindow 用红色横幅展示）。
@@ -247,7 +242,6 @@ impl AppState {
             event_bus_host,
             settings,
             session_store,
-            tab_registry: TabRegistry::new(),
             theme,
             startup_error,
         }
@@ -256,5 +250,27 @@ impl AppState {
     /// 便捷方法：从 AppState 取主题，避免每个 View 都写 Arc 解引用
     pub fn t(&self) -> &dyn Theme {
         self.theme.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_or_recover_recovers_from_poison() {
+        let mutex = Mutex::new(7_u32);
+        // 持锁期间 panic → 锁中毒。
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = mutex
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            panic!("intentional poison");
+        }));
+        assert!(poisoned.is_err());
+        assert!(mutex.lock().is_err(), "锁应处于中毒状态");
+
+        let guard = lock_or_recover(&mutex);
+        assert_eq!(*guard, 7);
     }
 }

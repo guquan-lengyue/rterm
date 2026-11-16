@@ -6,11 +6,9 @@ rust-version.workspace = true
 
 [dependencies]
 ssh2.workspace = true
-tokio.workspace = true
 futures.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 log.workspace = true
-bytes.workspace = true
 base64.workspace = true
+sha2 = "0.10"
 rterm-session.workspace = true

@@ -23,7 +23,6 @@ gpui_platform = { package = "bezel-gpui-platform", version = "0.3" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["full"] }
 futures = "0.3"
 
 # SSH
@@ -45,7 +44,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 env_logger = "0.11"
-parking_lot = "0.12"
 bytes = "1"
 base64 = "0.22"
 # 原生文件选择器（Sprint 4 导入导出）

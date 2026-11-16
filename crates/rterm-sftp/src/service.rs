@@ -94,12 +94,7 @@ impl SftpService {
             } else {
                 None
             };
-            entries.push(FileEntry::from_stat(
-                dir,
-                name,
-                &stat,
-                link_target,
-            ));
+            entries.push(FileEntry::from_stat(dir, name, &stat, link_target));
         }
         sort_entries(&mut entries, SortKey::Name, true);
         Ok(entries)
@@ -113,7 +108,10 @@ impl SftpService {
             .with_context(|| format!("无法获取远端状态 {path}"))?;
         let name = file_name_of(path);
         let link_target = if stat.file_type().is_symlink() {
-            self.sftp.readlink(Path::new(path)).ok().map(|p| path_to_string(&p))
+            self.sftp
+                .readlink(Path::new(path))
+                .ok()
+                .map(|p| path_to_string(&p))
         } else {
             None
         };
