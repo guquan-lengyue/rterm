@@ -72,6 +72,13 @@ pub trait Theme: 'static + Send + Sync {
     /// 成功状态色（测试连接通过等）
     fn success(&self) -> Rgba;
 
+    // --- 文本选区 ---
+
+    /// 文本选区背景：默认取主色 25% 透明度，各主题可覆盖。
+    fn text_selection_bg(&self) -> Rgba {
+        self.primary().opacity(0.25)
+    }
+
     // --- Modal ---
 
     /// Modal 半透明遮罩（黑色 + alpha）

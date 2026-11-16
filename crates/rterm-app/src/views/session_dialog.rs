@@ -91,6 +91,9 @@ pub struct SessionEditDialog {
 
     // 测试连接结果
     pub test_status: Option<TestStatus>,
+
+    // 表单校验错误（保存时展示在 footer）
+    pub form_error: Option<String>,
 }
 
 impl SessionEditDialog {
@@ -116,6 +119,9 @@ impl SessionEditDialog {
     pub fn from_session(cx: &mut Context<Self>, session: Option<&rterm_session::Session>) -> Self {
         let editing_id = session.map(|s| s.id);
 
+        // 新建会话时用设置里的 SSH 默认值（编辑已有会话保持原值）
+        let settings = cx.global::<AppState>().settings.clone();
+
         let (name, host, port, username, folder) = match session {
             Some(s) => (
                 s.name.clone(),
@@ -124,7 +130,13 @@ impl SessionEditDialog {
                 s.username.clone(),
                 s.folder.clone().unwrap_or_default(),
             ),
-            None => (String::new(), String::new(), "22".into(), String::new(), String::new()),
+            None => (
+                String::new(),
+                String::new(),
+                settings.default_port.to_string(),
+                settings.default_username.clone().unwrap_or_default(),
+                String::new(),
+            ),
         };
 
         let (auth_type, password, key_path, passphrase) = match session {
@@ -154,7 +166,11 @@ impl SessionEditDialog {
 
         let (keepalive, timeout, compress) = match session {
             Some(s) => (s.keepalive_secs.to_string(), s.connect_timeout_secs.to_string(), s.compress),
-            None => ("30".into(), "10".into(), true),
+            None => (
+                settings.keepalive_secs.to_string(),
+                settings.connect_timeout_secs.to_string(),
+                true,
+            ),
         };
 
         Self {
@@ -173,13 +189,61 @@ impl SessionEditDialog {
             timeout_input: Self::make_ti(cx, &timeout, "10", false),
             compress_enabled: compress,
             test_status: None,
+            form_error: None,
         }
     }
 
     pub fn save(&mut self, cx: &mut Context<Self>) {
-        let name = self.name_input.read(cx).content.to_string();
-        let host = self.host_input.read(cx).content.to_string();
-        let port: u16 = self.port_input.read(cx).content.parse().unwrap_or(22);
+        // —— 表单校验：任一项失败都不 upsert / 落盘 ——
+        let name = self.name_input.read(cx).content.trim().to_string();
+        if name.is_empty() {
+            self.form_error = Some("会话名称不能为空".into());
+            cx.notify();
+            return;
+        }
+        let host = self.host_input.read(cx).content.trim().to_string();
+        if host.is_empty() {
+            self.form_error = Some("主机地址不能为空".into());
+            cx.notify();
+            return;
+        }
+        let port_text = self.port_input.read(cx).content.trim().to_string();
+        let port: u16 = match port_text.parse::<u16>() {
+            Ok(p) if p >= 1 => p,
+            _ => {
+                self.form_error = Some("端口必须是 1–65535 的数字".into());
+                cx.notify();
+                return;
+            }
+        };
+        let keepalive_text = self.keepalive_input.read(cx).content.trim().to_string();
+        let keepalive_secs: u32 = if keepalive_text.is_empty() {
+            30
+        } else {
+            match keepalive_text.parse::<u32>() {
+                Ok(v) if v > 0 => v,
+                _ => {
+                    self.form_error = Some("KeepAlive 必须是正整数秒".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+        let timeout_text = self.timeout_input.read(cx).content.trim().to_string();
+        let connect_timeout_secs: u32 = if timeout_text.is_empty() {
+            10
+        } else {
+            match timeout_text.parse::<u32>() {
+                Ok(v) if v > 0 => v,
+                _ => {
+                    self.form_error = Some("连接超时必须正整数秒".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        };
+
+        self.form_error = None;
         let username = self.username_input.read(cx).content.to_string();
         let folder_val = self.folder_input.read(cx).content.to_string();
         let folder = if folder_val.is_empty() { None } else { Some(folder_val) };
@@ -238,9 +302,6 @@ impl SessionEditDialog {
             AuthType::Agent => rterm_session::AuthMethod::Agent { key_comment: String::new() },
         };
 
-        let keepalive_secs: u32 = self.keepalive_input.read(cx).content.parse().unwrap_or(30);
-        let connect_timeout_secs: u32 = self.timeout_input.read(cx).content.parse().unwrap_or(10);
-
         let (created_at, last_connected) = match &old {
             Some(o) => (o.created_at, o.last_connected),
             None => (rterm_session::default_now(), None),
@@ -297,8 +358,15 @@ impl SessionEditDialog {
 
     /// TCP 连通性测试（5s 超时，后台线程执行，不阻塞 UI）
     fn test_connection(&mut self, cx: &mut Context<Self>) {
-        let host = self.host_input.read(cx).content.to_string();
-        let port: u16 = self.port_input.read(cx).content.parse().unwrap_or(22);
+        let host = self.host_input.read(cx).content.trim().to_string();
+        let port: u16 = match self.port_input.read(cx).content.trim().parse::<u16>() {
+            Ok(p) if p >= 1 => p,
+            _ => {
+                self.test_status = Some(TestStatus::Failed("端口必须是 1–65535 的数字".into()));
+                cx.notify();
+                return;
+            }
+        };
 
         if host.is_empty() {
             self.test_status = Some(TestStatus::Failed("请先填写主机地址".into()));
@@ -408,6 +476,7 @@ impl Render for SessionEditDialog {
                             .border_color(t.border_subtle())
                             .child(self.render_test_button(cx))
                             .child(self.render_test_status(cx))
+                            .child(self.render_form_error(cx))
                             .child(div().flex_1())
                             .child(self.render_button("取消", false, cx))
                             .child(self.render_button("保存", true, cx)),
@@ -694,6 +763,20 @@ impl SessionEditDialog {
         div()
             .text_size(px(11.))
             .text_color(color)
+            .child(text)
+            .into_any_element()
+    }
+
+    /// 表单校验错误（红色，显示在 footer 测试连接状态旁）。
+    fn render_form_error(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme(cx);
+        let text = self.form_error.clone().unwrap_or_default();
+        div()
+            .max_w(px(200.))
+            .overflow_hidden()
+            .truncate()
+            .text_size(px(11.))
+            .text_color(t.danger())
             .child(text)
             .into_any_element()
     }

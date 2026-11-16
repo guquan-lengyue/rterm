@@ -3,7 +3,7 @@
 //! 左侧：临时消息（设置已保存 / 会话已删除…）
 //! 右侧：当前主机 · 连接延迟 · 重连次数 · 时钟
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{div, px, Context, IntoElement, Render, Window};
@@ -14,8 +14,13 @@ use crate::ui::theme;
 
 use super::STATUS_BAR_H;
 
+/// 无消息时的默认文案。
+const READY_MESSAGE: &str = "Ready — rterm";
+
 pub struct StatusBar {
     pub message: String,
+    /// 临时消息（StatusBarMessage）的过期时间；None 表示持久消息。
+    message_expires_at: Option<Instant>,
     host: Option<String>,
     latency_ms: Option<u64>,
     reconnect_attempt: Option<u8>,
@@ -36,6 +41,18 @@ impl StatusBar {
                     this.host = label.or_else(|| this.host.clone());
                     this.reconnect_attempt = None;
                     this.message = "已连接".into();
+                    // 连接状态属于持久消息，不参与自动清除
+                    this.message_expires_at = None;
+                    cx.notify();
+                }
+                AppEvent::StatusBarMessage { text, duration_ms } => {
+                    this.message = text.clone();
+                    // duration_ms = 0 视为持久消息
+                    this.message_expires_at = if *duration_ms == 0 {
+                        None
+                    } else {
+                        Some(Instant::now() + Duration::from_millis(*duration_ms))
+                    };
                     cx.notify();
                 }
                 AppEvent::SessionLatency { latency_ms, .. } => {
@@ -45,18 +62,21 @@ impl StatusBar {
                 AppEvent::SessionReconnecting { attempt, .. } => {
                     this.reconnect_attempt = Some(*attempt);
                     this.message = format!("重连中（第 {attempt} 次）…");
+                    this.message_expires_at = None;
                     cx.notify();
                 }
                 AppEvent::SessionDisconnected { reason, .. } => {
                     this.message = format!("已断开：{reason}");
                     this.reconnect_attempt = None;
                     this.latency_ms = None;
+                    this.message_expires_at = None;
                     cx.notify();
                 }
                 AppEvent::SessionFailed { reason, .. } => {
                     this.message = format!("连接失败：{reason}");
                     this.reconnect_attempt = None;
                     this.latency_ms = None;
+                    this.message_expires_at = None;
                     cx.notify();
                 }
                 _ => {}
@@ -74,6 +94,13 @@ impl StatusBar {
                 if this
                     .update(cx, |this, cx| {
                         this.clock = now;
+                        // 复用每秒时钟循环检查临时消息是否到期，不额外开线程
+                        if let Some(deadline) = this.message_expires_at {
+                            if Instant::now() >= deadline {
+                                this.message = READY_MESSAGE.into();
+                                this.message_expires_at = None;
+                            }
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -85,7 +112,8 @@ impl StatusBar {
         .detach();
 
         Self {
-            message: "Ready — rterm Sprint 7".into(),
+            message: READY_MESSAGE.into(),
+            message_expires_at: None,
             host: None,
             latency_ms: None,
             reconnect_attempt: None,
@@ -138,7 +166,8 @@ impl Render for StatusBar {
 impl Default for StatusBar {
     fn default() -> Self {
         Self {
-            message: "Ready — rterm Sprint 7".into(),
+            message: READY_MESSAGE.into(),
+            message_expires_at: None,
             host: None,
             latency_ms: None,
             reconnect_attempt: None,

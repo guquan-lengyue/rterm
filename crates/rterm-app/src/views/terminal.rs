@@ -106,6 +106,8 @@ struct Snapshot {
     font_id: FontId,
     scroll_offset: usize,
     scroll_total: usize,
+    /// 真实历史行数（= 最大 display_offset），0 时不画滚动条
+    scroll_history: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -151,6 +153,8 @@ pub struct TerminalView {
     session_id: Option<Uuid>,
     tab_id: Uuid,
     input_tx: Option<Sender<PtyCommand>>,
+    /// 终端内部应答（DSR / DA 等 PtyWrite）通道，每次喂数据后 drain 写回 PTY
+    response_rx: Option<Receiver<Vec<u8>>>,
     generation: u64,
     reconnect_attempt: u8,
     autofocus_pending: bool,
@@ -216,9 +220,15 @@ impl TerminalView {
         })
         .detach();
 
+        let (response_tx, response_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         Self {
             focus_handle: cx.focus_handle(),
-            engine: TerminalEngine::new(cols as usize, rows as usize, scrollback),
+            engine: TerminalEngine::with_response_sender(
+                cols as usize,
+                rows as usize,
+                scrollback,
+                response_tx,
+            ),
             cols,
             rows,
             scrollback,
@@ -236,6 +246,7 @@ impl TerminalView {
             session_id: None,
             tab_id: Uuid::new_v4(),
             input_tx: None,
+            response_rx: Some(response_rx),
             generation: 0,
             reconnect_attempt: 0,
             autofocus_pending: false,
@@ -321,9 +332,24 @@ impl TerminalView {
         self.tab_id = Uuid::new_v4();
         self.reconnect_attempt = 0;
         self.selection = None;
+        // 新连接：重置本地引擎（清空历史）并重建应答通道。
+        // 重连走 start_attempt，不重置，保留已有 scrollback。
+        self.reset_engine();
         self.status = TerminalStatus::Connecting;
         self.start_attempt(cx);
         cx.notify();
+    }
+
+    /// 新建本地引擎并重建终端应答通道（仅新连接时调用）。
+    fn reset_engine(&mut self) {
+        let (response_tx, response_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        self.engine = TerminalEngine::with_response_sender(
+            self.cols as usize,
+            self.rows as usize,
+            self.scrollback,
+            response_tx,
+        );
+        self.response_rx = Some(response_rx);
     }
 
     /// 关闭 Tab 时调用：通知后台线程退出 + 丢弃 Engine。
@@ -349,8 +375,7 @@ impl TerminalView {
         self.autofocus_pending = false;
         self.selection = None;
         self.attempt_started = Some(Instant::now());
-        self.engine =
-            TerminalEngine::new(self.cols as usize, self.rows as usize, self.scrollback);
+        // 不重建 engine：重连时保留历史，字号 / 尺寸已通过 resize 同步。
 
         // 有界队列：UI 消费不及时时后台线程阻塞等待，避免 `cat 50MB` 撑爆内存
         let (output_tx, mut output_rx) =
@@ -443,6 +468,8 @@ impl TerminalView {
             }
             PtyEvent::Data(bytes) => {
                 self.engine.input_bytes(&bytes);
+                // DSR / DA 等查询会通过 Event::PtyWrite 产生应答，写回 PTY
+                self.drain_engine_responses();
                 if let Some(session_id) = self.session_id {
                     self.emit(
                         cx,
@@ -632,6 +659,31 @@ impl TerminalView {
     fn send_bytes(&mut self, bytes: Vec<u8>) {
         if let Some(tx) = &self.input_tx {
             let _ = tx.send(PtyCommand::Write(bytes));
+        }
+    }
+
+    /// 把终端内部应答（DSR / DA 等 PtyWrite）写回 PTY。
+    /// 先收集再发送，避免同时借用 `response_rx` 与 `send_bytes`。
+    fn drain_engine_responses(&mut self) {
+        let mut pending = Vec::new();
+        let mut disconnected = false;
+        if let Some(rx) = &self.response_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(bytes) => pending.push(bytes),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if disconnected {
+            self.response_rx = None;
+        }
+        for bytes in pending {
+            self.send_bytes(bytes);
         }
     }
 
@@ -992,6 +1044,7 @@ impl TerminalView {
             None
         };
 
+        let history = self.engine.history_size();
         Snapshot {
             cols,
             rows,
@@ -1005,7 +1058,9 @@ impl TerminalView {
             font_family: self.font_family.clone(),
             font_id,
             scroll_offset: self.engine.display_offset(),
-            scroll_total: self.scrollback + rows,
+            // 用 Grid 真实历史行数，而不是配置上限
+            scroll_total: history + rows,
+            scroll_history: history,
         }
     }
 }
@@ -1180,21 +1235,19 @@ fn paint_snapshot(
         }
     }
 
-    // 5. 滚动条（仅当有历史时）
+    // 5. 滚动条（仅当有真实历史时）
     let viewport_lines = snapshot.rows;
-    let total_lines = snapshot.scroll_total.max(viewport_lines).max(1);
-    if total_lines > viewport_lines {
+    let history = snapshot.scroll_history;
+    if history > 0 {
+        let total_lines = snapshot.scroll_total.max(viewport_lines).max(1);
         let track_x = bounds.right() - px(8.0);
         let track_top = bounds.top() + px(2.0);
         let track_h = f32::from(bounds.size.height) - 4.0;
         let visible = viewport_lines as f32 / total_lines as f32;
         let thumb_h = (track_h * visible).max(20.0);
-        let max_offset = (total_lines - viewport_lines) as f32;
-        let progress = if max_offset > 0.0 {
-            snapshot.scroll_offset as f32 / max_offset
-        } else {
-            0.0
-        };
+        // progress 基于真实最大 display_offset（历史行数）
+        let max_offset = history as f32;
+        let progress = (snapshot.scroll_offset.min(history) as f32 / max_offset).clamp(0.0, 1.0);
         // offset 越大（越往历史）thumb 越靠上
         let thumb_top = track_top + px((track_h - thumb_h) * (1.0 - progress));
 

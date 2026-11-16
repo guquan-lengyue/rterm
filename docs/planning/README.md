@@ -16,7 +16,7 @@
 | **S5** | SSH 连接 & 终端核心 | [sprint-05-ssh-terminal.md](./sprint-05-ssh-terminal.md) | ✅ 已完成（2026-11-14） | S2 + S3 + S4 |
 | **S6** | 终端渲染 | [sprint-06-terminal-render.md](./sprint-06-terminal-render.md) | ✅ 已完成（2026-11-16） | S5 |
 | **S7** | SFTP 文件管理 | [sprint-07-sftp.md](./sprint-07-sftp.md) | 🚧 核心完成（2026-11-16） | S5 + S6 ✅ |
-| **S7.5** | 技术债清偿（S8 前插入） | [sprint-07.5-tech-debt.md](./sprint-07.5-tech-debt.md) | 🚧 进行中（P0/P1 已完成） | S7 🚧 |
+| **S7.5** | 技术债清偿（S8 前插入） | [sprint-07.5-tech-debt.md](./sprint-07.5-tech-debt.md) | 🚧 进行中（P0/P1/P2 已完成） | S7 🚧 |
 | **S8** | 路径同步 | [sprint-08-sync.md](./sprint-08-sync.md) | 待开始（S7.5 后） | S6 ✅ + S7 🚧 + S7.5 |
 | **S9** | 远程性能监控 | [sprint-09-monitor.md](./sprint-09-monitor.md) | 待开始（可与 S8 并行） | S5 + S6 ✅ |
 | **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | 待开始（等 S7.5–S9） | S6 ✅–S9 |
@@ -91,6 +91,7 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 
 ## 变更记录
 
+- **2026-11-16** v3.8：S7.5 P2 状态/交互已落地（workspace 75 passed / 1 ignored）；剩余 P3 工程门禁 + 主机密钥收口
 - **2026-11-16** v3.7：S7.5 P0 数据可靠性 + P1 线程/资源已落地（workspace 66 passed / 1 ignored）；P2/P3 待续
 - **2026-11-16** v3.6：插入 **S7.5 技术债清偿**（里程碑走查产出；S8 前强制执行）；S8 状态改为待开始，依赖追加 S7.5；当前入口切到 S7.5
 - **2026-11-16** v3.5：S7 核心完成（SftpService / TransferQueue / 双栏 View / 多类型 Tab / 会话右键打开 SFTP）；拖拽与暂停取消 E2E 转入 S10

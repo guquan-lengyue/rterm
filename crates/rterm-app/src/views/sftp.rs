@@ -124,6 +124,33 @@ struct RemoteNavResult {
     result: Result<Vec<FileEntry>, String>,
 }
 
+/// 等待用户确认“目标已存在，是否覆盖”的传输（S7.5.3.10）。
+struct PendingTransferConfirm {
+    direction: TransferDirection,
+    entry: FileEntry,
+    /// 下载时是本地目标目录，上传时是远端目标目录。
+    dir: String,
+}
+
+/// 内部确认卡片的动作类型。
+#[derive(Clone, Copy)]
+enum ConfirmKind {
+    DeleteRow,
+    Transfer,
+}
+
+/// 内部确认卡片的文案与按钮配置。
+struct ConfirmCard {
+    message: String,
+    detail: Option<String>,
+    ok_label: &'static str,
+    ok_id: &'static str,
+    cancel_id: &'static str,
+    kind: ConfirmKind,
+    /// 确认按钮是否使用危险色。
+    danger: bool,
+}
+
 // ---------------------------------------------------------------------------
 // SftpView
 // ---------------------------------------------------------------------------
@@ -137,6 +164,8 @@ pub struct SftpView {
     status_text: String,
     service: Option<std::sync::Arc<SftpService>>,
     queue: Option<std::sync::Arc<TransferQueue>>,
+    /// 远端 home 目录：连接成功后由 `ConnectedSftp.home` 填充，用于 `~` 展开。
+    remote_home: Option<String>,
     transfers: Vec<TransferSnapshot>,
     local: Pane,
     remote: Pane,
@@ -145,6 +174,10 @@ pub struct SftpView {
     sort_ascending: bool,
     menu: Option<MenuState>,
     dialog: Option<DialogState>,
+    /// 等待确认的删除（pane + 文件名）。存名字而不是行号，避免确认期间列表刷新后删错行。
+    pending_delete: Option<(PaneSide, String)>,
+    /// 等待确认的覆盖传输。
+    pending_transfer: Option<PendingTransferConfirm>,
     last_click: Option<(PaneSide, usize, Instant)>,
     generation: u64,
     /// 远端导航代际：只应用最新一次 listdir 的结果。
@@ -178,6 +211,7 @@ impl SftpView {
             status_text: "等待连接…".to_string(),
             service: None,
             queue: None,
+            remote_home: None,
             transfers: Vec::new(),
             local: Pane {
                 path: local_home,
@@ -200,6 +234,8 @@ impl SftpView {
             sort_ascending: true,
             menu: None,
             dialog: None,
+            pending_delete: None,
+            pending_transfer: None,
             last_click: None,
             generation: 0,
             remote_nav_generation: 0,
@@ -212,6 +248,11 @@ impl SftpView {
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    /// 是否有内部弹窗（输入框或确认卡片）打开；用于屏蔽全局快捷键。
+    pub fn has_modal_dialog(&self) -> bool {
+        self.dialog.is_some() || self.pending_delete.is_some() || self.pending_transfer.is_some()
     }
 
     /// 打开 SFTP Tab：独立 SSH 连接 + SFTP 子系统。
@@ -305,6 +346,9 @@ impl SftpView {
             drop(queue);
         }
         self.service = None;
+        self.remote_home = None;
+        self.pending_delete = None;
+        self.pending_transfer = None;
         self.status = SftpStatus::Failed;
         self.status_text = "已断开".to_string();
         self.transfers.clear();
@@ -327,6 +371,7 @@ impl SftpView {
                 self.status = SftpStatus::Connected;
                 self.status_text = format!("已连接 · {home}");
                 self.service = Some(service.clone());
+                self.remote_home = Some(home.clone());
 
                 let (events_tx, mut events_rx) = unbounded::<TransferEvent>();
                 let queue = std::sync::Arc::new(TransferQueue::new(service.clone(), events_tx, 2));
@@ -417,7 +462,7 @@ impl SftpView {
                 cx.notify();
                 return;
             };
-            let path = normalize_remote(&raw_path, &self.remote.path);
+            let path = normalize_remote(&raw_path, &self.remote.path, self.remote_home.as_deref());
             // 远端 listdir 走后台线程，仅应用最新一次导航结果。
             self.remote_nav_generation = self.remote_nav_generation.wrapping_add(1);
             let nav_generation = self.remote_nav_generation;
@@ -632,11 +677,90 @@ impl SftpView {
         match side {
             PaneSide::Remote => {
                 let local_dir = PathBuf::from(&self.local.path);
-                self.enqueue_download(&entry, &local_dir, cx);
+                self.request_download(&entry, &local_dir, cx);
             }
             PaneSide::Local => {
                 let remote_dir = self.remote.path.clone();
-                self.enqueue_upload(&entry, &remote_dir, cx);
+                self.request_upload(&entry, &remote_dir, cx);
+            }
+        }
+    }
+
+    /// 下载入口：本地目标已存在时先确认覆盖，否则直接入队。
+    fn request_download(&mut self, entry: &FileEntry, local_dir: &StdPath, cx: &mut Context<Self>) {
+        let local_path = local_dir.join(&entry.name);
+        if local_path.exists() {
+            self.pending_transfer = Some(PendingTransferConfirm {
+                direction: TransferDirection::Download,
+                entry: entry.clone(),
+                dir: local_dir.to_string_lossy().into_owned(),
+            });
+            cx.notify();
+            return;
+        }
+        self.enqueue_download(entry, local_dir, cx);
+    }
+
+    /// 上传入口：后台 stat 远端目标，已存在时先确认覆盖，否则直接入队。
+    fn request_upload(&mut self, entry: &FileEntry, remote_dir: &str, cx: &mut Context<Self>) {
+        if remote_dir.is_empty() {
+            self.set_status("远端目录未就绪".into(), cx);
+            return;
+        }
+        let Some(service) = self.service.clone() else {
+            self.set_status("远端未连接，无法上传".into(), cx);
+            return;
+        };
+        let remote_path = remote_join(remote_dir, &entry.name);
+        let entry = entry.clone();
+        let dir = remote_dir.to_string();
+        let generation = self.generation;
+        let (tx, mut rx) = unbounded::<bool>();
+        let spawned = std::thread::Builder::new()
+            .name("rterm-sftp-stat".into())
+            .spawn(move || {
+                // stat 失败（含目标不存在）按“不存在”处理，直接上传。
+                let exists = service.stat(&remote_path).is_ok();
+                let _ = tx.unbounded_send(exists);
+            });
+        if let Err(error) = spawned {
+            self.set_status(format!("上传失败: 无法启动后台任务 ({error})"), cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            if let Some(exists) = rx.next().await {
+                let _ = this.update(cx, |this, cx| {
+                    if generation != this.generation {
+                        return;
+                    }
+                    if exists {
+                        this.pending_transfer = Some(PendingTransferConfirm {
+                            direction: TransferDirection::Upload,
+                            entry: entry.clone(),
+                            dir,
+                        });
+                        cx.notify();
+                    } else {
+                        this.enqueue_upload(&entry, &dir, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 确认覆盖：执行真正的入队。
+    fn confirm_pending_transfer(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_transfer.take() else {
+            return;
+        };
+        match pending.direction {
+            TransferDirection::Download => {
+                let dir = PathBuf::from(&pending.dir);
+                self.enqueue_download(&pending.entry, &dir, cx);
+            }
+            TransferDirection::Upload => {
+                self.enqueue_upload(&pending.entry, &pending.dir, cx);
             }
         }
     }
@@ -697,17 +821,22 @@ impl SftpView {
                     return;
                 };
                 let local_dir = PathBuf::from(&self.local.path);
-                self.enqueue_download(&entry, &local_dir, cx);
+                self.request_download(&entry, &local_dir, cx);
             }
             MenuAction::Upload(index) => {
                 let Some(entry) = self.local.rows.get(index).cloned() else {
                     return;
                 };
                 let remote_dir = self.remote.path.clone();
-                self.enqueue_upload(&entry, &remote_dir, cx);
+                self.request_upload(&entry, &remote_dir, cx);
             }
             MenuAction::Rename(index) => self.open_dialog_for_row(DialogKind::Rename(self.active_side, index), cx),
-            MenuAction::Delete(index) => self.delete_row(self.active_side, index, cx),
+            MenuAction::Delete(index) => {
+                // 不立即删除：先弹出确认卡片。记录文件名而不是行号，避免列表刷新后删错。
+                if let Some(entry) = self.pane(self.active_side).rows.get(index) {
+                    self.pending_delete = Some((self.active_side, entry.name.clone()));
+                }
+            }
             MenuAction::Chmod(index) => self.open_dialog_for_row(DialogKind::Chmod(self.active_side, index), cx),
             MenuAction::Properties(index) => self.show_properties(self.active_side, index, cx),
             MenuAction::NewFolder => {
@@ -839,7 +968,7 @@ impl SftpView {
         cx.notify();
     }
 
-    fn delete_row(&mut self, side: PaneSide, index: usize, cx: &mut Context<Self>) {
+    fn perform_delete_row(&mut self, side: PaneSide, index: usize, cx: &mut Context<Self>) {
         let Some(entry) = self.pane(side).rows.get(index).cloned() else {
             return;
         };
@@ -871,6 +1000,36 @@ impl SftpView {
             }
             let current = self.pane(side).path.clone();
             self.navigate(side, current, cx);
+        }
+        cx.notify();
+    }
+
+    /// 确认删除：执行真正的删除实现。
+    fn confirm_pending_delete(&mut self, cx: &mut Context<Self>) {
+        let Some((side, name)) = self.pending_delete.take() else {
+            return;
+        };
+        // 列表可能在确认期间刷新；按文件名重新定位，找不到就放弃删除。
+        if let Some(index) = self.pane(side).rows.iter().position(|entry| entry.name == name) {
+            self.perform_delete_row(side, index, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// 确认卡片「继续 / 删除」。
+    fn confirm_pending(&mut self, kind: ConfirmKind, cx: &mut Context<Self>) {
+        match kind {
+            ConfirmKind::DeleteRow => self.confirm_pending_delete(cx),
+            ConfirmKind::Transfer => self.confirm_pending_transfer(cx),
+        }
+    }
+
+    /// 确认卡片「取消」：清空待确认动作，不执行任何操作。
+    fn cancel_pending(&mut self, kind: ConfirmKind, cx: &mut Context<Self>) {
+        match kind {
+            ConfirmKind::DeleteRow => self.pending_delete = None,
+            ConfirmKind::Transfer => self.pending_transfer = None,
         }
         cx.notify();
     }
@@ -987,9 +1146,11 @@ impl SftpView {
                 }
             }
             "escape" => {
-                if self.dialog.take().is_some() {
-                    cx.notify();
-                } else if self.menu.take().is_some() {
+                let mut cleared = self.dialog.take().is_some();
+                cleared |= self.pending_delete.take().is_some();
+                cleared |= self.pending_transfer.take().is_some();
+                cleared |= self.menu.take().is_some();
+                if cleared {
                     cx.notify();
                 }
             }
@@ -1008,15 +1169,22 @@ impl Focusable for SftpView {
 // 路径 / 本地文件工具
 // ---------------------------------------------------------------------------
 
-fn normalize_remote(raw: &str, current: &str) -> String {
+/// 规范化远端路径：
+/// - `~` → 远端 home；`~/sub` → home/sub
+/// - 无 home 时回退到当前目录（当前目录也为空则用 `/`）
+/// - 绝对路径保持不变，相对路径基于当前目录
+fn normalize_remote(raw: &str, current: &str, home: Option<&str>) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return current.to_string();
     }
+    let home = home
+        .filter(|home| !home.trim().is_empty())
+        .unwrap_or_else(|| if current.trim().is_empty() { "/" } else { current });
     let expanded = if trimmed == "~" {
-        current.to_string()
+        home.to_string()
     } else if let Some(rest) = trimmed.strip_prefix("~/") {
-        remote_join(current, rest)
+        remote_join(home, rest)
     } else {
         trimmed.to_string()
     };
@@ -1253,6 +1421,37 @@ impl Render for SftpView {
                 window.focus(&input_handle, cx);
             }
             content = content.child(self.render_dialog(cx));
+        }
+
+        // 删除 / 覆盖二次确认（S7.5.3.10）。
+        if let Some((_, name)) = self.pending_delete.clone() {
+            content = content.child(self.render_confirm_card(
+                ConfirmCard {
+                    message: format!("确定删除「{name}」？"),
+                    detail: Some("删除后无法恢复".to_string()),
+                    ok_label: "删除",
+                    ok_id: "sftp-confirm-delete",
+                    cancel_id: "sftp-confirm-delete-cancel",
+                    kind: ConfirmKind::DeleteRow,
+                    danger: true,
+                },
+                cx,
+            ));
+        }
+        if let Some(pending) = &self.pending_transfer {
+            let name = pending.entry.name.clone();
+            content = content.child(self.render_confirm_card(
+                ConfirmCard {
+                    message: "目标已存在，是否覆盖？".to_string(),
+                    detail: Some(name),
+                    ok_label: "继续",
+                    ok_id: "sftp-confirm-overwrite",
+                    cancel_id: "sftp-confirm-overwrite-cancel",
+                    kind: ConfirmKind::Transfer,
+                    danger: false,
+                },
+                cx,
+            ));
         }
 
         content
@@ -1923,6 +2122,93 @@ impl SftpView {
                             ),
                     ),
             )
+            .into_any_element()
+    }
+
+    /// 通用确认卡片：遮罩 + 居中卡片 + 取消/确认按钮。
+    fn render_confirm_card(&self, card: ConfirmCard, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let cancel_hover = t.secondary_btn_hover();
+        let ok_bg = if card.danger { t.danger() } else { t.primary() };
+
+        let mut body = div()
+            .w(px(380.))
+            .bg(t.card_bg())
+            .border_1()
+            .border_color(t.border_medium())
+            .rounded_lg()
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .w_full()
+                    .text_center()
+                    .text_size(px(13.))
+                    .text_color(t.text_on_card_bg())
+                    .child(card.message),
+            );
+        if let Some(detail) = card.detail {
+            body = body.child(
+                div()
+                    .w_full()
+                    .text_center()
+                    .text_size(px(11.))
+                    .text_color(t.text_subtle())
+                    .child(detail),
+            );
+        }
+        body = body.child(
+            div()
+                .flex()
+                .justify_center()
+                .gap_2()
+                .child(
+                    div()
+                        .px_3()
+                        .h(px(26.))
+                        .rounded_md()
+                        .bg(t.secondary_btn_bg())
+                        .text_size(px(11.))
+                        .text_color(t.text_on_secondary_btn())
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .id(card.cancel_id)
+                        .hover(move |s| s.bg(cancel_hover))
+                        .on_click(cx.listener(move |this, _ev: &ClickEvent, _w, cx| {
+                            this.cancel_pending(card.kind, cx);
+                        }))
+                        .child("取消"),
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .h(px(26.))
+                        .rounded_md()
+                        .bg(ok_bg)
+                        .text_size(px(11.))
+                        .text_color(t.text_on_primary_btn())
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .id(card.ok_id)
+                        .on_click(cx.listener(move |this, _ev: &ClickEvent, _w, cx| {
+                            this.confirm_pending(card.kind, cx);
+                        }))
+                        .child(card.ok_label),
+                ),
+        );
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(t.modal_overlay())
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(body)
             .into_any_element()
     }
 }

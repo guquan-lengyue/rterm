@@ -73,6 +73,9 @@ fn main() {
             KeyBinding::new("home", views::text_input::Home, Some("TextInput")),
             KeyBinding::new("end", views::text_input::End, Some("TextInput")),
             KeyBinding::new("cmd-a", views::text_input::SelectAll, Some("TextInput")),
+            KeyBinding::new("ctrl-a", views::text_input::SelectAll, Some("TextInput")),
+            KeyBinding::new("cmd-v", views::text_input::Paste, Some("TextInput")),
+            KeyBinding::new("ctrl-v", views::text_input::Paste, Some("TextInput")),
         ];
         bindings.extend(views::settings::key_bindings());
         bindings.extend(views::main_window::key_bindings());

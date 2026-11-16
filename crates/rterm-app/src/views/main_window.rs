@@ -106,6 +106,14 @@ impl TabContentView {
         }
     }
 
+    /// Tab 内部是否有需要独占键盘的弹窗（S7.5.3.9：屏蔽全局快捷键）。
+    fn blocks_global_shortcuts(&self, cx: &mut Context<MainWindow>) -> bool {
+        match self {
+            Self::Terminal(_) => false,
+            Self::Sftp(view) => view.read(cx).has_modal_dialog(),
+        }
+    }
+
     fn into_element(&self) -> AnyElement {
         match self {
             Self::Terminal(view) => view.clone().into_any_element(),
@@ -134,6 +142,8 @@ pub struct MainWindow {
     settings_dialog: Option<Entity<SettingsView>>,
     import_export_dialog: Option<Entity<ImportExportDialog>>,
     context_menu: Option<ContextMenuState>,
+    /// 等待确认删除的会话（S7.5.3.10 二次确认）。
+    pending_delete: Option<Uuid>,
     /// 启动期加载会话的错误提示；点击横幅 ✕ 后清空。
     startup_error: Option<String>,
 }
@@ -200,6 +210,7 @@ impl MainWindow {
             settings_dialog: None,
             import_export_dialog: None,
             context_menu: None,
+            pending_delete: None,
             startup_error,
         }
     }
@@ -276,6 +287,7 @@ impl MainWindow {
             return;
         };
         let entry = self.tabs.remove(index);
+        let session_id = entry.session_id;
         entry.content.close(cx);
 
         if index < self.active_tab {
@@ -286,6 +298,7 @@ impl MainWindow {
         }
         self.focus_pending = true;
         self.sync_tab_bar(cx);
+        self.reset_session_badge_if_unused([session_id], cx);
         cx.notify();
         log::info!("[tabs] closed tab {tab_id} ({} remaining)", self.tabs.len());
     }
@@ -302,11 +315,13 @@ impl MainWindow {
         }
         self.tabs = kept;
         self.active_tab = 0;
+        let removed_sessions: Vec<Uuid> = removed.iter().map(|tab| tab.session_id).collect();
         for entry in removed {
             entry.content.close(cx);
         }
         self.focus_pending = true;
         self.sync_tab_bar(cx);
+        self.reset_session_badge_if_unused(removed_sessions, cx);
         cx.notify();
     }
 
@@ -315,6 +330,7 @@ impl MainWindow {
             return;
         };
         let removed: Vec<TabEntry> = self.tabs.drain(index + 1..).collect();
+        let removed_sessions: Vec<Uuid> = removed.iter().map(|tab| tab.session_id).collect();
         for entry in removed {
             entry.content.close(cx);
         }
@@ -323,7 +339,32 @@ impl MainWindow {
         }
         self.focus_pending = true;
         self.sync_tab_bar(cx);
+        self.reset_session_badge_if_unused(removed_sessions, cx);
         cx.notify();
+    }
+
+    /// 关闭 Tab 后，若某会话已没有任何 Tab，通知会话树把状态点复位。
+    ///
+    /// 由 MainWindow 统一判断（而不是在 TerminalView::disconnect 里发），
+    /// 因为同一会话可能还开着别的 Tab。
+    fn reset_session_badge_if_unused(
+        &self,
+        session_ids: impl IntoIterator<Item = Uuid>,
+        cx: &mut Context<Self>,
+    ) {
+        let host = cx.global::<AppState>().event_bus_host.clone();
+        for session_id in session_ids {
+            if self.tabs.iter().any(|tab| tab.session_id == session_id) {
+                continue;
+            }
+            cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
+                cx.emit(AppEvent::SessionDisconnected {
+                    session_id,
+                    reason: "标签已关闭".to_string(),
+                });
+            });
+            log::info!("[tabs] session {session_id} has no tabs left, badge reset");
+        }
     }
 
     fn sync_tab_bar(&mut self, cx: &mut Context<Self>) {
@@ -340,10 +381,17 @@ impl MainWindow {
         self.tab_bar.update(cx, |bar, cx| bar.set_tabs(tabs, active, cx));
     }
 
-    fn dialogs_open(&self) -> bool {
+    /// 是否有任何弹窗 / 确认卡片打开（弹窗期间屏蔽全局 Tab 快捷键）。
+    fn dialogs_open(&self, cx: &mut Context<Self>) -> bool {
         self.settings_dialog.is_some()
             || self.edit_dialog.is_some()
             || self.import_export_dialog.is_some()
+            || self.pending_delete.is_some()
+            || self
+                .tabs
+                .get(self.active_tab)
+                .map(|tab| tab.content.blocks_global_shortcuts(cx))
+                .unwrap_or(false)
     }
 
     // -----------------------------------------------------------------------
@@ -351,7 +399,7 @@ impl MainWindow {
     // -----------------------------------------------------------------------
 
     pub fn new_tab_shortcut(&mut self, cx: &mut Context<Self>) {
-        if self.dialogs_open() {
+        if self.dialogs_open(cx) {
             return;
         }
         if let Some(tab) = self.tabs.get(self.active_tab) {
@@ -363,7 +411,7 @@ impl MainWindow {
     }
 
     pub fn next_tab_shortcut(&mut self, cx: &mut Context<Self>) {
-        if self.dialogs_open() || self.tabs.is_empty() {
+        if self.dialogs_open(cx) || self.tabs.is_empty() {
             return;
         }
         self.active_tab = (self.active_tab + 1) % self.tabs.len();
@@ -373,7 +421,7 @@ impl MainWindow {
     }
 
     pub fn close_tab_shortcut(&mut self, cx: &mut Context<Self>) {
-        if self.dialogs_open() {
+        if self.dialogs_open(cx) {
             return;
         }
         if let Some(tab) = self.tabs.get(self.active_tab) {
@@ -746,6 +794,105 @@ impl Render for MainWindow {
             root = root.child(dialog.clone());
         }
 
+        // 删除会话二次确认（S7.5.3.10）。
+        if let Some(session_id) = self.pending_delete {
+            let name = {
+                let state = cx.global::<AppState>();
+                let store = state.session_store.lock();
+                store
+                    .as_ref()
+                    .ok()
+                    .and_then(|store| store.get(session_id))
+                    .map(|session| session.display_label())
+                    .unwrap_or_else(|| "该会话".to_string())
+            };
+            let cancel_hover = t.secondary_btn_hover();
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(t.modal_overlay())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(360.))
+                            .bg(t.card_bg())
+                            .border_1()
+                            .border_color(t.border_medium())
+                            .rounded_lg()
+                            .p_4()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .text_center()
+                                    .text_size(px(13.))
+                                    .text_color(t.text_on_card_bg())
+                                    .child(format!("确定删除会话「{name}」？")),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .text_center()
+                                    .text_size(px(11.))
+                                    .text_color(t.text_subtle())
+                                    .child("删除后无法恢复"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .px_3()
+                                            .h(px(26.))
+                                            .rounded_md()
+                                            .bg(t.secondary_btn_bg())
+                                            .text_size(px(11.))
+                                            .text_color(t.text_on_secondary_btn())
+                                            .flex()
+                                            .items_center()
+                                            .cursor_pointer()
+                                            .id("rterm-confirm-delete-cancel")
+                                            .hover(move |s| s.bg(cancel_hover))
+                                            .on_click(cx.listener(
+                                                |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                                                    this.pending_delete = None;
+                                                    cx.notify();
+                                                },
+                                            ))
+                                            .child("取消"),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_3()
+                                            .h(px(26.))
+                                            .rounded_md()
+                                            .bg(t.danger())
+                                            .text_size(px(11.))
+                                            .text_color(t.text_on_primary_btn())
+                                            .flex()
+                                            .items_center()
+                                            .cursor_pointer()
+                                            .id("rterm-confirm-delete-session")
+                                            .on_click(cx.listener(
+                                                move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                                                    this.pending_delete = None;
+                                                    this.delete_session(session_id, cx);
+                                                },
+                                            ))
+                                            .child("删除"),
+                                    ),
+                            ),
+                    ),
+            );
+        }
+
         root
     }
 }
@@ -832,7 +979,10 @@ impl MainWindow {
                         ContextMenuAction::EditSession(sid) => this.edit_session(sid, cx),
                         ContextMenuAction::OpenTerminal(sid) => this.request_terminal(sid, cx),
                         ContextMenuAction::OpenSftp(sid) => this.open_sftp_tab(sid, cx),
-                        ContextMenuAction::DeleteSession(sid) => this.delete_session(sid, cx),
+                        ContextMenuAction::DeleteSession(sid) => {
+                            // 不立即删除：先弹出确认卡片。
+                            this.pending_delete = Some(sid);
+                        }
                         ContextMenuAction::OpenExportDialog => this.open_import_export(true, cx),
                         ContextMenuAction::OpenImportDialog => this.open_import_export(false, cx),
                         ContextMenuAction::OpenSettingsDialog => this.open_settings(cx),

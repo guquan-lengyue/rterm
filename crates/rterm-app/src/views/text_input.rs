@@ -3,11 +3,11 @@
 //! 参考 bezel-gpui 0.3 examples/input.rs 的 EntityInputHandler 模式，
 //! 但只实现最核心的编辑能力：
 //! - 字符输入（IME 通过 handle_input 自动处理）
-//! - Backspace / Delete
+//! - Backspace / Delete / 方向键 / Home / End / 全选
+//! - Ctrl+V 粘贴
+//! - 鼠标点击定位光标
 //! - 密码模式（显示 ●●●）
 //! - 焦点高亮
-//!
-//! 不支持：光标移动、选择、复制粘贴（后续迭代）
 
 use std::ops::Range;
 
@@ -15,8 +15,8 @@ use gpui::prelude::*;
 use gpui::{
     actions, App, Bounds, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, IntoElement, LayoutId,
-    PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle,
-    Window, div, fill, point, px, relative, rgba, size,
+    MouseButton, MouseDownEvent, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, UnderlineStyle, Window, div, fill, point, px, relative, size,
 };
 
 // 键盘编辑动作。绑定在 main.rs 的 App::bind_keys。
@@ -24,7 +24,7 @@ use gpui::{
 // 按键必须走 action + key binding。
 actions!(
     rterm_text_input,
-    [Backspace, Delete, Left, Right, Home, End, SelectAll]
+    [Backspace, Delete, Left, Right, Home, End, SelectAll, Paste]
 );
 
 // ---------------------------------------------------------------------------
@@ -183,6 +183,45 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Ctrl+V：读取剪贴板文本并替换当前选区（无选区则在光标处插入）。
+    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.replace_selection(&text, cx);
+    }
+
+    /// 鼠标左键：按点击位置（字符 x 坐标）定位光标。
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus_handle, cx);
+
+        // 密码模式显示的是 ●，与 content 下标不一致，不做定位
+        if self.password_mode {
+            return;
+        }
+        let (Some(bounds), Some(line)) = (self.last_bounds, self.last_layout.as_ref()) else {
+            return;
+        };
+        let Some(local) = bounds.localize(&event.position) else {
+            return;
+        };
+        let Some(index) = line.index_for_x(local.x) else {
+            return;
+        };
+        let index = clamp_index(&self.content, index);
+        self.selected_range = index..index;
+        self.marked_range = None;
+        cx.notify();
+    }
+
     pub fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -296,7 +335,7 @@ impl EntityInputHandler for TextInput {
         &mut self,
         range_utf16: Option<Range<usize>>,
         new_text: &str,
-        _new_selected_range_utf16: Option<Range<usize>>,
+        new_selected_range_utf16: Option<Range<usize>>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -314,8 +353,20 @@ impl EntityInputHandler for TextInput {
         } else {
             self.marked_range = None;
         }
-        let cursor = range.start + new_text.len();
-        self.selected_range = cursor..cursor;
+        // new_selected_range 是相对 new_text 的 UTF-16 偏移，需转成
+        // 相对 content 的 UTF-8 字节偏移（注意多字节 / 代理对边界）。
+        let selected_range = new_selected_range_utf16
+            .as_ref()
+            .map(|r| {
+                let start = range.start + utf16_to_utf8_offset(new_text, r.start);
+                let end = range.start + utf16_to_utf8_offset(new_text, r.end);
+                start..end
+            })
+            .unwrap_or_else(|| {
+                let cursor = range.start + new_text.len();
+                cursor..cursor
+            });
+        self.selected_range = selected_range;
         cx.notify();
     }
 
@@ -372,9 +423,26 @@ fn clamp_range(range: Range<usize>, text: &str) -> Range<usize> {
     start..end
 }
 
+/// UTF-16 偏移 → UTF-8 字节偏移（相对同一段文本）。
+/// 偏移落在代理对中间时回退到该字符起点。
+fn utf16_to_utf8_offset(text: &str, utf16_offset: usize) -> usize {
+    let mut utf16 = 0;
+    let mut utf8 = 0;
+    for ch in text.chars() {
+        let next = utf16 + ch.len_utf16();
+        // 偏移落在字符中间（代理对）时停在字符起点
+        if next > utf16_offset {
+            break;
+        }
+        utf16 = next;
+        utf8 += ch.len_utf8();
+    }
+    utf8
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{clamp_index, clamp_range};
+    use super::{clamp_index, clamp_range, utf16_to_utf8_offset};
 
     #[test]
     fn clamp_index_handles_overflow_and_char_boundaries() {
@@ -394,6 +462,19 @@ mod tests {
         assert_eq!(clamp_range(99..100, "abc"), 3..3);
         // IME 标记落在多字节字符中间时也不会 panic
         assert_eq!(clamp_range(2..5, "你好"), 0..3);
+    }
+
+    #[test]
+    fn utf16_offset_maps_to_utf8_bytes() {
+        assert_eq!(utf16_to_utf8_offset("abc", 2), 2);
+        // 中文每字 1 个 UTF-16 单元、3 个字节
+        assert_eq!(utf16_to_utf8_offset("你好", 1), 3);
+        assert_eq!(utf16_to_utf8_offset("你好", 2), 6);
+        // emoji 是代理对：2 个 UTF-16 单元、4 个字节
+        assert_eq!(utf16_to_utf8_offset("😀", 2), 4);
+        // 落在代理对中间 → 回退到字符起点
+        assert_eq!(utf16_to_utf8_offset("😀", 1), 0);
+        assert_eq!(utf16_to_utf8_offset("", 3), 0);
     }
 }
 
@@ -454,10 +535,15 @@ impl Element for TextElement {
         let style = window.text_style();
 
         // 从 AppState 拿主题色（TextInput 是 gpui::Global，prepaint 用 &mut App）
-        let (text_color, placeholder_color, cursor_color) = {
+        let (text_color, placeholder_color, cursor_color, selection_color) = {
             let state = cx.global::<crate::state::AppState>();
             let t = state.t();
-            (t.text_on_card_bg(), t.text_placeholder(), t.primary())
+            (
+                t.text_on_card_bg(),
+                t.text_placeholder(),
+                t.primary(),
+                t.text_selection_bg(),
+            )
         };
 
         let (display_text, color) = if content.is_empty() {
@@ -525,7 +611,7 @@ impl Element for TextElement {
                     point(bounds.left() + line.x_for_index(selected_range.start), bounds.top()),
                     point(bounds.left() + line.x_for_index(selected_range.end), bounds.bottom()),
                 ),
-                rgba(0x3311ff30),
+                selection_color,
             )), None)
         };
 
@@ -598,6 +684,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::paste))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .cursor(CursorStyle::IBeam)
             .border_1()
             .border_color(border_color)

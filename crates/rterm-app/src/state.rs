@@ -81,7 +81,11 @@ impl Default for Settings {
 // Settings 持久化 — `%APPDATA%\rterm\settings.json`
 // ---------------------------------------------------------------------------
 
-/// `%APPDATA%\rterm\settings.json`，与 sessions.json 同目录。
+/// `%APPDATA%\rterm\settings.json`。
+///
+/// 注意：settings.json 自身固定放在配置目录，不跟随 `Settings.data_dir`，
+/// 否则读取 data_dir 前就要先加载 settings，会形成 bootstrap 循环。
+/// data_dir 只控制会话 / 导出等数据文件的位置（见 [`data_dir_path`]）。
 pub fn settings_path() -> std::path::PathBuf {
     let mut p = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     p.push("rterm");
@@ -89,12 +93,23 @@ pub fn settings_path() -> std::path::PathBuf {
     p
 }
 
-/// `%APPDATA%\rterm\sessions.json`。
+/// 数据目录：`Settings.data_dir`（非空时）否则 `%APPDATA%\rterm`。
+///
+/// 会话 / 导出等数据文件都放在该目录下。
+pub fn data_dir_path() -> std::path::PathBuf {
+    match Settings::load().data_dir {
+        Some(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir.trim()),
+        _ => {
+            let mut p = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+            p.push("rterm");
+            p
+        }
+    }
+}
+
+/// `<data_dir>\sessions.json`。
 pub fn sessions_path() -> std::path::PathBuf {
-    let mut p = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    p.push("rterm");
-    p.push("sessions.json");
-    p
+    data_dir_path().join("sessions.json")
 }
 
 /// 立即把当前 SessionStore 写盘（DPAPI 加密），用于 CRUD 后即时持久化。

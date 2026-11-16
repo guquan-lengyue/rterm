@@ -10,7 +10,7 @@ use crate::event::{AppEvent, EventBusHost};
 use crate::state::AppState;
 use crate::ui::theme;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -18,7 +18,13 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 enum TreeNode {
-    Folder { name: String, children: Vec<TreeNode> },
+    Folder {
+        /// 显示名（路径最后一段）
+        name: String,
+        /// 完整路径，作为 expanded 与节点 id 的 key
+        path: String,
+        children: Vec<TreeNode>,
+    },
     Session {
         id: Uuid,
         name: String,
@@ -28,39 +34,76 @@ enum TreeNode {
 }
 
 impl TreeNode {
+    /// 按 `folder` 中的 `/` 构建多级文件夹树。
     fn build(sessions: &[&rterm_session::Session]) -> Vec<TreeNode> {
-        let mut tree: BTreeMap<String, Vec<&rterm_session::Session>> = BTreeMap::new();
-        let mut root: Vec<&rterm_session::Session> = Vec::new();
-
+        let mut nodes: Vec<TreeNode> = Vec::new();
         for s in sessions {
-            match s.folder.as_deref() {
-                Some(f) if !f.is_empty() => tree.entry(f.to_string()).or_default().push(s),
-                _ => root.push(s),
+            let folder = s.folder.as_deref().unwrap_or("").trim_matches('/');
+            if folder.is_empty() {
+                nodes.push(session_node(s));
+            } else {
+                insert_session(&mut nodes, folder, s);
             }
         }
-
-        let mut nodes: Vec<TreeNode> = Vec::new();
-        for (folder, kids) in tree {
-            let children: Vec<TreeNode> = kids
-                .iter()
-                .map(|s| TreeNode::Session {
-                    id: s.id,
-                    name: s.name.clone(),
-                    host: s.host.clone(),
-                    port: s.port,
-                })
-                .collect();
-            nodes.push(TreeNode::Folder { name: folder, children });
-        }
-        for s in root {
-            nodes.push(TreeNode::Session {
-                id: s.id,
-                name: s.name.clone(),
-                host: s.host.clone(),
-                port: s.port,
-            });
-        }
+        sort_nodes(&mut nodes);
         nodes
+    }
+}
+
+fn session_node(s: &rterm_session::Session) -> TreeNode {
+    TreeNode::Session {
+        id: s.id,
+        name: s.name.clone(),
+        host: s.host.clone(),
+        port: s.port,
+    }
+}
+
+/// 按 `/` 分隔的多级路径逐层插入会话节点。
+fn insert_session(nodes: &mut Vec<TreeNode>, folder: &str, session: &rterm_session::Session) {
+    let mut path = String::new();
+    let mut level = nodes;
+    for segment in folder.split('/').filter(|seg| !seg.is_empty()) {
+        if !path.is_empty() {
+            path.push('/');
+        }
+        path.push_str(segment);
+
+        let index = match level
+            .iter()
+            .position(|node| matches!(node, TreeNode::Folder { path: p, .. } if *p == path))
+        {
+            Some(i) => i,
+            None => {
+                level.push(TreeNode::Folder {
+                    name: segment.to_string(),
+                    path: path.clone(),
+                    children: Vec::new(),
+                });
+                level.len() - 1
+            }
+        };
+        level = match &mut level[index] {
+            TreeNode::Folder { children, .. } => children,
+            // 同一路径前缀只会是文件夹，这里防御性退出，不 panic。
+            TreeNode::Session { .. } => return,
+        };
+    }
+    level.push(session_node(session));
+}
+
+/// 文件夹按名称排序且在会话前；会话按名称排序。
+fn sort_nodes(nodes: &mut [TreeNode]) {
+    nodes.sort_by(|a, b| match (a, b) {
+        (TreeNode::Folder { name: na, .. }, TreeNode::Folder { name: nb, .. }) => na.cmp(nb),
+        (TreeNode::Folder { .. }, TreeNode::Session { .. }) => std::cmp::Ordering::Less,
+        (TreeNode::Session { .. }, TreeNode::Folder { .. }) => std::cmp::Ordering::Greater,
+        (TreeNode::Session { name: na, .. }, TreeNode::Session { name: nb, .. }) => na.cmp(nb),
+    });
+    for node in nodes.iter_mut() {
+        if let TreeNode::Folder { children, .. } = node {
+            sort_nodes(children);
+        }
     }
 }
 
@@ -190,9 +233,13 @@ impl SessionTreeView {
         let t = theme(cx);
 
         match node {
-            TreeNode::Folder { name, children } => {
-                let is_expanded = self.expanded.contains(name);
-                let name_clone = name.clone();
+            TreeNode::Folder {
+                name,
+                path,
+                children,
+            } => {
+                let is_expanded = self.expanded.contains(path);
+                let path_clone = path.clone();
 
                 let row = div()
                     .w_full()
@@ -203,7 +250,7 @@ impl SessionTreeView {
                     .items_center()
                     .text_size(px(12.))
                     .text_color(t.text_on_sidebar_bg())
-                    .id(format!("folder-{}", name))
+                    .id(format!("folder-{}", path))
                     .hover(|s| s.bg(t.row_hover_bg()))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -219,7 +266,7 @@ impl SessionTreeView {
                         }),
                     )
                     .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                        let f = name_clone.clone();
+                        let f = path_clone.clone();
                         if this.expanded.contains(&f) {
                             this.expanded.remove(&f);
                         } else {

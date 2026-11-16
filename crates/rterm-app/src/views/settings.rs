@@ -725,6 +725,7 @@ impl SettingsView {
     }
 
     fn render_sftp(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme(cx);
         let mut list = div().w_full().flex().flex_col().gap_2();
         for (label, value) in SFTP_MODES {
             let selected = self.draft.sftp_sync_mode == value;
@@ -741,10 +742,21 @@ impl SettingsView {
             .flex_col()
             .child(Self::section_title("SFTP 路径同步默认模式", cx))
             .child(list)
+            .child(
+                div()
+                    .w_full()
+                    .mt_1()
+                    .text_size(px(10.))
+                    .text_color(t.text_subtle())
+                    .flex()
+                    .justify_center()
+                    .child("路径同步在 Sprint 8 生效"),
+            )
             .into_any_element()
     }
 
     fn render_monitor(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme(cx);
         div()
             .w_full()
             .flex()
@@ -753,6 +765,16 @@ impl SettingsView {
             .child(Self::field("采样间隔（秒）", self.monitor_interval_input.clone(), cx))
             .child(Self::field("CPU 告警阈值（%）", self.cpu_threshold_input.clone(), cx))
             .child(Self::field("内存告警阈值（%）", self.mem_threshold_input.clone(), cx))
+            .child(
+                div()
+                    .w_full()
+                    .mt_1()
+                    .text_size(px(10.))
+                    .text_color(t.text_subtle())
+                    .flex()
+                    .justify_center()
+                    .child("远程监控在 Sprint 9 生效"),
+            )
             .into_any_element()
     }
 

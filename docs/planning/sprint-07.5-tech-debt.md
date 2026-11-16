@@ -1,12 +1,12 @@
 # Sprint 7.5 — 技术债清偿（S8 前插入）
 
-> **状态**：**进行中**（P0 数据可靠性 + P1 线程/资源已完成；P2/P3 待续）
+> **状态**：**进行中**（P0 数据可靠性 + P1 线程/资源 + P2 状态/交互已完成；P3 与主机密钥收口待续）
 > **前置**：[Sprint 7](./sprint-07-sftp.md)（SFTP 核心完成）
 > **后续**：[Sprint 8](./sprint-08-sync.md)（路径同步）
 > **目标**：在进入路径同步之前，清偿会直接影响**数据安全、UI 阻塞、连接/线程生命周期**的技术债；不新增功能、不改视觉设计。
 >
 > **依据**：里程碑代码走查（commit `44a7234`，8 个 crate / 约 11.6k 行 Rust）。
-> 当前基线：`cargo test --workspace` = 66 passed / 0 failed / 1 ignored（P0/P1 落地后）；`cargo clippy --workspace --all-targets` 仍受既有的 `text_input.rs` reversed range 阻塞。
+> 当前基线：`cargo test --workspace` = 75 passed / 0 failed / 1 ignored（P0/P1/P2 落地后）；`cargo clippy --workspace --all-targets` 仍受既有的 `text_input.rs` reversed range 阻塞。
 >
 > **当前进度**：
 >
@@ -14,7 +14,7 @@
 > |------|------|
 > | 7.5.1 会话数据可靠性（P0） | 已完成 |
 > | 7.5.2 线程、阻塞与资源（P1） | 已完成 |
-> | 7.5.3 状态与交互正确性（P2） | 待开始 |
+> | 7.5.3 状态与交互正确性（P2） | 已完成 |
 > | 7.5.4 主机密钥安全收口 | 待开始 |
 > | 7.5.5 工程质量门禁 | 待开始 |
 > | 7.5.6 文档同步与验收 | 待开始 |
@@ -51,7 +51,7 @@
 | # | 文件 | 要做的 | 验收 |
 |---|------|--------|------|
 | 7.5.2.1 | `rterm-app/src/views/sftp.rs`（可抽 `sftp_task.rs`） | SFTP 远端 I/O 全部后台化：新增命令通道（Navigate / Refresh / Mkdir / Rename / Delete / Chmod / Home）与事件回传；`SftpView` 只发命令、收事件，不再直接调用 `SftpService` | 连接慢速/不可达主机时 UI 仍可切换 Tab、时钟继续走；操作完成后列表正确 |
-| 7.5.2.2 | `views/sftp.rs`、`rterm-sftp/src/queue.rs` | 修 SFTP Tab 关闭泄漏：事件转发任务不得持有 `Arc<TransferQueue>`；`shutdown()` 先 drop 队列 sender、再 join worker；`SftpView::shutdown` 清理事件任务 | 连续开关 10 个 SFTP Tab（含 0 个和 2 个传输），线程数回到基线；无残留 SSH 连接 |
+| 7.5.2.2 | `views/sftp.rs`、`rterm-sftp/src/queue.rs` | 修 SFTP Tab 关闭泄漏：事件转发任务不得持有 `Arc<TransferQueue>`；`shutdown()` 释放 sender 并用后台回收线程 join worker（避免 UI 卡在 libssh2 阻塞调用上）；`SftpView::shutdown` 清理事件任务 | 连续开关 10 个 SFTP Tab（含 0 个和 2 个传输），线程数回到基线；无残留 SSH 连接 |
 | 7.5.2.3 | `rterm-sftp/src/queue.rs` | 真并发：worker 不再在 `Mutex<Receiver>` 临界区内阻塞 `recv`；改为每 worker 独立 receiver 或单 dispatch + 线程池；默认并发 2 必须真实生效 | 两个 100MB 文件同时传输，两条进度均持续增长（不是先后完成） |
 | 7.5.2.4 | `rterm-sftp/src/queue.rs` | 安全提交与取消：下载写 `*.part`，成功后 rename；上传写远端临时名，成功后 rename；取消/失败只清理临时文件；覆盖目标前必须确认 | 取消下载不破坏本地原文件；取消上传不删除远端原文件；失败后无半截目标文件 |
 | 7.5.2.5 | `rterm-ssh/src/pty.rs`、`views/terminal.rs` | PTY 输出改有界队列或按帧合并，明确 UI 消费慢时的策略（优先保证尾部和输入响应）；禁止 unbounded 无限堆积 | `yes \| head -c 100M` 或 `cat 50MB` 时内存稳定、UI 不冻结、Ctrl+C 仍可中断 |
@@ -67,7 +67,7 @@
 |---|------|--------|------|
 | 7.5.3.1 | `views/status_bar.rs` | 订阅 `StatusBarMessage`：左侧消息按 `duration_ms` 自动清除；连接/断开消息优先于临时提示 | SFTP 下载/删除等操作能在底部看到提示并自动消失 |
 | 7.5.3.2 | `views/terminal.rs` / `views/main_window.rs` | 关闭 Tab 时复位会话状态点：emit `SessionDisconnected`（如 `reason = "标签已关闭"`）或由 MainWindow 处理 `TerminalClosed` | 关闭终端 Tab → 会话树状态点从实心绿变回空心 |
-| 7.5.3.3 | `views/session_dialog.rs`、`state.rs` | 设置接线：新建会话默认端口/用户名读取 `Settings`；`data_dir` 真正作用于 settings/sessions 路径；`sftp_sync_mode` / 监控阈值在 UI 上标注“S8/S9 生效”或暂时隐藏 | 设默认端口 2222 → 新建对话框为 2222；设 data_dir → 配置文件写入该目录 |
+| 7.5.3.3 | `views/session_dialog.rs`、`state.rs` | 设置接线：新建会话默认端口/用户名读取 `Settings`；`data_dir` 作用于 sessions/导出路径（settings.json 固定配置目录，避免 bootstrap 循环）；`sftp_sync_mode` / 监控阈值在 UI 上标注“S8/S9 生效” | 设默认端口 2222 → 新建对话框为 2222；设 data_dir → sessions.json 写入该目录 |
 | 7.5.3.4 | `views/session_dialog.rs` | 会话表单校验：名称/主机必填，端口 1–65535，错误内联显示；取消静默回退 22 | 空名称/空主机/非法端口无法保存，并显示明确错误 |
 | 7.5.3.5 | `views/sftp.rs` | `~` 解析改用 `SftpService::home_dir()`（或缓存 home）；`~` 与 `~/sub` 都相对 home | 地址栏输入 `~` → 远端 home；`~/tmp` → home/tmp |
 | 7.5.3.6 | `views/terminal.rs`、`rterm-terminal/src/engine.rs` | 滚动条使用真实历史总量（`history_size` / `display_offset` 上限），不再用配置的 scrollback 代替 | 5 行历史与 1000 行历史下 thumb 尺寸/位置均正确 |

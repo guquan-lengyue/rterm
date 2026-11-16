@@ -21,12 +21,24 @@ use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 
 /// 终端内部事件（标题变化 / 剪贴板请求等）。S5 只记录日志，
 /// S6 渲染 / S10 OSC 52 再接管。
-#[derive(Clone, Copy, Debug, Default)]
-pub struct EventProxy;
+///
+/// `PtyWrite`（DSR / DA 等查询应答）需要通过 `responses` 写回 PTY；
+/// 其余事件仍只记录 debug 日志。含 `Sender` 后不再实现 `Copy`。
+#[derive(Clone, Debug, Default)]
+pub struct EventProxy {
+    responses: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+}
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        log::debug!("[terminal] event: {event:?}");
+        match event {
+            Event::PtyWrite(text) => {
+                if let Some(tx) = &self.responses {
+                    let _ = tx.send(text.into_bytes());
+                }
+            }
+            other => log::debug!("[terminal] event: {other:?}"),
+        }
     }
 }
 
@@ -109,7 +121,36 @@ impl TerminalEngine {
             scrolling_history: scrollback,
             ..Default::default()
         };
-        let term = Term::new(config, &size, EventProxy);
+        let term = Term::new(config, &size, EventProxy::default());
+        Self {
+            term,
+            parser: Processor::new(),
+            cols: size.cols,
+            rows: size.rows,
+            scrollback,
+        }
+    }
+
+    /// 带应答通道的构造：终端要写回 PTY 的字节（DSR / DA 等）通过
+    /// `responses` 发送，View 侧从对应 Receiver 取出后写回 PTY。
+    pub fn with_response_sender(
+        cols: usize,
+        rows: usize,
+        scrollback: usize,
+        responses: std::sync::mpsc::Sender<Vec<u8>>,
+    ) -> Self {
+        let size = SizeInfo::new(cols, rows);
+        let config = Config {
+            scrolling_history: scrollback,
+            ..Default::default()
+        };
+        let term = Term::new(
+            config,
+            &size,
+            EventProxy {
+                responses: Some(responses),
+            },
+        );
         Self {
             term,
             parser: Processor::new(),
@@ -155,6 +196,12 @@ impl TerminalEngine {
         self.scrollback
     }
 
+    /// Grid 中真实的历史行数（不包含当前视口）。滚动条 / 回滚范围以此为准，
+    /// 配置的 `scrollback` 只是上限。
+    pub fn history_size(&self) -> usize {
+        self.term.grid().history_size()
+    }
+
     /// 当前视口文本（每行去掉尾部空格）。S5 placeholder 渲染用；
     /// S6 Canvas 渲染会直接读 Grid。
     pub fn visible_lines(&self) -> Vec<String> {
@@ -188,19 +235,59 @@ impl TerminalEngine {
     }
 
     /// 按键 → xterm 字节序列。S5 不回显到本地 Grid，交给远程 PTY echo。
+    ///
+    /// DECCKM（`TermMode::APP_CURSOR`）下方向键 / Home / End 使用 SS3 序列，
+    /// 否则用普通 CSI 序列。
     pub fn input_key(&mut self, key: TerminalKey) -> Vec<u8> {
+        let app_cursor = self.mode().contains(TermMode::APP_CURSOR);
         match key {
             TerminalKey::Char(text) => text.into_bytes(),
             TerminalKey::Enter => b"\r".to_vec(),
             TerminalKey::Tab => b"\t".to_vec(),
             TerminalKey::Backspace => vec![0x7f],
             TerminalKey::Escape => vec![0x1b],
-            TerminalKey::Up => b"\x1b[A".to_vec(),
-            TerminalKey::Down => b"\x1b[B".to_vec(),
-            TerminalKey::Right => b"\x1b[C".to_vec(),
-            TerminalKey::Left => b"\x1b[D".to_vec(),
-            TerminalKey::Home => b"\x1b[H".to_vec(),
-            TerminalKey::End => b"\x1b[F".to_vec(),
+            TerminalKey::Up => {
+                if app_cursor {
+                    b"\x1bOA".to_vec()
+                } else {
+                    b"\x1b[A".to_vec()
+                }
+            }
+            TerminalKey::Down => {
+                if app_cursor {
+                    b"\x1bOB".to_vec()
+                } else {
+                    b"\x1b[B".to_vec()
+                }
+            }
+            TerminalKey::Right => {
+                if app_cursor {
+                    b"\x1bOC".to_vec()
+                } else {
+                    b"\x1b[C".to_vec()
+                }
+            }
+            TerminalKey::Left => {
+                if app_cursor {
+                    b"\x1bOD".to_vec()
+                } else {
+                    b"\x1b[D".to_vec()
+                }
+            }
+            TerminalKey::Home => {
+                if app_cursor {
+                    b"\x1bOH".to_vec()
+                } else {
+                    b"\x1b[H".to_vec()
+                }
+            }
+            TerminalKey::End => {
+                if app_cursor {
+                    b"\x1bOF".to_vec()
+                } else {
+                    b"\x1b[F".to_vec()
+                }
+            }
             TerminalKey::PageUp => b"\x1b[5~".to_vec(),
             TerminalKey::PageDown => b"\x1b[6~".to_vec(),
             TerminalKey::Delete => b"\x1b[3~".to_vec(),
@@ -424,5 +511,47 @@ mod tests {
         assert!(engine.bracketed_paste());
         engine.input_bytes(b"\x1b[?2004l");
         assert!(!engine.bracketed_paste());
+    }
+
+    #[test]
+    fn history_size_tracks_real_scrollback() {
+        let mut engine = TerminalEngine::new(10, 3, 100);
+        assert_eq!(engine.history_size(), 0);
+        for i in 0..10 {
+            engine.input_bytes(format!("line{i}\r\n").as_bytes());
+        }
+        assert!(engine.history_size() > 0);
+        // 新引擎没有历史
+        assert_eq!(TerminalEngine::new(10, 3, 100).history_size(), 0);
+    }
+
+    #[test]
+    fn app_cursor_mode_uses_ss3_sequences() {
+        let mut engine = TerminalEngine::new(80, 24, 1_000);
+        // 默认（DECCKM 关闭）为 CSI
+        assert_eq!(engine.input_key(TerminalKey::Up), b"\x1b[A");
+        assert_eq!(engine.input_key(TerminalKey::Home), b"\x1b[H");
+        // DECSET ?1h 开启应用光标模式
+        engine.input_bytes(b"\x1b[?1h");
+        assert_eq!(engine.input_key(TerminalKey::Up), b"\x1bOA");
+        assert_eq!(engine.input_key(TerminalKey::Down), b"\x1bOB");
+        assert_eq!(engine.input_key(TerminalKey::Right), b"\x1bOC");
+        assert_eq!(engine.input_key(TerminalKey::Left), b"\x1bOD");
+        assert_eq!(engine.input_key(TerminalKey::Home), b"\x1bOH");
+        assert_eq!(engine.input_key(TerminalKey::End), b"\x1bOF");
+        // DECRST ?1l 恢复 CSI
+        engine.input_bytes(b"\x1b[?1l");
+        assert_eq!(engine.input_key(TerminalKey::Up), b"\x1b[A");
+    }
+
+    #[test]
+    fn dsr_query_emits_pty_response() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut engine = TerminalEngine::with_response_sender(80, 24, 1_000, tx);
+        engine.input_bytes(b"\x1b[6n");
+        let response = rx.try_recv().expect("DSR 应产生 PtyWrite 应答");
+        let text = String::from_utf8(response).unwrap();
+        assert!(text.starts_with("\x1b["), "unexpected DSR response: {text:?}");
+        assert!(text.ends_with('R'), "unexpected DSR response: {text:?}");
     }
 }

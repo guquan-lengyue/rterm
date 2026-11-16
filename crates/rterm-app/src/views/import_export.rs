@@ -44,12 +44,10 @@ enum EncryptionKind {
     Passphrase,
 }
 
-/// 默认导出路径：`%APPDATA%\rterm\sessions-export.json`
+/// 默认导出路径：`<data_dir>\sessions-export.json`
+/// （data_dir 默认 `%APPDATA%\rterm`，可在设置 → 高级中修改）
 pub fn default_export_path() -> std::path::PathBuf {
-    let mut p = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    p.push("rterm");
-    p.push("sessions-export.json");
-    p
+    crate::state::data_dir_path().join("sessions-export.json")
 }
 
 // ---------------------------------------------------------------------------
