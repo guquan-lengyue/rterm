@@ -1,4 +1,4 @@
-//! TerminalEngine — alacritty_terminal glue
+    //! TerminalEngine — alacritty_terminal glue
 //!
 //! 职责：
 //! - 把 PTY 字节流喂给 `vte` 解析器 → `Term`

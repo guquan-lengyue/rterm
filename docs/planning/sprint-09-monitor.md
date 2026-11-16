@@ -1,8 +1,13 @@
 # Sprint 9 — 远程性能监控
 
-> **状态**：待开始（S5 已完成，可并行开始）
+> **状态**：待开始（S5 已完成；Tab 入口依赖 S6 5.4）
 > **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH exec 能力；Perl ✅ 已完成）+ [Sprint 4](./sprint-04-settings-io.md)（监控间隔与阈值已持久化）
 > **目标**：MonitorCollector + tokio interval 采集 + gpui Canvas 折线图 + Top 进程 + Kill
+>
+> **S5 已就绪的接入点**：
+> - `SshSession::session_clone()` 可在采集线程建立独立 channel 执行 `exec`
+> - `MonitorSample` / `MonitorAlert` 事件已定义；采集器/图表可先并行
+> - **Tab 入口依赖 S6 5.4.1/5.4.2 的 TabRegistry/TabBar** → 先做 8.1–8.2 的采集与图表，Tab 接线等 S6 完成
 >
 > **S4 已就绪的接入点**：
 > - `Settings.monitor_interval_secs` / `monitor_cpu_threshold` / `monitor_mem_threshold` 已在设置 → 监控 Tab 持久化 → 采集器直接读取，不再新增设置入口

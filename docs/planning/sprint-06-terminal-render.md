@@ -7,7 +7,9 @@
 > **S5 已就绪 / 本 Sprint 只替换渲染层**：
 > - `TerminalEngine` 已提供 `grid()` / `cursor()` / `colors()` / `visible_lines()` / `input_key()` / `resize()`
 > - `TerminalView` 已有完整连接编排（SSH 线程、PTY 事件、重连、状态、键盘 → `PtyCommand`）→ 保留，只把文本 body 换成 Canvas
+> - 基础键盘映射（字符 / Enter / Backspace / 方向键 / Ctrl 字母）已完成 → 5.2.2 只补 Alt / Ctrl+方向 / F1–F12 组合与 bracketed paste
 > - 会话树已有连接状态点；S6 不需要重复实现
+> - S5 固定 100×24，窗口 resize → `TerminalEngine.resize` + `PtyCommand::Resize` 尚未接线 → 新增 5.1.5
 >
 > **S4 已就绪 / 本 Sprint 需补的缺口**：
 > - `Settings` 已有 `default_theme` / `default_font_family` / `default_font_size` / `terminal_cursor_style` / `terminal_scrollback_lines` → 直接读取，不再新增配置项
@@ -26,6 +28,7 @@
 | 5.1.2 | 0.5h | `crates/rterm-app/src/views/terminal.rs` | 光标：方块 / 下划线 / 竖线，样式读 `Settings.terminal_cursor_style`；blink（tokio 500ms）；覆盖当前 Cell | 光标闪烁位置正确；设置改光标样式后生效 |
 | 5.1.3 | 0.5h | `crates/rterm-app/src/views/terminal.rs` | 滚动缓冲：行数读 `Settings.terminal_scrollback_lines`；滚动条 + 鼠标滚轮 + Shift+PageUp/PageDown | 回滚能看历史 |
 | 5.1.4 | 0.5h | `crates/rterm-app/src/views/terminal.rs` | 文本选择：鼠标左键拖 → 高亮选区 → 松开自动复制 `gpui::App::set_clipboard` | 拖一段 → 粘贴到别的终端能看到 |
+| 5.1.5 | 0.25h | `crates/rterm-app/src/views/terminal.rs` | 窗口尺寸变化 → 按字体宽度/行高计算新 cols/rows → `TerminalEngine.resize()` + `PtyCommand::Resize`（S5 已提供 resize 命令） | 拉大窗口 → `stty size` 行数同步变化 |
 
 ### 5.2 粘贴 + 键盘
 
@@ -42,6 +45,9 @@
 | 5.3.2 | 0.25h | `crates/rterm-app/src/theme.rs` | 主题切换：`AppThemeChanged { name }`（S4 设置保存时已 emit）→ TerminalView 订阅 → 换 `TerminalPalette` 重绘；`AppSettingsChanged` 同步字体/字号/光标 | 设置里切 Dracula → 终端立刻变色 |
 
 ### 5.4 标签页
+
+> **优先项**：S7（SFTP）和 S9（监控）的 Tab 入口依赖本节的 `TabRegistry` / `TabBar`，
+> 建议先完成 5.4.1 + 5.4.2，再并行推进 S7/S9。
 
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
@@ -60,4 +66,4 @@
 
 | # | 粒度 | 验收 |
 |---|------|------|
-| 5.6.1 | 0.5h | vim / nano / htop / tmux / less 全部能操作；三标签 Ctrl+Tab 切换；Shift+PageUp 回滚；右键复制粘贴；切 Dracula 主题；Ctrl+T 新标签 Ctrl+W 关闭 |
+| 5.6.1 | 0.5h | vim / nano / htop / tmux / less 全部能操作；三标签 Ctrl+Tab 切换；Shift+PageUp 回滚；右键复制粘贴；切 Dracula 主题；Ctrl+T 新标签 Ctrl+W 关闭；窗口缩放后 `stty size` 同步 |

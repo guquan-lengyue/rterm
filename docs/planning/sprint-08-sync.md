@@ -5,6 +5,11 @@
 > **目标**：SyncBridge + PS1 正则 + ignore 防回环
 > **定位**：rterm 独有杀手功能
 >
+> **S5 已就绪的接入点**：
+> - `TerminalData { tab_id, session_id, bytes }` 已在每个 PTY chunk 实时 emit → SyncBridge 可直接订阅，无需改 TerminalView 的连接层
+> - S5 只有单 TerminalView；S6 TabRegistry 会提供多 tab 的 `tab_id → session_id` 映射，S8 按 tab 隔离 SyncBridge 状态
+> - `SshSession::session_clone()` 可用于 SFTP 侧连接
+>
 > **S4 已就绪的接入点**：
 > - 全局同步模式已在设置 → SFTP Tab 持久化为 `Settings.sftp_sync_mode`（`off` / `term_to_sftp` / `sftp_to_term` / `bidirectional`），本 Sprint 直接解析，不再新增全局配置项
 > - `AppSettingsChanged` 已定义；模式变更后 SyncBridge 订阅刷新
