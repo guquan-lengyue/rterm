@@ -20,7 +20,7 @@ use gpui::{
 };
 use uuid::Uuid;
 
-use crate::event::AppEvent;
+use crate::event::{AppEvent, EventBusHost};
 use crate::state::AppState;
 use crate::ui::theme;
 
@@ -29,6 +29,7 @@ use super::session_dialog::SessionEditDialog;
 use super::session_tree::SessionTreeView;
 use super::settings::SettingsView;
 use super::status_bar::StatusBar;
+use super::terminal::TerminalView;
 
 // ---------------------------------------------------------------------------
 // 右键菜单
@@ -46,6 +47,7 @@ pub struct ContextMenuState {
 enum ContextMenuAction {
     NewSession,
     EditSession(Uuid),
+    OpenTerminal(Uuid),
     DeleteSession(Uuid),
     OpenExportDialog,
     OpenImportDialog,
@@ -55,6 +57,7 @@ enum ContextMenuAction {
 pub struct MainWindow {
     session_tree: Entity<SessionTreeView>,
     status_bar: Entity<StatusBar>,
+    terminal_view: Entity<TerminalView>,
     pub edit_dialog: Option<Entity<SessionEditDialog>>,
     settings_dialog: Option<Entity<SettingsView>>,
     import_export_dialog: Option<Entity<ImportExportDialog>>,
@@ -62,10 +65,15 @@ pub struct MainWindow {
 }
 
 impl MainWindow {
-    pub fn new(session_tree: Entity<SessionTreeView>, status_bar: Entity<StatusBar>) -> Self {
+    pub fn new(
+        session_tree: Entity<SessionTreeView>,
+        status_bar: Entity<StatusBar>,
+        terminal_view: Entity<TerminalView>,
+    ) -> Self {
         Self {
             session_tree,
             status_bar,
+            terminal_view,
             edit_dialog: None,
             settings_dialog: None,
             import_export_dialog: None,
@@ -111,6 +119,14 @@ impl MainWindow {
 
     fn close_edit_dialog(&mut self, cx: &mut Context<Self>) {
         self.edit_dialog = None;
+        cx.notify();
+    }
+
+    fn request_terminal(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let host = cx.global::<AppState>().event_bus_host.clone();
+        cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
+            cx.emit(AppEvent::SessionConnectRequested { session_id });
+        });
         cx.notify();
     }
 
@@ -272,23 +288,7 @@ impl Render for MainWindow {
                             .flex_1()
                             .h_full()
                             .bg(t.app_bg())
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(t.text_subtle())
-                                    .child("← 选择一个会话开始连接"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(t.text_placeholder())
-                                    .child("或点击工具栏「新建会话」创建新连接"),
-                            ),
+                            .child(self.terminal_view.clone()),
                     ),
             )
             // 底部 StatusBar
@@ -297,7 +297,7 @@ impl Render for MainWindow {
         if let Some(menu_state) = self.context_menu {
             let viewport = window.viewport_size();
             let menu_w = 170.0_f32;
-            let menu_h = if menu_state.session_id.is_some() { 188.0_f32 } else { 128.0_f32 };
+            let menu_h = if menu_state.session_id.is_some() { 218.0_f32 } else { 128.0_f32 };
             let x = (menu_state.x as f32).min(f32::from(viewport.width) - menu_w).max(0.);
             let y = (menu_state.y as f32).min(f32::from(viewport.height) - menu_h).max(0.);
 
@@ -335,6 +335,13 @@ impl Render for MainWindow {
                         "✏ 编辑会话",
                         false,
                         ContextMenuAction::EditSession(sid),
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
+                        "rterm-ctx-open-terminal",
+                        "▶ 打开终端",
+                        false,
+                        ContextMenuAction::OpenTerminal(sid),
                         cx,
                     ))
                     .child(self.render_menu_item(
@@ -418,6 +425,7 @@ impl MainWindow {
                     match action {
                         ContextMenuAction::NewSession => this.open_edit_dialog(None, cx),
                         ContextMenuAction::EditSession(sid) => this.edit_session(sid, cx),
+                        ContextMenuAction::OpenTerminal(sid) => this.request_terminal(sid, cx),
                         ContextMenuAction::DeleteSession(sid) => this.delete_session(sid, cx),
                         ContextMenuAction::OpenExportDialog => this.open_import_export(true, cx),
                         ContextMenuAction::OpenImportDialog => this.open_import_export(false, cx),

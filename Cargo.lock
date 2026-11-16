@@ -4598,10 +4598,13 @@ dependencies = [
  "bezel-gpui-platform",
  "dirs",
  "env_logger",
+ "futures",
  "log",
  "rfd",
  "rterm-crypto",
  "rterm-session",
+ "rterm-ssh",
+ "rterm-terminal",
  "serde",
  "serde_json",
  "tokio",
@@ -4661,6 +4664,7 @@ name = "rterm-ssh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "bytes",
  "futures",
  "log",

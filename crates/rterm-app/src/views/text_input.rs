@@ -514,6 +514,7 @@ impl Render for TextInput {
             .w_full()
             .h(px(32.))
             .id(format!("rterm-ti-{}", cx.entity_id()))
+            .key_context("TextInput")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))

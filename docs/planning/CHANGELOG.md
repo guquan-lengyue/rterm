@@ -4,6 +4,71 @@
 
 ---
 
+## Sprint 5 — SSH 连接 & 终端核心
+
+**状态**：✅ COMPLETED | **Commit**：待提交 | **时间**：2026-11-14
+**前置**：S2（Session 模型）+ S3（双击 connect 事件）+ S4（Settings / 主题 / Modal）
+**后续**：S6（终端 Canvas 渲染）
+
+### 交付清单
+
+| # | 任务 | 产出文件 | 验收 |
+|---|------|----------|------|
+| 5.1.1 | SshSession + ConnectionState 状态机 | `rterm-ssh/src/lib.rs` | ✅ new / Disconnected / Connected |
+| 5.1.2 | Password / PrivateKey / Agent 三种认证 | `rterm-ssh/src/auth.rs` | ✅ 密码认证真实服务器通过 |
+| 5.1.3 | TCP + handshake + 超时 + 压缩 | `rterm-ssh/src/lib.rs` | ✅ `connect_timeout_secs` 生效 |
+| 5.1.4 | known_hosts 校验 + 首次记录 + 变更检测 | `rterm-ssh/src/known_hosts.rs` | ✅ TOFU 追加；变更拒绝连接并广播 |
+| 5.2.1 | open_pty（xterm-256color + shell） | `rterm-ssh/src/pty.rs` | ✅ 真实服务器返回 Channel |
+| 5.2.2 | 后台 PTY 读写线程 | `rterm-ssh/src/pty.rs` | ✅ non-blocking 轮询，输入/输出双向通 |
+| 5.2.3 | resize_pty | `rterm-ssh/src/pty.rs` | ✅ `request_pty_size` |
+| 5.3.1 | TerminalEngine::new | `rterm-terminal/src/engine.rs` | ✅ 80×24×10000 构造 |
+| 5.3.2 | input_bytes（vte → Term） | `rterm-terminal/src/engine.rs` | ✅ "hello\r\n" 落入 Grid |
+| 5.3.3 | grid / cursor / colors / resize | `rterm-terminal/src/engine.rs` | ✅ ANSI 颜色与光标位置测试 |
+| 5.3.4 | input_key（xterm 序列） | `rterm-terminal/src/engine.rs` | ✅ Enter/Backspace/方向键/Ctrl+F1–F12 |
+| 5.4.1 | KeepAlive | `rterm-ssh/src/keepalive.rs` | ✅ IO 循环内 `keepalive_send` |
+| 5.4.2 | 指数退避重连 | `rterm-ssh/src/reconnect.rs` | ✅ 1/2/4/8/16s，最多 5 次 |
+| 5.5.1 | SessionConnectRequested → SSH → PTY → Engine | `views/terminal.rs` | ✅ 双击会话自动连接并输出 |
+| 5.5.2 | 会话状态图标 + 右键「打开终端」 | `views/session_tree.rs` / `main_window.rs` | ✅ 灰/蓝/绿/红状态点 |
+| 5.5.3 | 终端文本 placeholder | `views/terminal.rs` | ✅ 实时显示远程 shell 输出 |
+| — | 键盘输入 | `views/terminal.rs` | ✅ 字符 / Enter / 方向键 / Ctrl 组合 |
+| — | 错误分级 | `views/terminal.rs` | ✅ 认证/配置/主机密钥错误快速失败，仅网络错误退避重连 |
+| — | Windows libssh2 后端修复 | `Cargo.toml` | ✅ `openssl-on-win32`（否则无 curve25519/ed25519） |
+
+### 测试 & 验收
+
+| 项 | 结果 |
+|----|------|
+| `cargo test --workspace` | ✅ **43 passed, 0 failed**（1 个 live test 默认 ignored） |
+| `live_ssh`（真实服务器 192.168.1.95） | ✅ connect → auth → PTY → `pwd` 返回 `/home/ubuntu` |
+| GUI E2E：双击 pw-test → 连接 | ✅ 状态栏显示「已连接」，登录 banner 渲染 |
+| GUI E2E：键盘输入 `pwd` | ✅ 输出 `/home/ubuntu` |
+| GUI E2E：`vim` | ✅ 进入 Vim 9.1.241 界面，可退出回 shell |
+| GUI E2E：`tmux` | ✅ tmux 状态栏出现 `[0] 0:tmux*` |
+| 退出保存 | ✅ Alt+F4 → `Saving 2 sessions` / `Saved OK` |
+
+### 踩坑 & 解法（4 个坑）
+
+| # | 问题 | 解法 |
+|---|------|------|
+| 1 | Windows 上 libssh2 默认走 WINCNG，无 curve25519-sha256 / ssh-ed25519 → `[Session(-5)] Unable to exchange encryption keys` | workspace `ssh2` 增加 `openssl-on-win32` feature，libssh2 改用 OpenSSL |
+| 2 | ssh2 blocking `channel.read` 持有 Session 锁，导致键盘输入写不出去 | shell 打开后 `set_blocking(false)`，单线程轮询 read/write/resize/keepalive |
+| 3 | `TerminalView` 需要长时间阻塞的 SSH IO，不能占用 gpui executor | SSH/PTY 用独立 `std::thread`；输出经 `futures::mpsc` 回主线程 `cx.spawn` |
+| 4 | 全局 `backspace/ctrl-a` 等 TextInput 绑定会截获终端按键 | bindings 加 `Some("TextInput")` context，TextInput 根节点加 `.key_context("TextInput")` |
+
+### 遗留
+
+| 项 | 后续 |
+|----|------|
+| host key 首次连接为 TOFU 自动记录，未做三选一确认 Modal | S10 9.1 |
+| Canvas 逐 Cell 渲染 / 光标 / 滚动条 / 鼠标选择 | S6 |
+| TabBar / Ctrl+T / Ctrl+Tab / Ctrl+W | S6 |
+| 窗口 resize → PTY resize 联动 | S6 |
+| 跳板机 `proxy_jump` 链式连接 | S5 后续 / S10 |
+| 真实断网重连未做端到端验证（退避/重试逻辑已通过认证失败场景验证） | S10 |
+| Ctrl+P 命令面板 | S10 9.3 |
+
+---
+
 ## Sprint 4 — 设置 + 导入导出
 
 **状态**：✅ COMPLETED | **Commit**：`e7a9574` | **时间**：2026-11-14
@@ -54,6 +119,19 @@
 | 字体为 4 个预设，未枚举系统字体 | S6 终端渲染时补 |
 | 删除会话二次确认仍未做（S3 遗留） | S10 |
 | 日志目录 / 数据目录首页仅存储，尚未被终端与日志模块使用 | S6 / S9 |
+
+### 对后续 Sprint 的交接
+
+| S4 已交付能力 | 后续消费方 |
+|---------------|-----------|
+| `Settings` 默认值：端口 / 用户名 / keepalive / 连接超时 | S5 新建会话与连接超时（5.5.4） |
+| 终端外观：主题 / 字体 / 字号 / 光标样式 / 滚动行数 | S6 终端渲染直接读取，不重复建配置 |
+| 4 套 UI 主题（Catppuccin Mocha / Windows 11 Light / Dracula / One Dark） | S6 需补终端 fg/bg/ANSI 16 色，`Theme` trait 不含终端调色板 |
+| `Settings.sftp_sync_mode` 四选一（已持久化） | S8 SyncBridge 默认模式 |
+| `Settings.monitor_interval_secs` + CPU/Mem 阈值 | S9 MonitorCollector |
+| `terminal_log_dir` / `data_dir` 字段（仅存储） | S10 会话日志 / 数据目录接线 |
+| 自绘 Modal + TextInput + `rfd` 文件选择器 | S5 host key 确认 / S7 本地路径选择 / S10 命令面板 |
+| `AppThemeChanged` / `AppSettingsChanged` 事件 | S6 主题/字号即时重绘 |
 
 ---
 

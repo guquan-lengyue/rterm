@@ -10,7 +10,7 @@ use crate::event::{AppEvent, EventBusHost};
 use crate::state::AppState;
 use crate::ui::theme;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -19,7 +19,12 @@ use uuid::Uuid;
 
 enum TreeNode {
     Folder { name: String, children: Vec<TreeNode> },
-    Session { id: Uuid, name: String, host: String },
+    Session {
+        id: Uuid,
+        name: String,
+        host: String,
+        port: u16,
+    },
 }
 
 impl TreeNode {
@@ -42,6 +47,7 @@ impl TreeNode {
                     id: s.id,
                     name: s.name.clone(),
                     host: s.host.clone(),
+                    port: s.port,
                 })
                 .collect();
             nodes.push(TreeNode::Folder { name: folder, children });
@@ -51,6 +57,7 @@ impl TreeNode {
                 id: s.id,
                 name: s.name.clone(),
                 host: s.host.clone(),
+                port: s.port,
             });
         }
         nodes
@@ -61,9 +68,19 @@ impl TreeNode {
 // SessionTreeView
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionBadge {
+    None,
+    Connecting,
+    Connected,
+    Reconnecting,
+    Failed,
+}
+
 pub struct SessionTreeView {
     expanded: HashSet<String>,
     selected: Option<Uuid>,
+    connection: HashMap<Uuid, ConnectionBadge>,
 }
 
 impl SessionTreeView {
@@ -71,6 +88,7 @@ impl SessionTreeView {
         Self {
             expanded: HashSet::new(),
             selected: None,
+            connection: HashMap::new(),
         }
     }
 
@@ -95,6 +113,28 @@ impl Render for SessionTreeView {
                 | AppEvent::SessionImported { .. } => cx.notify(),
                 AppEvent::SessionTreeSelectRequested { session_id } => {
                     this.selected = *session_id;
+                    cx.notify();
+                }
+                AppEvent::SessionConnectRequested { session_id } => {
+                    this.connection
+                        .insert(*session_id, ConnectionBadge::Connecting);
+                    cx.notify();
+                }
+                AppEvent::SessionConnected { session_id } => {
+                    this.connection.insert(*session_id, ConnectionBadge::Connected);
+                    cx.notify();
+                }
+                AppEvent::SessionFailed { session_id, .. } => {
+                    this.connection.insert(*session_id, ConnectionBadge::Failed);
+                    cx.notify();
+                }
+                AppEvent::SessionDisconnected { session_id, .. } => {
+                    this.connection.insert(*session_id, ConnectionBadge::None);
+                    cx.notify();
+                }
+                AppEvent::SessionReconnecting { session_id, .. } => {
+                    this.connection
+                        .insert(*session_id, ConnectionBadge::Reconnecting);
                     cx.notify();
                 }
                 _ => {}
@@ -196,10 +236,28 @@ impl SessionTreeView {
                 container.into_any_element()
             }
 
-            TreeNode::Session { id, name, host } => {
+            TreeNode::Session {
+                id,
+                name,
+                host,
+                port,
+            } => {
                 let id_copy = *id;
                 let selected = self.selected == Some(id_copy);
                 let bg = if selected { t.row_selected_bg() } else { t.sidebar_bg() };
+                let badge = self
+                    .connection
+                    .get(&id_copy)
+                    .copied()
+                    .unwrap_or(ConnectionBadge::None);
+                let (dot, dot_color) = match badge {
+                    ConnectionBadge::Connected => ("●", t.success()),
+                    ConnectionBadge::Connecting | ConnectionBadge::Reconnecting => {
+                        ("●", t.primary())
+                    }
+                    ConnectionBadge::Failed => ("●", t.danger()),
+                    ConnectionBadge::None => ("○", t.text_placeholder()),
+                };
 
                 let row = div()
                     .w_full()
@@ -252,13 +310,20 @@ impl SessionTreeView {
                         div()
                             .flex()
                             .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(9.))
+                                    .text_color(dot_color)
+                                    .child(dot),
+                            )
                             .child(format!("🖥️ {}", name)),
                     )
                     .child(
                         div()
                             .text_size(px(10.))
                             .text_color(t.text_subtle())
-                            .child(format!("{}:22", host)),
+                            .child(format!("{}:{}", host, port)),
                     );
 
                 row.into_any_element()

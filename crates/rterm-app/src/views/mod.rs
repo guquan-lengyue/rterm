@@ -9,4 +9,5 @@ pub mod session_dialog;
 pub mod settings;
 pub mod import_export;
 pub mod status_bar;
+pub mod terminal;
 pub mod text_input;

@@ -1,8 +1,13 @@
 # Sprint 9 — 远程性能监控
 
-> **状态**：—
-> **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH exec 能力；Perl ✅ 已完成）
+> **状态**：待开始（S5 已完成，可并行开始）
+> **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH exec 能力；Perl ✅ 已完成）+ [Sprint 4](./sprint-04-settings-io.md)（监控间隔与阈值已持久化）
 > **目标**：MonitorCollector + tokio interval 采集 + gpui Canvas 折线图 + Top 进程 + Kill
+>
+> **S4 已就绪的接入点**：
+> - `Settings.monitor_interval_secs` / `monitor_cpu_threshold` / `monitor_mem_threshold` 已在设置 → 监控 Tab 持久化 → 采集器直接读取，不再新增设置入口
+> - `MonitorSample` / `MonitorAlert` 事件已在 `event.rs` 定义
+> - 告警 Toast 可复用 S4 自绘 Modal/卡片样式
 
 ---
 
@@ -13,9 +18,9 @@
 | 8.1.1 | 0.5h | `crates/rterm-monitor/src/collector.rs` | `pub struct MonitorCollector { samples: HashMap<String, VecDeque<ResourceSample>>, session_id }` + `pub struct ResourceSample { cpu_usage, mem_pct, swap_pct, disk_pct, net_rx_kbps, net_tx_kbps, load_1, load_5, timestamp }` | 能构造 |
 | 8.1.2 | 0.5h | `crates/rterm-monitor/src/collector.rs` | 单行采集脚本（Linux）：`cat /proc/stat; cat /proc/meminfo; df -P / \| tail -1; cat /proc/net/dev; uptime` → 解析 | 对真实服务器能返回 ResourceSample |
 | 8.1.3 | 0.25h | `crates/rterm-monitor/src/collector.rs` | macOS 兼容脚本：sysctl + vm_stat + netstat -ib（cfg target_os） | macOS 也能出数据 |
-| 8.1.4 | 0.5h | `crates/rterm-monitor/src/collector.rs` | `pub fn start(session_id, interval, ssh_session, thresholds) -> Task<()>` — tokio interval 2s → exec → parse → push 60 点 VecDeque → broadcast MonitorSample | 2 秒一次，折线数据源正确 |
+| 8.1.4 | 0.5h | `crates/rterm-monitor/src/collector.rs` | `pub fn start(session_id, interval, ssh_session, thresholds) -> Task<()>` — interval / 阈值由调用方从 `Settings.monitor_interval_secs` / `monitor_cpu_threshold` / `monitor_mem_threshold` 传入（默认 2s / 90% / 85%）→ tokio interval → exec → parse → push 60 点 VecDeque → broadcast MonitorSample | 默认 2 秒一次；设置改间隔后新采集器生效 |
 | 8.1.5 | 0.25h | `crates/rterm-monitor/src/collector.rs` | Top 进程采集：`ps -eo pid,user,%cpu,%mem,comm --sort=-%cpu \| head -20` → Vec<TopProcess> | 能出 Top 进程 |
-| 8.1.6 | 0.25h | `crates/rterm-monitor/src/collector.rs` | 阈值告警：rolling_avg(last 5) vs threshold → broadcast MonitorAlert + 系统通知 | CPU 到 90% 触发 Toast |
+| 8.1.6 | 0.25h | `crates/rterm-monitor/src/collector.rs` | 阈值告警：rolling_avg(last 5) vs `Settings` 阈值 → broadcast MonitorAlert + 系统通知 | 把 CPU 阈值调到 10% → 触发 Toast |
 
 ### 8.2 Monitor View
 

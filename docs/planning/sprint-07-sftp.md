@@ -1,8 +1,14 @@
 # Sprint 7 — SFTP 文件管理
 
-> **状态**：—
+> **状态**：待开始（S5 已完成，可并行开始）
 > **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH Session + sftp 子系统；Perl ✅ 已完成）
 > **目标**：SftpService + 双栏 View + 传输队列
+>
+> **S4 已就绪的接入点**：
+> - `FileTransferStarted/Progress/Completed/Failed` 事件已在 `event.rs` 定义，本 Sprint 只需 emit
+> - `Settings.sftp_sync_mode` 已持久化（S8 消费，本 Sprint 不读）
+> - 传输进度弹窗 / chmod / 属性面板可复用 S4 自绘 Modal + TextInput 模式
+> - `rfd` 文件选择器已引入，本地路径选择可直接用
 
 ---
 

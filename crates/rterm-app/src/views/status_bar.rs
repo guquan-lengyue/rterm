@@ -13,7 +13,7 @@ pub struct StatusBar {
 
 impl StatusBar {
     pub fn new() -> Self {
-        Self { message: "Ready — rterm Sprint 3".into() }
+        Self { message: "Ready — rterm Sprint 5".into() }
     }
 }
 

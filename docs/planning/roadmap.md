@@ -8,8 +8,8 @@
 | Phase | 交付 | 预估 | 关键依赖 |
 |-------|------|------|----------|
 | **P0 环境 & 骨架** | gpui 空窗口可运行 + 所有 crate 骨架 + MSVC 环境脚本 | ✅ 已完成 | VS Build Tools、perl、bezel-gpui 0.3 |
-| **P1 会话管理** | 会话树 View + SessionStore CRUD + 持久化 JSON + 导入导出 + 全局设置界面 | — | serde / uuid / rterm-crypto |
-| **P2 SSH 连接 & 终端** | ssh2 Session 封装 + PTY + alacritty_terminal glue + gpui Canvas 渲染 + 基础主题 | — | ssh2 vendored-openssl / alacritty_terminal |
+| **P1 会话管理** | 会话树 View + SessionStore CRUD + 持久化 JSON + 导入导出 + 全局设置界面 | ✅ 已完成（S2–S4） | serde / uuid / rterm-crypto |
+| **P2 SSH 连接 & 终端** | ssh2 Session 封装 + PTY + alacritty_terminal glue + gpui Canvas 渲染 + 基础主题 | 🚧 核心完成（S5）；渲染 S6 | ssh2 vendored-openssl / alacritty_terminal |
 | **P3 SFTP 文件管理** | SFTP 双栏浏览 + 传输队列 + 进度条 + 拖拽 | — | ssh2 Sftp / walkdir |
 | **P4 路径同步** | SyncBridge + PS1 正则 + ignore 防回环 + 双向开关 | — | regex |
 | **P5 远程性能监控** | MonitorCollector + 折线图 + Top 进程 + 阈值告警 | — | tokio 定时 + Canvas 折线图 |
@@ -40,104 +40,107 @@
 
 ---
 
-## Phase 1 — 会话管理
+## Phase 1 — 会话管理 ✅（S2–S4）
 
 ### 任务清单
 
-#### 1.1 rterm-crypto 实现
-- [ ] `dpapi_encrypt` / `dpapi_decrypt`（Windows）
-- [ ] `aesgcm_encrypt` / `aesgcm_decrypt`（PBKDF2 + 随机 salt + 非重用 iv）
-- [ ] 单元测试：加密→解密往返；错误口令解密抛错
+#### 1.1 rterm-crypto 实现 ✅（S1）
+- [x] `dpapi_encrypt` / `dpapi_decrypt`（Windows）
+- [x] `aesgcm_encrypt` / `aesgcm_decrypt`（PBKDF2 + 随机 salt + 非重用 iv）
+- [x] 单元测试：加密→解密往返；错误口令解密抛错
 
-#### 1.2 rterm-session 实现
-- [ ] `Session` 结构体 + serde（加密字段序列化为 `{ version, base64(data) }`）
-- [ ] `SessionStore::load` / `save`（JSON 文件）
-- [ ] `SessionStore` CRUD 方法（list / get / upsert / delete）
-- [ ] 文件夹分组逻辑（按 `session.folder.split('/')` 建树）
-- [ ] `ConflictPolicy`（覆盖 / 跳过 / 重命名）
-- [ ] `ExportScope`（全部 / 文件夹 / 选择）
-- [ ] 导入导出 JSON schema（带 `version` 字段）
-- [ ] 自动备份逻辑（24h 定时器 + 保留 7 份）
+#### 1.2 rterm-session 实现 ✅（S2）
+- [x] `Session` 结构体 + serde（加密字段序列化为 `{ version, base64(data) }`）
+- [x] `SessionStore::load` / `save`（JSON 文件）
+- [x] `SessionStore` CRUD 方法（list / get / upsert / delete）
+- [x] 文件夹分组逻辑（按 `session.folder.split('/')` 建树）
+- [x] `ConflictPolicy`（覆盖 / 跳过 / 重命名）
+- [x] `ExportScope`（全部 / 文件夹 / 选择）
+- [x] 导入导出 JSON schema（带 `version` 字段）
+- [ ] 自动备份逻辑（24h 定时器 + 保留 7 份）→ S10 9.9
 
-#### 1.3 rterm-app 设置与持久化
-- [ ] `dirs::data_dir()` → `%APPDATA%\rterm\` 路径
-- [ ] `Settings` 结构体 + 默认值
-- [ ] `AppState { session_store, settings, tab_registry, event_bus }`
-- [ ] 启动时自动 load sessions.json + settings.json
-- [ ] 退出时自动 save（Ctrl+C / 系统关机钩子）
+#### 1.3 rterm-app 设置与持久化 ✅（S3 + S4）
+- [x] `dirs::data_dir()` → `%APPDATA%\rterm\` 路径
+- [x] `Settings` 结构体 + 默认值（`serde(default)` 向后兼容）
+- [x] `AppState { session_store, settings, tab_registry, event_bus }`
+- [x] 启动时自动 load sessions.json + settings.json
+- [x] 退出时自动 save SessionStore（S3）；Settings 保存时原子写盘（S4）
 
-#### 1.4 SessionTree View（gpui）
-- [ ] 左侧 `SessionTreeView`：树形（folder → session），带图标
-- [ ] 右键菜单：新建 / 编辑 / 复制 / 删除 / 打开终端 / 打开 SFTP / 导出
-- [ ] 双击会话 → 广播 `AppEvent::SessionConnectRequested`
-- [ ] 会话状态图标（未连接 / 连接中 / 在线 / 失败）
-- [ ] 收藏夹区域（顶部）
+#### 1.4 SessionTree View（gpui）——S3 已完成主体
+- [x] 左侧 `SessionTreeView`：树形（folder → session），带图标
+- [x] 右键菜单：新建 / 编辑 / 删除 / 导入 / 导出（S3 + S4）
+- [ ] 右键菜单：复制 / 打开终端 / 打开 SFTP（S5–S7）
+- [x] 双击会话 → 广播 `AppEvent::SessionConnectRequested`
+- [ ] 会话状态图标（未连接 / 连接中 / 在线 / 失败）→ S5 5.5.2
+- [ ] 收藏夹区域（顶部）→ 未排期
 
-#### 1.5 Session 编辑对话框
-- [ ] gpui Dialog（或 Modal）风格表单
-- [ ] 基础字段：名称 / 主机 / 端口 / 用户名
-- [ ] 认证字段：下拉选 Password / PrivateKey / Agent
-- [ ] Password：DPAPI 加密存储（编辑时 DPAPI 解密显示、保存时重新加密）
-- [ ] PrivateKey：文件选择 + 口令（可选）
-- [ ] Agent：读取 `ssh-add -l` 输出枚举 key
-- [ ] 跳板机：可选 + 可嵌套
-- [ ] 连接测试按钮：后台异步 TCP + SSH 握手
-- [ ] 全局默认配置界面（Session 编辑表单的"继承自默认"checkbox）
+#### 1.5 Session 编辑对话框——S3 已完成主体
+- [x] gpui Modal 风格表单（自绘 Dialog）
+- [x] 基础字段：名称 / 主机 / 端口 / 用户名 / 分组
+- [x] 认证字段：Password / PrivateKey / Agent 三选一
+- [x] Password：DPAPI 加密存储（编辑时掩码、未修改沿用原密码）
+- [x] PrivateKey：路径 + 口令（可选，可换 `rfd` 文件选择器）
+- [ ] Agent：读取 `ssh-add -l` 输出枚举 key → S5 5.1.2 先做认证
+- [ ] 跳板机：模型已支持 `proxy_jump`，连接链待 S5 接
+- [x] 连接测试按钮：后台异步 TCP（S5 升级为 SSH 握手）
+- [x] 全局默认配置界面：S4 Settings 已提供默认值；新建会话接线 → S5 5.5.4
 
-#### 1.6 导入导出对话框
-- [ ] 导出：路径选择 + 范围 + 加密口令（可空 → DPAPI 直接存）
-- [ ] 导入：路径选择 + 冲突策略选择 + 预览 diff 弹窗
-- [ ] OpenSSH config 导入（MVP：解析 `Host xxx` + `HostName` + `User` + `IdentityFile`）
+#### 1.6 导入导出对话框 ✅（S4，OpenSSH 导入 S2）
+- [x] 导出：`rfd` 路径选择 + 范围（全部 / 文件夹 / 多选）+ DPAPI 或 AES-GCM 口令
+- [x] 导入：路径选择 + 口令 + 冲突策略 + 预览 diff + ImportReport
+- [x] OpenSSH config 导入（解析 `Host` / `HostName` / `Port` / `User` / `IdentityFile` / `ProxyJump`）
 
-#### 1.7 全局设置界面
-- [ ] 6 分组 Tab：常规 / SSH 默认值 / 终端外观 / SFTP / 监控 / 高级
-- [ ] 右侧即时预览（主题、字体变更立即生效）
-- [ ] 设置变更 → `EventBus::AppSettingsChanged` → 所有 View 订阅刷新
+#### 1.7 全局设置界面 ✅（S4）
+- [x] 7 个 Tab：常规 / SSH 默认值 / 终端外观 / SFTP / 监控 / 高级 / 导入导出
+- [x] 即时预览（主题全应用换肤、字号联动预览）
+- [x] 设置变更 → `AppSettingsChanged` / `AppThemeChanged`（消费方 S6 起接入）
 
 ---
 
-## Phase 2 — SSH 连接 & 终端
+## Phase 2 — SSH 连接 & 终端 🚧（S5 完成核心；S6 渲染）
 
 ### 前置条件
 - [x] P0（gpui 空窗口）
-- [ ] perl 可用（vendored-openssl 编译）
-- [ ] P1（SessionStore + Session 编辑）
+- [x] perl 可用（vendored-openssl 编译，S5 5.0 已验证）
+- [x] P1（SessionStore + Session 编辑，S2–S4）
+- [x] S5（SSH + PTY + TerminalEngine + 文本 TerminalView）
 
 ### 任务清单
 
-#### 2.1 rterm-ssh 核心
-- [ ] `SshSession::connect(session: &Session)`：密码 / 密钥 / agent / 跳板机链式
-- [ ] 主机密钥校验：从 known_hosts 读；未信任主机弹窗；变更弹窗三选一
-- [ ] KeepAlive task（tokio interval，30s）：`echo ping > /dev/null`
-- [ ] 连接状态机：Disconnected → Connecting → Connected → Reconnecting（退避）
-- [ ] 重连策略：5 次指数退避 + 全部失败广播 `SessionDisconnected`
+#### 2.1 rterm-ssh 核心 ✅（S5）
+- [x] `SshSession::connect(session: &Session)`：密码 / 密钥 / agent（跳板机链式待补）
+- [x] 主机密钥校验：known_hosts TOFU 记录；变更检测拒绝连接（三选一 Modal → S10）
+- [x] KeepAlive：PTY IO 循环调用 `keepalive_send()`
+- [x] 连接状态机：Disconnected → Connecting → Connected → Reconnecting（退避）
+- [x] 重连策略：5 次指数退避 + 全部失败广播 `SessionDisconnected`
 
-#### 2.2 PTY 管理
-- [ ] `SshSession::open_pty(cols, rows) → ssh2::Channel`
-- [ ] `resize_pty(channel, cols, rows)`
-- [ ] PTY 输出字节流读取（后台线程 loop `channel.read()`）
-- [ ] 字节流通过 `mpsc::channel<Vec<u8>>` 发回主线程
+#### 2.2 PTY 管理 ✅（S5）
+- [x] `SshSession::open_pty(cols, rows) → ssh2::Channel`
+- [x] `resize_pty(channel, cols, rows)`
+- [x] PTY 输出字节流读取（后台线程 non-blocking 轮询）
+- [x] 字节流通过 futures mpsc 发回主线程
 
-#### 2.3 rterm-terminal glue
-- [ ] `TerminalEngine::new(cols, rows, scrollback_lines)`：Term<SizeInfo> + ScrollBuffer
-- [ ] `input_bytes()`：喂 PTY 字节 → vte::Parser → Term.input()
-- [ ] `input_key()`：TerminalKey → 字节序列 → Term.paste_bytes() + channel.write
-- [ ] `resize()`：Term 同步 → `resize_pty` 同步
-- [ ] `TerminalKey` enum 映射（gpui KeyDown → xterm 序列）
-- [ ] PS1 解析正则集合（bash / zsh / generic）：供 SyncBridge 用
-- [ ] 终端输入回显抑制（SyncBridge 注入 cd 时）
+#### 2.3 rterm-terminal glue ✅（S5）
+- [x] `TerminalEngine::new(cols, rows, scrollback_lines)`：Term<SizeInfo>
+- [x] `input_bytes()`：喂 PTY 字节 → vte::Parser → Term
+- [x] `input_key()`：TerminalKey → xterm 字节序列
+- [x] `resize()`：Term 同步
+- [x] `TerminalKey` enum 映射（gpui KeyDown → xterm 序列）
+- [ ] PS1 解析正则集合（bash / zsh / generic）→ S8
+- [ ] 终端输入回显抑制（SyncBridge 注入 cd 时）→ S8
 
-#### 2.4 Terminal View（gpui Canvas 渲染）
+#### 2.4 Terminal View（gpui Canvas 渲染）→ S6
+- [x] S5 文本 placeholder（实时显示 PTY 输出）
 - [ ] Canvas 渲染 `Grid<Cell>`：逐 Cell 画文字 + 背景矩形
 - [ ] 光标渲染（方块 / 下划线 / 竖线，blink 动画）
 - [ ] 滚动缓冲绘制 + 滚动条 + 鼠标滚轮
 - [ ] 鼠标选择（按住左键拖动画选区 → 复制系统剪贴板）
 - [ ] 右键粘贴（从系统剪贴板读 → PTY 注入）
-- [ ] 键盘事件：终端按键 → TerminalEngine.input_key → PTY
+- [x] 键盘事件：终端按键 → TerminalEngine.input_key → PTY
 - [ ] 主题切换（fg / bg / 16 ANSI + 256 + 真彩色）
 - [ ] 字体 + Nerd Font 字形支持（gpui 自带 DirectWrite）
 
-#### 2.5 标签页框架
+#### 2.5 标签页框架 → S6
 - [ ] `TabRegistry`：Vec<TabInfo> + active_index
 - [ ] TabBar View：水平标签 + 关闭按钮 + 新建 + 右键菜单
 - [ ] 标签 kinds：Terminal / Sftp / Monitor

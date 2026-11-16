@@ -33,7 +33,7 @@ fn sessions_path() -> std::path::PathBuf {
 // ---------- 入口 ----------
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    log::info!("rterm-app starting (Sprint 4 — 设置 + 导入导出)");
+    log::info!("rterm-app starting (Sprint 5 — SSH + 终端核心)");
 
     // 1. 启动加载 store + settings
     let store = load_store();
@@ -65,13 +65,13 @@ fn main() {
         // TextInput 键盘编辑绑定：Backspace/Delete 等按键走 action 派发，
         // 不是 IME 文本输入，必须显式 bind。
         let mut bindings = vec![
-            KeyBinding::new("backspace", views::text_input::Backspace, None),
-            KeyBinding::new("delete", views::text_input::Delete, None),
-            KeyBinding::new("left", views::text_input::Left, None),
-            KeyBinding::new("right", views::text_input::Right, None),
-            KeyBinding::new("home", views::text_input::Home, None),
-            KeyBinding::new("end", views::text_input::End, None),
-            KeyBinding::new("cmd-a", views::text_input::SelectAll, None),
+            KeyBinding::new("backspace", views::text_input::Backspace, Some("TextInput")),
+            KeyBinding::new("delete", views::text_input::Delete, Some("TextInput")),
+            KeyBinding::new("left", views::text_input::Left, Some("TextInput")),
+            KeyBinding::new("right", views::text_input::Right, Some("TextInput")),
+            KeyBinding::new("home", views::text_input::Home, Some("TextInput")),
+            KeyBinding::new("end", views::text_input::End, Some("TextInput")),
+            KeyBinding::new("cmd-a", views::text_input::SelectAll, Some("TextInput")),
         ];
         bindings.extend(views::settings::key_bindings());
         app.bind_keys(bindings);
@@ -79,7 +79,8 @@ fn main() {
         let window_handle = app.open_window(WindowOptions::default(), |_window, app| {
             let session_tree = app.new(|_cx| SessionTreeView::new());
             let status_bar = app.new(|_cx| StatusBar::new());
-            app.new(|_cx| MainWindow::new(session_tree, status_bar))
+            let terminal_view = app.new(|cx| views::terminal::TerminalView::new(cx));
+            app.new(|_cx| MainWindow::new(session_tree, status_bar, terminal_view))
         }).unwrap();
 
         // Ctrl+, → 全局打开设置。

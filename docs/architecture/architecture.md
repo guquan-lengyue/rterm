@@ -547,8 +547,8 @@ cx.subscribe(&event_bus, |app: &mut App, ev: &AppEvent| {
 |-------|------|------|
 | `bezel-gpui` | 0.3 | UI 框架（gpui 包名） |
 | `bezel-gpui-platform` | 0.3 | 平台初始化（gpui_platform 包名） |
-| `ssh2` | 0.9, vendored-openssl | SSH 协议 |
-| `alacritty_terminal` | 0.26 | 终端仿真后端 |
+| `ssh2` | 0.9, vendored-openssl + openssl-on-win32 | SSH 协议（Windows 必须 OpenSSL 后端才支持 curve25519/ed25519） |
+| `alacritty_terminal` | 0.25.1 | 终端仿真后端 |
 | `tokio` | 1 full | 异步 runtime（SSH IO + 监控定时 + 传输队列） |
 | `futures` | 0.3 | async traits |
 | `serde` / `serde_json` | 1 | 会话 / 设置 JSON |

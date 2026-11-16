@@ -1,14 +1,8 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! rterm-terminal — alacritty_terminal glue
+//!
+//! Sprint 5 落地：TerminalEngine（Grid / 字节输入 / 按键映射）。
+//! Sprint 6 在此之上做 gpui Canvas 渲染。
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod engine;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use engine::{SizeInfo, TerminalEngine, TerminalKey};

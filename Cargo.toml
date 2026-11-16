@@ -27,7 +27,7 @@ tokio-util = { version = "0.7", features = ["full"] }
 futures = "0.3"
 
 # SSH
-ssh2 = { version = "0.9", default-features = false, features = ["vendored-openssl"] }
+ssh2 = { version = "0.9", default-features = false, features = ["vendored-openssl", "openssl-on-win32"] }
 
 # Terminal emulation
 alacritty_terminal = "0.25"
