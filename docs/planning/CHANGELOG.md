@@ -65,7 +65,7 @@
 | 滚动条仅绘制，不支持拖拽 | S10 |
 | 双击选中单词 / 三击整行、URL 点击 | S10 |
 | 系统字体枚举（S4 遗留） | S10 |
-| `TabRegistry` 结构体仍为占位，实际 Tab 列表在 `MainWindow.tabs` | S7/S9 接入时再抽公共 Registry |
+| `TabRegistry` 结构体仍为占位，实际 Tab 列表在 `MainWindow.tabs`，且当前固定 `Entity<TerminalView>` | S7/S9 接入时泛化为多类型 Tab |
 
 ---
 

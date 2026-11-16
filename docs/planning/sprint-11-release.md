@@ -1,6 +1,6 @@
 # Sprint 11 — v1.0 打磨 & 发布
 
-> **状态**：—
+> **状态**：待开始（前置 S10）
 > **前置**：[Sprint 10](./sprint-10-stability.md) 全量 Smoke Test 通过（Perl ✅ 已完成）
 > **目标**：Release 构建 + 安装包 + README + CHANGELOG + 完整回归 + 压力测试
 

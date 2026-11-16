@@ -15,11 +15,11 @@
 | **S4** | 设置 + 导入导出 | [sprint-04-settings-io.md](./sprint-04-settings-io.md) | ✅ 已完成（2026-11-14） | S3 |
 | **S5** | SSH 连接 & 终端核心 | [sprint-05-ssh-terminal.md](./sprint-05-ssh-terminal.md) | ✅ 已完成（2026-11-14） | S2 + S3 + S4 |
 | **S6** | 终端渲染 | [sprint-06-terminal-render.md](./sprint-06-terminal-render.md) | ✅ 已完成（2026-11-16） | S5 |
-| **S7** | SFTP 文件管理 | [sprint-07-sftp.md](./sprint-07-sftp.md) | ⏳ **下一个** | S5 |
-| **S8** | 路径同步 | [sprint-08-sync.md](./sprint-08-sync.md) | — | S6 + S7 |
-| **S9** | 远程性能监控 | [sprint-09-monitor.md](./sprint-09-monitor.md) | — | S5 |
-| **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | — | S6–S9 |
-| **S11** | v1.0 打磨 & 发布 | [sprint-11-release.md](./sprint-11-release.md) | — | S10 |
+| **S7** | SFTP 文件管理 | [sprint-07-sftp.md](./sprint-07-sftp.md) | ⏳ **下一个** | S5 + S6 ✅ |
+| **S8** | 路径同步 | [sprint-08-sync.md](./sprint-08-sync.md) | 待开始（等 S7） | S6 ✅ + S7 |
+| **S9** | 远程性能监控 | [sprint-09-monitor.md](./sprint-09-monitor.md) | 待开始（可与 S7 并行） | S5 + S6 ✅ |
+| **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | 待开始（等 S7–S9） | S6 ✅–S9 |
+| **S11** | v1.0 打磨 & 发布 | [sprint-11-release.md](./sprint-11-release.md) | 待开始（等 S10） | S10 |
 
 ---
 
@@ -84,6 +84,7 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 
 ## 变更记录
 
+- **2026-11-16** v3.4：S6 收尾——补 5.6 验收记录（vim/htop/多标签/回滚/复制粘贴），同步 roadmap / UI 原型 / S7–S11 交接说明（多类型 Tab 改造点、SyncBridge 挂载点、S6 遗留收口）
 - **2026-11-16** v3.3：S6 完成（Canvas 逐 Cell 渲染 / 光标 / 滚动 / 选择复制 / resize / 粘贴 / 主题调色板 / 标签页 / 字号缩放 / 状态栏）；S7 转为「下一个」
 - **2026-11-14** v3.2：S5 完成（SSH 连接 / 认证 / known_hosts / PTY / TerminalEngine / 重连）；S6 转为「下一个」；S5 落地说明与遗留写入 CHANGELOG
 - **2026-11-14** v3.1：S4 完成（设置 + 导入导出）；S5 转为「下一个」；把 S4 交付资产（Settings 默认值 / 终端外观 / 同步模式 / 监控阈值 / 事件）写入 S5–S10 的接入点与任务

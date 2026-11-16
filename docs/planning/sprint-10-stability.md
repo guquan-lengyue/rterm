@@ -1,7 +1,7 @@
 # Sprint 10 — 稳定性收尾
 
-> **状态**：待开始（前置 S6–S9 完成）
-> **前置**：[Sprint 6](./sprint-06-terminal-render.md) + [Sprint 7](./sprint-07-sftp.md) + [Sprint 8](./sprint-08-sync.md) + [Sprint 9](./sprint-09-monitor.md) 全部（Perl ✅ 已完成）
+> **状态**：待开始（S6 ✅ 已完成；前置 S7–S9）
+> **前置**：[Sprint 6](./sprint-06-terminal-render.md) ✅ + [Sprint 7](./sprint-07-sftp.md) + [Sprint 8](./sprint-08-sync.md) + [Sprint 9](./sprint-09-monitor.md) 全部（Perl ✅ 已完成）
 > **目标**：known_hosts 持久化 + 错误映射 + 命令面板 + 全局快捷键 + 日志 + 备份 + 全量 smoke test
 >
 > **S3/S4 遗留（本 Sprint 收口）**：
@@ -10,6 +10,11 @@
 > - 删除会话无二次确认（S3 遗留）→ 9.15
 > - `terminal_log_dir` / `data_dir` 仅存储未接线（S4 遗留）→ 9.16
 > - SessionStore 退出保存（S3）与 Settings 保存时原子写盘（S4）已完成 → 9.10 只需回归验证
+>
+> **S6 遗留（本 Sprint 收口）**：
+> - 主题切换 / 高 DPI 鼠标 E2E 未覆盖 → 9.12.1 全量回归
+> - 光标方块对比度、滚动条拖拽、双击选词 / 三击整行 → 9.17
+> - 多类型 Tab（S7/S9 接入后）回归 → 9.12.1
 
 ---
 
@@ -32,11 +37,12 @@
 | 9.14 | 0.25h | `crates/rterm-app/src/views/settings.rs` | 字体选择改为枚举系统字体（DirectWrite / gpui 字体列表），保留现有 4 个预设作为 fallback | 能选到系统已装字体 |
 | 9.15 | 0.25h | `crates/rterm-app/src/views/main_window.rs` + `session_tree.rs` | 删除会话二次确认 Modal（S3 遗留）；删除后 emit SessionDeleted 并刷新树 | 点删除 → 确认 → 才真删 |
 | 9.16 | 0.25h | `crates/rterm-app/src/main.rs` + `state.rs` | `Settings.data_dir` 接线：sessions.json / settings.json / 备份统一到自定义目录；`terminal_log_dir` 供 9.5 使用 | 改数据目录 → 重启后新路径生效 |
+| 9.17 | 0.5h | `crates/rterm-app/src/views/terminal.rs` | 终端交互打磨（S6 遗留）：方块光标改用反色/半透明提升对比度；滚动条支持鼠标拖拽；双击选中单词 / 三击选中整行 | 光标在任意配色下可辨认；滚动条可拖；双击选词 |
 
 ### 9.12 全量 Smoke Test
 
 | # | 粒度 | 验收 |
 |---|------|------|
-| 9.12.1 | 1h | 逐个重跑：Sprint 3 会话管理端到端 + Sprint 4 设置持久化/导入导出 + Sprint 5 SSH+终端核心 + Sprint 6 终端渲染 + Sprint 7 SFTP + Sprint 8 路径同步 + Sprint 9 监控 |
+| 9.12.1 | 1h | 逐个重跑：Sprint 3 会话管理端到端 + Sprint 4 设置持久化/导入导出 + Sprint 5 SSH+终端核心 + Sprint 6 终端渲染（含 vim/htop、Shift+PageUp、选择复制、切主题、字号缩放、高 DPI）+ Sprint 7 SFTP + Sprint 8 路径同步 + Sprint 9 监控；多类型 Tab 共存回归 |
 
 **✅ 全部 Smoke Test 通过 → 进入 Sprint 11 Release 打磨**

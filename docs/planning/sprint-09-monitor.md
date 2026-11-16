@@ -34,6 +34,7 @@
 | 8.2.1 | 0.5h | `crates/rterm-app/src/views/monitor.rs` | 6 个卡片（CPU/MEM/SWAP/DISK/NET/LOAD）+ Canvas 折线图（60 点 + 2px 线 + 网格） | 折线实时跳动 |
 | 8.2.2 | 0.25h | `crates/rterm-app/src/views/monitor.rs` | 暂停 / 恢复 / 重置按钮 | 能暂停采集 |
 | 8.2.3 | 0.5h | `crates/rterm-app/src/views/monitor.rs` | Top 进程表 + 列头排序 + 右键 Kill / Force Kill（二次确认弹窗） | Kill PID 生效 |
+| 8.2.4 | 0.25h | `crates/rterm-app/src/views/main_window.rs` | Monitor Tab 接线（复用 S6 TabBar）：`TabKind::Monitor` + `open_monitor_tab`，`MainWindow.tabs` 泛化为多类型 | 打开 Monitor Tab 与终端 Tab 共存 |
 
 ### 8.3 验收
 

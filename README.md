@@ -47,8 +47,10 @@ docs/
 │   ├── architecture.md         ← 分层架构 + crate 职责 + 数据流 + 数据模型
 │   └── decisions.md            ← 10 条 ADR 技术决策记录
 └── planning/                   ← WHEN — 交付节奏
+    ├── README.md               ← 当前 Sprint 状态总览 + 依赖图（开工先看这里）
     ├── roadmap.md              ← Phase 0–7 里程碑 + 风险缓解
-    └── sprints.md              ← Sprint 1–10 详细任务 + Demo 验收
+    ├── sprint-01…11-*.md       ← 每个 Sprint 的详细任务 + 验收
+    └── CHANGELOG.md            ← Sprint 完成总结
 ```
 
 ---

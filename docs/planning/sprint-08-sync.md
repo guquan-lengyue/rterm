@@ -32,8 +32,8 @@
 
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
-| 7.2.1 | 0.5h | `crates/rterm-app/src/main.rs` | 每次 TerminalView 喂完 PTY 字节 → `sync_bridge.on_terminal_output(bytes)` → 若 Some(cwd) → broadcast `SftpNavigated` | 终端 cd /var/log → SFTP 自动跳 |
-| 7.2.2 | 0.5h | `crates/rterm-app/src/main.rs` | 每次 SFTP 用户导航 → broadcast `UserRequestedCwd { path }` → sync_bridge.on_sftp_navigated → 组装命令 → PTY channel.write | SFTP 导航 → 终端自动 cd |
+| 7.2.1 | 0.5h | `crates/rterm-app/src/views/terminal.rs` + `main_window.rs` | `TerminalView::handle_pty_event` 喂完 PTY 字节 → `sync_bridge.on_terminal_output(bytes)` → 若 Some(cwd) → emit `TerminalCwdHint` / `SftpNavigated`；SyncBridge 按 `tab_id` 隔离（映射来自 `MainWindow.tabs`） | 终端 cd /var/log → SFTP 自动跳 |
+| 7.2.2 | 0.5h | `crates/rterm-app/src/views/main_window.rs` + SFTP View | SFTP 用户导航 → emit `UserRequestedCwd { tab_id, path }` → sync_bridge.on_sftp_navigated → 组装命令 → 对应 `TabEntry` 的 PTY `Write` | SFTP 导航 → 终端自动 cd |
 
 ### 7.3 验收
 

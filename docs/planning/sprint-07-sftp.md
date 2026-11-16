@@ -8,6 +8,7 @@
 > - `SshSession::session_clone()` 可用于在独立线程建立 `sftp()` 子系统
 > - `FileTransfer*` 事件已定义
 > - **Tab 入口已就绪（S6 5.4）**：`views/tab_bar.rs` + `MainWindow.tabs`（`TabEntry { id, session_id, view }`，`TabKind::Sftp` 已预留）；新增 Tab 直接复用 TabBar / Ctrl+T / Ctrl+W
+> - **S6 遗留的改造点**：`MainWindow.tabs` 当前固定 `Entity<TerminalView>`，接入 SFTP 前需泛化为 `TabContentView::{Terminal, Sftp, Monitor}`（或在 MainWindow 内按 `TabKind` 维护多张表）；`TabBar` / 快捷键无需改动
 >
 > **S4 已就绪的接入点**：
 > - `FileTransferStarted/Progress/Completed/Failed` 事件已在 `event.rs` 定义，本 Sprint 只需 emit
@@ -48,7 +49,7 @@
 
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
-| 6.4.1 | 0.25h | `crates/rterm-app/src/main.rs` | TabKind::Sftp + SessionTree 右键 "打开 SFTP" → 新建 SFTP Tab + 复用 SSH Session | 会话右键 → SFTP Tab 出现 |
+| 6.4.1 | 0.5h | `crates/rterm-app/src/views/main_window.rs` + `views/tab_bar.rs` | 扩展 `TabEntry.view` 为多类型（Terminal / Sftp / Monitor）；SessionTree 右键「打开 SFTP」→ `MainWindow::open_sftp_tab`（复用 TabBar / Ctrl+W）；TabKind::Sftp 图标 📁 | 会话右键 → SFTP Tab 出现，可与终端 Tab 共存 |
 
 ### 6.5 验收
 
