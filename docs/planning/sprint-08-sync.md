@@ -1,9 +1,13 @@
 # Sprint 8 — 路径同步
 
-> **状态**：⏳ **下一个**（S7 核心已交付，SftpNavigated 可直接订阅）
-> **前置**：[Sprint 6](./sprint-06-terminal-render.md)（Terminal PTY 输出 ✅）+ [Sprint 7](./sprint-07-sftp.md)（SFTP 导航；Perl ✅ 已完成）+ [Sprint 4](./sprint-04-settings-io.md)（`Settings.sftp_sync_mode` 已持久化）
+> **状态**：**待开始**（S7.5 技术债清偿完成后启动）
+> **前置**：[Sprint 6](./sprint-06-terminal-render.md)（Terminal PTY 输出 ✅）+ [Sprint 7](./sprint-07-sftp.md)（SFTP 导航；Perl ✅ 已完成）+ **[Sprint 7.5](./sprint-07.5-tech-debt.md)（技术债清偿；强制前置）** + [Sprint 4](./sprint-04-settings-io.md)（`Settings.sftp_sync_mode` 已持久化）
 > **目标**：SyncBridge + PS1 正则 + ignore 防回环
 > **定位**：rterm 独有杀手功能
+>
+> **S7.5 交接约束**：
+> - S7.5 会把 SFTP 导航改为后台异步执行，但必须保留 `SftpNavigated` 在“列表加载成功后 emit”的语义与顺序；S8 不感知线程模型变化
+> - S7.5 会修复 `StatusBarMessage` 消费、关闭 Tab 状态点、设置接线；S8 可直接复用这些修复，不重复实现
 >
 > **S5 已就绪的接入点**：
 > - `TerminalData { tab_id, session_id, bytes }` 已在每个 PTY chunk 实时 emit → SyncBridge 可直接订阅，无需改 TerminalView 的连接层

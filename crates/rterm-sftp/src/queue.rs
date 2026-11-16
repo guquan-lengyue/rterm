@@ -5,7 +5,7 @@ use futures::channel::mpsc::UnboundedSender;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -207,38 +207,42 @@ enum Command {
 /// 上传 / 下载队列。
 pub struct TransferQueue {
     tasks: Arc<Mutex<Vec<Arc<TransferTask>>>>,
-    tx: mpsc::Sender<Command>,
+    /// 每个 worker 一条独立通道，避免共享 receiver 导致的串行化。
+    worker_txs: Vec<mpsc::Sender<Command>>,
+    /// 轮询选择 worker 的计数器。
+    next_worker: AtomicUsize,
     events: UnboundedSender<TransferEvent>,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
 }
 
 impl TransferQueue {
-    /// 启动 `concurrency` 个 worker；每个 worker 顺序处理任务。
+    /// 启动 `concurrency` 个 worker；每个 worker 顺序处理自己通道上的任务。
     pub fn new(
         service: Arc<SftpService>,
         events: UnboundedSender<TransferEvent>,
         concurrency: usize,
     ) -> Self {
         let concurrency = concurrency.max(1);
-        let (tx, rx) = mpsc::channel::<Command>();
-        let rx = Arc::new(Mutex::new(rx));
         let tasks = Arc::new(Mutex::new(Vec::new()));
+        let mut worker_txs = Vec::with_capacity(concurrency);
         let mut workers = Vec::with_capacity(concurrency);
 
         for index in 0..concurrency {
             let service = service.clone();
-            let rx = rx.clone();
             let events = events.clone();
+            let (tx, rx) = mpsc::channel::<Command>();
             let handle = thread::Builder::new()
                 .name(format!("rterm-sftp-transfer-{index}"))
                 .spawn(move || worker_loop(service, rx, events))
                 .expect("无法启动 SFTP 传输线程");
+            worker_txs.push(tx);
             workers.push(handle);
         }
 
         Self {
             tasks,
-            tx,
+            worker_txs,
+            next_worker: AtomicUsize::new(0),
             events,
             workers: Mutex::new(workers),
         }
@@ -270,7 +274,9 @@ impl TransferQueue {
         let task = Arc::new(TransferTask::new(direction, remote_path, local_path, total));
         let id = task.id;
         self.tasks.lock().unwrap().push(task.clone());
-        let _ = self.tx.send(Command::Run(task));
+        // 轮询分发到各 worker，使多个任务能真正并行。
+        let index = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.worker_txs.len();
+        let _ = self.worker_txs[index].send(Command::Run(task));
         id
     }
 
@@ -313,7 +319,7 @@ impl TransferQueue {
         }
     }
 
-    /// 关闭队列：取消所有任务并通知 worker 退出。
+    /// 关闭队列：取消所有任务、通知 worker 退出并等待线程结束。
     pub fn shutdown(&self) {
         {
             let tasks = self.tasks.lock().unwrap();
@@ -321,9 +327,25 @@ impl TransferQueue {
                 task.cancel.store(true, Ordering::SeqCst);
             }
         }
-        let workers = self.workers.lock().unwrap();
-        for _ in 0..workers.len() {
-            let _ = self.tx.send(Command::Shutdown);
+        for tx in &self.worker_txs {
+            let _ = tx.send(Command::Shutdown);
+        }
+        // 不在调用线程（UI）里 join：后台线程可能正卡在 libssh2 网络读写，
+        // 同步 join 会冻结界面。交给一个短生命周期的回收线程等待退出。
+        let handles = {
+            let mut workers = self.workers.lock().unwrap();
+            std::mem::take(&mut *workers)
+        };
+        if !handles.is_empty() {
+            let _ = std::thread::Builder::new()
+                .name("rterm-sftp-reaper".into())
+                .spawn(move || {
+                    for handle in handles {
+                        if let Err(error) = handle.join() {
+                            log::warn!("[sftp] transfer worker join failed: {error:?}");
+                        }
+                    }
+                });
         }
     }
 
@@ -339,15 +361,11 @@ impl TransferQueue {
 
 fn worker_loop(
     service: Arc<SftpService>,
-    rx: Arc<Mutex<mpsc::Receiver<Command>>>,
+    rx: mpsc::Receiver<Command>,
     events: UnboundedSender<TransferEvent>,
 ) {
     loop {
-        let command = {
-            let guard = rx.lock().unwrap();
-            guard.recv()
-        };
-        let Ok(command) = command else {
+        let Ok(command) = rx.recv() else {
             return;
         };
         match command {
@@ -403,6 +421,8 @@ fn run_task(service: &SftpService, task: &Arc<TransferTask>, events: &UnboundedS
                     let reason = err.to_string();
                     *task.error.lock().unwrap() = Some(reason.clone());
                     task.set_state(TransferState::Failed);
+                    // 失败时只清理临时文件，不动目标路径上的已有文件。
+                    cleanup_partial(service, task);
                     let _ = events.unbounded_send(TransferEvent::Failed {
                         id: task.id,
                         reason,
@@ -451,10 +471,11 @@ fn transfer_once(
 
     match task.direction {
         TransferDirection::Upload => {
+            let target = PathBuf::from(&task.remote_path);
+            let part = upload_part_path(&task.remote_path, task.id);
             let mut local = File::open(&task.local_path)?;
-            let mut remote = service
-                .sftp()
-                .create(Path::new(&task.remote_path))?;
+            // 每次尝试都从临时文件重新开始（create 会截断上次残留的临时文件）。
+            let mut remote = service.sftp().create(Path::new(&part))?;
             loop {
                 if !wait_if_paused(task) {
                     return Ok(Outcome::Cancelled);
@@ -471,6 +492,9 @@ fn transfer_once(
                 maybe_emit_progress(task, events, transferred, &mut last_emit);
             }
             remote.flush()?;
+            drop(remote);
+            // 完整写入临时文件后才改名到目标路径。
+            finalize_upload(service, Path::new(&part), &target)?;
             let _ = events.unbounded_send(TransferEvent::Progress {
                 id: task.id,
                 transferred: task.transferred.load(Ordering::Relaxed),
@@ -479,11 +503,13 @@ fn transfer_once(
             Ok(Outcome::Completed)
         }
         TransferDirection::Download => {
+            let target = task.local_path.clone();
+            let part = download_part_path(&target, task.id);
             let mut remote = service.sftp().open(Path::new(&task.remote_path))?;
-            if let Some(parent) = task.local_path.parent() {
+            if let Some(parent) = part.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let mut local = File::create(&task.local_path)?;
+            let mut local = File::create(&part)?;
             loop {
                 if !wait_if_paused(task) {
                     return Ok(Outcome::Cancelled);
@@ -500,6 +526,9 @@ fn transfer_once(
                 maybe_emit_progress(task, events, transferred, &mut last_emit);
             }
             local.flush()?;
+            drop(local);
+            // 完整写入临时文件后才改名到目标路径。
+            finalize_download(&part, &target)?;
             let _ = events.unbounded_send(TransferEvent::Progress {
                 id: task.id,
                 transferred: task.transferred.load(Ordering::Relaxed),
@@ -526,13 +555,70 @@ fn maybe_emit_progress(
     }
 }
 
+/// 下载临时文件路径：`${target}.rterm-part-${task_id}`。
+pub fn download_part_path(target: &Path, id: Uuid) -> PathBuf {
+    let mut path = target.as_os_str().to_os_string();
+    path.push(format!(".rterm-part-{id}"));
+    PathBuf::from(path)
+}
+
+/// 上传临时文件路径：`${target}.rterm-part-${task_id}`。
+pub fn upload_part_path(target: &str, id: Uuid) -> String {
+    format!("{target}.rterm-part-{id}")
+}
+
+/// 下载完成后把临时文件改名为目标文件。
+///
+/// 只在完整下载成功后调用；失败时不触碰目标路径上已有的文件。
+/// Windows 的 rename 不覆盖已有目标，因此在完整下载成功后才删除旧目标再重试。
+fn finalize_download(part: &Path, target: &Path) -> std::io::Result<()> {
+    match std::fs::rename(part, target) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            if target.exists() {
+                std::fs::remove_file(target)?;
+                std::fs::rename(part, target)
+            } else {
+                Err(first)
+            }
+        }
+    }
+}
+
+/// 上传完成后把远端临时文件改名为目标文件。
+///
+/// 若目标已存在导致 rename 失败，在完整传输成功后 unlink 目标再重试一次。
+fn finalize_upload(service: &SftpService, part: &Path, target: &Path) -> anyhow::Result<()> {
+    match service.sftp().rename(part, target, None) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            if service.sftp().stat(target).is_ok() {
+                service
+                    .sftp()
+                    .unlink(target)
+                    .map_err(|error| anyhow::anyhow!("覆盖远端目标失败: {error}"))?;
+                service
+                    .sftp()
+                    .rename(part, target, None)
+                    .map_err(|error| anyhow::anyhow!("重命名失败: {error}"))?;
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("重命名失败: {first}"))
+            }
+        }
+    }
+}
+
+/// 只清理临时文件，绝不触碰目标路径上可能已存在的文件。
 fn cleanup_partial(service: &SftpService, task: &Arc<TransferTask>) {
     match task.direction {
         TransferDirection::Download => {
-            let _ = std::fs::remove_file(&task.local_path);
+            let part = download_part_path(&task.local_path, task.id);
+            let _ = std::fs::remove_file(&part);
         }
         TransferDirection::Upload => {
-            let _ = service.sftp().unlink(Path::new(&task.remote_path));
+            let part = upload_part_path(&task.remote_path, task.id);
+            let _ = service.sftp().unlink(Path::new(&part));
         }
     }
 }
@@ -596,5 +682,24 @@ mod tests {
     fn direction_labels() {
         assert_eq!(TransferDirection::Upload.label(), "上传");
         assert_eq!(TransferDirection::Download.label(), "下载");
+    }
+
+    #[test]
+    fn download_part_path_appends_suffix() {
+        let id = Uuid::nil();
+        let part = download_part_path(Path::new("C:\\Users\\me\\a.txt"), id);
+        assert_eq!(
+            part.to_string_lossy(),
+            format!("C:\\Users\\me\\a.txt.rterm-part-{id}")
+        );
+    }
+
+    #[test]
+    fn upload_part_path_appends_suffix() {
+        let id = Uuid::nil();
+        assert_eq!(
+            upload_part_path("/home/me/a.txt", id),
+            format!("/home/me/a.txt.rterm-part-{id}")
+        );
     }
 }

@@ -8,10 +8,10 @@
 
 use std::io::{Read, Write};
 use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use futures::channel::mpsc::UnboundedSender;
+use futures::channel::mpsc::Sender;
 
 use crate::keepalive::KeepAliveTimer;
 use crate::known_hosts::HostKeyInfo;
@@ -35,6 +35,42 @@ pub enum PtyEvent {
     Failed { reason: String, retryable: bool },
 }
 
+/// 向 UI 发送事件；队列满时阻塞重试（背压），不丢弃事件。
+///
+/// 返回 `false` 表示接收端已关闭，调用方应退出 IO 循环。
+pub fn send_event(output: &mut Sender<PtyEvent>, event: PtyEvent) -> bool {
+    let mut event = event;
+    loop {
+        match output.try_send(event) {
+            Ok(()) => return true,
+            Err(error) if error.is_full() => {
+                // 队列满：保留事件，等待 UI 消费后重试，避免丢弃 Data 破坏终端状态
+                event = error.into_inner();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => {
+                let _ = error.into_inner();
+                log::warn!("[pty] PTY 事件通道已关闭，接收端不存在");
+                return false;
+            }
+        }
+    }
+}
+
+/// 空闲轮询间隔：活跃时保持 8ms，连续空闲约 1s 后逐步拉长到 50ms。
+fn idle_poll_interval(idle_for: Duration) -> Duration {
+    const ACTIVE_INTERVAL: Duration = Duration::from_millis(8);
+    if idle_for < Duration::from_millis(1000) {
+        ACTIVE_INTERVAL
+    } else if idle_for < Duration::from_millis(2000) {
+        Duration::from_millis(16)
+    } else if idle_for < Duration::from_millis(4000) {
+        Duration::from_millis(32)
+    } else {
+        Duration::from_millis(50)
+    }
+}
+
 /// 请求 PTY 并启动远程 shell；调用后 Session 进入 non-blocking 模式。
 pub fn open_pty(session: &ssh2::Session, cols: u32, rows: u32) -> Result<ssh2::Channel> {
     let mut channel = session.channel_session().context("创建 SSH channel 失败")?;
@@ -56,25 +92,36 @@ pub fn run_io(
     session: ssh2::Session,
     keepalive_secs: u32,
     commands: Receiver<PtyCommand>,
-    output: UnboundedSender<PtyEvent>,
+    mut output: Sender<PtyEvent>,
 ) {
     let mut keepalive = KeepAliveTimer::new(keepalive_secs);
     let mut pending_write: Vec<u8> = Vec::new();
     let mut pending_resize: Option<(u32, u32)> = None;
     let mut buf = [0u8; 8192];
+    // 最近一次有输入 / 输出 / 命令活动的时间，用于空闲自适应退避
+    let mut last_activity = Instant::now();
 
     loop {
         // 1. 处理 UI 命令
         loop {
             match commands.try_recv() {
-                Ok(PtyCommand::Write(bytes)) => pending_write.extend_from_slice(&bytes),
-                Ok(PtyCommand::Resize { cols, rows }) => pending_resize = Some((cols, rows)),
+                Ok(PtyCommand::Write(bytes)) => {
+                    pending_write.extend_from_slice(&bytes);
+                    last_activity = Instant::now();
+                }
+                Ok(PtyCommand::Resize { cols, rows }) => {
+                    pending_resize = Some((cols, rows));
+                    last_activity = Instant::now();
+                }
                 Ok(PtyCommand::Close) => {
                     let _ = channel.send_eof();
                     let _ = channel.close();
-                    let _ = output.unbounded_send(PtyEvent::Closed {
-                        reason: "会话已关闭".into(),
-                    });
+                    let _ = send_event(
+                        &mut output,
+                        PtyEvent::Closed {
+                            reason: "会话已关闭".into(),
+                        },
+                    );
                     return;
                 }
                 Err(TryRecvError::Empty) => break,
@@ -89,8 +136,14 @@ pub fn run_io(
         // 2. 处理 resize
         if let Some((cols, rows)) = pending_resize {
             match channel.request_pty_size(cols, rows, None, None) {
-                Ok(()) => pending_resize = None,
-                Err(e) if is_ssh_eagain(&e) => {}
+                Ok(()) => {
+                    pending_resize = None;
+                    last_activity = Instant::now();
+                }
+                Err(e) if is_ssh_eagain(&e) => {
+                    // 远端暂不可写：保留待重试的 resize，保持快速轮询
+                    last_activity = Instant::now();
+                }
                 Err(e) => {
                     log::warn!("[pty] resize 失败: {e}");
                     pending_resize = None;
@@ -105,12 +158,19 @@ pub fn run_io(
                 Ok(n) => {
                     pending_write.drain(..n);
                     let _ = channel.flush();
+                    last_activity = Instant::now();
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // 远端写缓冲满：仍有待发送输入，保持快速轮询
+                    last_activity = Instant::now();
+                }
                 Err(e) => {
-                    let _ = output.unbounded_send(PtyEvent::Closed {
-                        reason: format!("写入失败: {e}"),
-                    });
+                    let _ = send_event(
+                        &mut output,
+                        PtyEvent::Closed {
+                            reason: format!("写入失败: {e}"),
+                        },
+                    );
                     return;
                 }
             }
@@ -130,32 +190,38 @@ pub fn run_io(
         match channel.read(&mut buf) {
             Ok(0) => {
                 if channel.eof() {
-                    let _ = output.unbounded_send(PtyEvent::Closed {
-                        reason: "远程 shell 已退出".into(),
-                    });
+                    let _ = send_event(
+                        &mut output,
+                        PtyEvent::Closed {
+                            reason: "远程 shell 已退出".into(),
+                        },
+                    );
                     return;
                 }
             }
             Ok(n) => {
-                if output
-                    .unbounded_send(PtyEvent::Data(buf[..n].to_vec()))
-                    .is_err()
-                {
+                // 队列满时阻塞等待 UI 消费，保证输出不丢块
+                if !send_event(&mut output, PtyEvent::Data(buf[..n].to_vec())) {
                     let _ = channel.send_eof();
                     let _ = channel.close();
                     return;
                 }
+                last_activity = Instant::now();
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(e) => {
-                let _ = output.unbounded_send(PtyEvent::Closed {
-                    reason: format!("读取失败: {e}"),
-                });
+                let _ = send_event(
+                    &mut output,
+                    PtyEvent::Closed {
+                        reason: format!("读取失败: {e}"),
+                    },
+                );
                 return;
             }
         }
 
-        std::thread::sleep(Duration::from_millis(8));
+        // 6. 自适应等待：活跃 8ms；空闲约 1s 后逐步退避到 50ms
+        std::thread::sleep(idle_poll_interval(last_activity.elapsed()));
     }
 }
 

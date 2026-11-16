@@ -150,3 +150,42 @@ fn atomic_write_leaves_no_tmp() {
     assert!(!tmp.exists(), "tmp 文件应被 rename 掉");
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------- 7.5.1.3 单条会话解密失败容错 ----------
+
+#[test]
+fn load_lossy_keeps_undecryptable_session() {
+    let path = tmp_path("load_lossy");
+    let mut store = SessionStore::new();
+    let bad = Session::new("bad", "1.1.1.1", "x");
+    let good = Session::new("good", "2.2.2.2", "x");
+    let bad_id = bad.id;
+    let good_id = good.id;
+    store.upsert(bad);
+    store.upsert(good);
+
+    // save 时不加密，模拟磁盘上的两条明文会话
+    store.save(&path, |s| Ok(s.clone())).expect("save");
+
+    // 解密闭包对 bad 返回 Err，good 正常
+    let (loaded, issues) = SessionStore::load_lossy(&path, |s| {
+        if s.id == bad_id {
+            Err(anyhow::anyhow!("模拟单条解密失败"))
+        } else {
+            Ok(s.clone())
+        }
+    })
+    .expect("load_lossy 不应整体失败");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].id, bad_id);
+    assert_eq!(issues[0].name, "bad");
+
+    // 失败条目仍保留在 store 中，正常条目照常解密
+    assert_eq!(loaded.count(), 2);
+    assert!(loaded.get(bad_id).is_some());
+    let got = loaded.get(good_id).expect("good 应存在");
+    assert_eq!(got.name, "good");
+
+    let _ = std::fs::remove_file(&path);
+}

@@ -7,7 +7,7 @@
 //! - 每个 SFTP Tab 独立 SSH 连接（不占用终端 Tab 的 PTY 会话）
 
 use std::path::{Path as StdPath, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use futures::channel::mpsc::unbounded;
 use futures::StreamExt;
@@ -111,6 +111,19 @@ enum SftpStatus {
     Failed,
 }
 
+/// 后台连接结果：SSH + SFTP 子系统 + 远端 home 目录一次性完成。
+struct ConnectedSftp {
+    service: SftpService,
+    home: String,
+}
+
+/// 后台远端目录读取结果。
+struct RemoteNavResult {
+    generation: u64,
+    path: String,
+    result: Result<Vec<FileEntry>, String>,
+}
+
 // ---------------------------------------------------------------------------
 // SftpView
 // ---------------------------------------------------------------------------
@@ -134,6 +147,8 @@ pub struct SftpView {
     dialog: Option<DialogState>,
     last_click: Option<(PaneSide, usize, Instant)>,
     generation: u64,
+    /// 远端导航代际：只应用最新一次 listdir 的结果。
+    remote_nav_generation: u64,
 }
 
 impl SftpView {
@@ -187,6 +202,7 @@ impl SftpView {
             dialog: None,
             last_click: None,
             generation: 0,
+            remote_nav_generation: 0,
         }
     }
 
@@ -233,25 +249,38 @@ impl SftpView {
         self.status = SftpStatus::Connecting;
         self.status_text = format!("连接 {}…", session.display_label());
         self.generation = self.generation.wrapping_add(1);
+        // 失效所有在途的远端导航结果。
+        self.remote_nav_generation = self.remote_nav_generation.wrapping_add(1);
         let generation = self.generation;
 
-        let (tx, mut rx) = unbounded::<Result<SftpService, String>>();
-        std::thread::Builder::new()
+        // SSH 连接、SFTP 子系统与 home 解析全部在后台线程完成，避免阻塞 UI。
+        let (tx, mut rx) = unbounded::<Result<ConnectedSftp, String>>();
+        let spawned = std::thread::Builder::new()
             .name("rterm-sftp-connect".into())
             .spawn(move || {
-                let mut ssh = SshSession::new();
-                let result = ssh
-                    .connect(&session)
-                    .map_err(|error| format!("{error:#}"))
-                    .and_then(|_| {
-                        let raw = ssh
-                            .session_clone()
-                            .ok_or_else(|| "SSH 会话不可用".to_string())?;
-                        SftpService::new(raw).map_err(|error| format!("{error:#}"))
-                    });
+                let result = (|| -> Result<ConnectedSftp, String> {
+                    let mut ssh = SshSession::new();
+                    ssh.connect(&session).map_err(|error| format!("{error:#}"))?;
+                    let raw = ssh
+                        .session_clone()
+                        .ok_or_else(|| "SSH 会话不可用".to_string())?;
+                    let service =
+                        SftpService::new(raw).map_err(|error| format!("{error:#}"))?;
+                    let home = match service.home_dir() {
+                        Ok(home) => home,
+                        Err(error) => {
+                            log::warn!("[sftp] 解析远端 home 失败，回退到 /: {error:#}");
+                            "/".to_string()
+                        }
+                    };
+                    Ok(ConnectedSftp { service, home })
+                })();
                 let _ = tx.unbounded_send(result);
-            })
-            .ok();
+            });
+        if let Err(error) = spawned {
+            self.fail(format!("无法启动 SFTP 连接线程: {error}"), cx);
+            return;
+        }
 
         cx.spawn(async move |this, cx| {
             if let Some(result) = rx.next().await {
@@ -268,8 +297,12 @@ impl SftpView {
     /// 关闭 Tab 时调用。
     pub fn shutdown(&mut self, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
+        self.remote_nav_generation = self.remote_nav_generation.wrapping_add(1);
         if let Some(queue) = self.queue.take() {
+            // shutdown 会 join worker；worker 退出后 events sender 全部释放，
+            // 转发任务随之结束，不会形成 Arc 循环。
             queue.shutdown();
+            drop(queue);
         }
         self.service = None;
         self.status = SftpStatus::Failed;
@@ -282,30 +315,30 @@ impl SftpView {
     fn handle_connected(
         &mut self,
         generation: u64,
-        result: Result<SftpService, String>,
+        result: Result<ConnectedSftp, String>,
         cx: &mut Context<Self>,
     ) {
         if generation != self.generation {
             return;
         }
         match result {
-            Ok(service) => {
+            Ok(ConnectedSftp { service, home }) => {
                 let service = std::sync::Arc::new(service);
-                let home = service.home_dir().unwrap_or_else(|_| "/".to_string());
                 self.status = SftpStatus::Connected;
                 self.status_text = format!("已连接 · {home}");
                 self.service = Some(service.clone());
 
                 let (events_tx, mut events_rx) = unbounded::<TransferEvent>();
                 let queue = std::sync::Arc::new(TransferQueue::new(service.clone(), events_tx, 2));
-                self.queue = Some(queue.clone());
+                self.queue = Some(queue);
 
                 let generation = self.generation;
+                // 只捕获 events_rx：队列由 SftpView 持有，关闭 Tab 后 sender 释放、任务退出。
                 cx.spawn(async move |this, cx| {
                     while let Some(event) = events_rx.next().await {
                         let alive = this
                             .update(cx, |this, cx| {
-                                this.handle_transfer_event(generation, event, &queue, cx)
+                                this.handle_transfer_event(generation, event, cx)
                             })
                             .is_ok();
                         if !alive {
@@ -315,6 +348,7 @@ impl SftpView {
                 })
                 .detach();
 
+                // 首屏目录读取同样走后台导航。
                 self.navigate(PaneSide::Remote, home, cx);
                 if let Some(session_id) = self.session_id {
                     self.emit(
@@ -384,30 +418,34 @@ impl SftpView {
                 return;
             };
             let path = normalize_remote(&raw_path, &self.remote.path);
-            match service.listdir(&path) {
-                Ok(mut rows) => {
-                    sort_entries(&mut rows, self.sort_key, self.sort_ascending);
-                    self.remote.rows = rows;
-                    self.remote.path = path.clone();
-                    self.remote.selected = None;
-                    self.remote.scroll = 0;
-                    self.remote.error = None;
-                    self.set_address(PaneSide::Remote, &path, cx);
-                    if let Some(session_id) = self.session_id {
-                        self.emit(
-                            cx,
-                            AppEvent::SftpNavigated {
-                                tab_id: self.tab_id,
-                                session_id,
-                                path,
-                            },
-                        );
-                    }
-                }
-                Err(error) => {
-                    self.remote.error = Some(format!("{error:#}"));
-                }
+            // 远端 listdir 走后台线程，仅应用最新一次导航结果。
+            self.remote_nav_generation = self.remote_nav_generation.wrapping_add(1);
+            let nav_generation = self.remote_nav_generation;
+            let (tx, mut rx) = unbounded::<RemoteNavResult>();
+            let spawned = std::thread::Builder::new()
+                .name("rterm-sftp-nav".into())
+                .spawn(move || {
+                    let result = service
+                        .listdir(&path)
+                        .map_err(|error| format!("{error:#}"));
+                    let _ = tx.unbounded_send(RemoteNavResult {
+                        generation: nav_generation,
+                        path,
+                        result,
+                    });
+                });
+            if let Err(error) = spawned {
+                self.remote.error = Some(format!("无法启动目录读取线程: {error}"));
+                self.menu = None;
+                cx.notify();
+                return;
             }
+            cx.spawn(async move |this, cx| {
+                if let Some(nav) = rx.next().await {
+                    let _ = this.update(cx, |this, cx| this.apply_remote_nav(nav, cx));
+                }
+            })
+            .detach();
         } else {
             let path = normalize_local(&raw_path, &self.local.path);
             match list_local(&path) {
@@ -429,12 +467,89 @@ impl SftpView {
         cx.notify();
     }
 
+    /// 应用后台 listdir 结果；过期导航（或已断开）直接丢弃。
+    fn apply_remote_nav(&mut self, nav: RemoteNavResult, cx: &mut Context<Self>) {
+        if nav.generation != self.remote_nav_generation || self.service.is_none() {
+            return;
+        }
+        match nav.result {
+            Ok(mut rows) => {
+                sort_entries(&mut rows, self.sort_key, self.sort_ascending);
+                self.remote.rows = rows;
+                self.remote.path = nav.path.clone();
+                self.remote.selected = None;
+                self.remote.scroll = 0;
+                self.remote.error = None;
+                self.set_address(PaneSide::Remote, &nav.path, cx);
+                if let Some(session_id) = self.session_id {
+                    self.emit(
+                        cx,
+                        AppEvent::SftpNavigated {
+                            tab_id: self.tab_id,
+                            session_id,
+                            path: nav.path,
+                        },
+                    );
+                }
+            }
+            Err(error) => {
+                self.remote.error = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
     fn set_address(&mut self, side: PaneSide, path: &str, cx: &mut Context<Self>) {
         let address = self.pane(side).address.clone();
         let path = path.to_string();
         address.update(cx, |input, cx| {
             input.set_content(path, cx);
         });
+    }
+
+    /// 在后台线程执行远端变更操作，完成后回到 UI 线程提示并异步刷新当前远端目录。
+    fn run_remote_mutation(
+        &mut self,
+        success_message: String,
+        failure_prefix: &'static str,
+        cx: &mut Context<Self>,
+        op: impl FnOnce(&SftpService) -> anyhow::Result<()> + Send + 'static,
+    ) {
+        let Some(service) = self.service.clone() else {
+            self.set_status("远端未连接".into(), cx);
+            return;
+        };
+        let generation = self.generation;
+        let (tx, mut rx) = unbounded::<Result<(), String>>();
+        let spawned = std::thread::Builder::new()
+            .name("rterm-sftp-op".into())
+            .spawn(move || {
+                let result = op(&service).map_err(|error| format!("{error:#}"));
+                let _ = tx.unbounded_send(result);
+            });
+        if let Err(error) = spawned {
+            self.set_status(
+                format!("{failure_prefix}: 无法启动后台任务 ({error})"),
+                cx,
+            );
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            if let Some(result) = rx.next().await {
+                let _ = this.update(cx, |this, cx| {
+                    if generation != this.generation {
+                        return;
+                    }
+                    match result {
+                        Ok(()) => this.set_status(success_message, cx),
+                        Err(error) => this.set_status(format!("{failure_prefix}: {error}"), cx),
+                    }
+                    let current = this.remote.path.clone();
+                    this.navigate(PaneSide::Remote, current, cx);
+                });
+            }
+        })
+        .detach();
     }
 
     fn refresh_both(&mut self, cx: &mut Context<Self>) {
@@ -665,50 +780,44 @@ impl SftpView {
         match dialog.kind {
             DialogKind::Mkdir(side) => {
                 if side.is_remote() {
-                    if let Some(service) = self.service.clone() {
-                        let path = remote_join(&self.remote.path, &value);
-                        match service.mkdir(&path) {
-                            Ok(()) => self.set_status(format!("已创建目录 {value}"), cx),
-                            Err(error) => self.set_status(format!("创建失败: {error:#}"), cx),
-                        }
-                    }
+                    let path = remote_join(&self.remote.path, &value);
+                    let message = format!("已创建目录 {value}");
+                    self.run_remote_mutation(message, "创建失败", cx, move |service| {
+                        service.mkdir(&path)
+                    });
                 } else {
                     let path = PathBuf::from(&self.local.path).join(&value);
                     match std::fs::create_dir(&path) {
                         Ok(()) => self.set_status(format!("已创建目录 {value}"), cx),
                         Err(error) => self.set_status(format!("创建失败: {error}"), cx),
                     }
+                    let current = self.pane(side).path.clone();
+                    self.navigate(side, current, cx);
                 }
-                let current = self.pane(side).path.clone();
-                self.navigate(side, current, cx);
             }
             DialogKind::Rename(side, index) => {
                 let Some(entry) = self.pane(side).rows.get(index).cloned() else {
                     return;
                 };
-                let new_path = if side.is_remote() {
-                    remote_join(&self.remote.path, &value)
+                if side.is_remote() {
+                    let new_path = remote_join(&self.remote.path, &value);
+                    let old_path = entry.path.clone();
+                    let message = format!("已重命名为 {value}");
+                    self.run_remote_mutation(message, "重命名失败", cx, move |service| {
+                        service.rename(&old_path, &new_path)
+                    });
                 } else {
-                    PathBuf::from(&self.local.path)
+                    let new_path = PathBuf::from(&self.local.path)
                         .join(&value)
                         .to_string_lossy()
-                        .into_owned()
-                };
-                let result = if side.is_remote() {
-                    self.service
-                        .clone()
-                        .map(|service| service.rename(&entry.path, &new_path))
-                        .unwrap_or_else(|| Err(anyhow::anyhow!("远端未连接")))
-                } else {
-                    std::fs::rename(&entry.path, &new_path)
-                        .map_err(|error| anyhow::anyhow!(error))
-                };
-                match result {
-                    Ok(()) => self.set_status(format!("已重命名为 {value}"), cx),
-                    Err(error) => self.set_status(format!("重命名失败: {error:#}"), cx),
+                        .into_owned();
+                    match std::fs::rename(&entry.path, &new_path) {
+                        Ok(()) => self.set_status(format!("已重命名为 {value}"), cx),
+                        Err(error) => self.set_status(format!("重命名失败: {error}"), cx),
+                    }
+                    let current = self.pane(side).path.clone();
+                    self.navigate(side, current, cx);
                 }
-                let current = self.pane(side).path.clone();
-                self.navigate(side, current, cx);
             }
             DialogKind::Chmod(side, index) => {
                 let Some(entry) = self.pane(side).rows.get(index).cloned() else {
@@ -719,17 +828,12 @@ impl SftpView {
                     self.set_status("非法权限值（示例：644 / 755）".into(), cx);
                     return;
                 }
-                if let Some(service) = self.service.clone() {
-                    match service.chmod(&entry.path, mode) {
-                        Ok(()) => self.set_status(
-                            format!("{} 权限已改为 {mode:o}", entry.name),
-                            cx,
-                        ),
-                        Err(error) => self.set_status(format!("修改权限失败: {error:#}"), cx),
-                    }
-                }
-                let current = self.pane(side).path.clone();
-                self.navigate(side, current, cx);
+                let path = entry.path.clone();
+                let name = entry.name.clone();
+                let message = format!("{name} 权限已改为 {mode:o}");
+                self.run_remote_mutation(message, "修改权限失败", cx, move |service| {
+                    service.chmod(&path, mode)
+                });
             }
         }
         cx.notify();
@@ -739,33 +843,36 @@ impl SftpView {
         let Some(entry) = self.pane(side).rows.get(index).cloned() else {
             return;
         };
-        let result = if side.is_remote() {
-            match self.service.clone() {
-                Some(service) => {
-                    if entry.is_dir {
-                        match service.is_dir_empty(&entry.path) {
-                            Ok(true) => service.remove_dir(&entry.path),
-                            Ok(false) => Err(anyhow::anyhow!("目录非空，拒绝删除")),
-                            Err(error) => Err(error),
-                        }
-                    } else {
-                        service.remove_file(&entry.path)
+        if side.is_remote() {
+            let path = entry.path.clone();
+            let name = entry.name.clone();
+            let is_dir = entry.is_dir;
+            let message = format!("已删除 {name}");
+            self.run_remote_mutation(message, "删除失败", cx, move |service| {
+                // 判空与删除放在同一个后台任务里，避免 UI 线程两次网络往返。
+                if is_dir {
+                    if !service.is_dir_empty(&path)? {
+                        return Err(anyhow::anyhow!("目录非空，拒绝删除"));
                     }
+                    service.remove_dir(&path)
+                } else {
+                    service.remove_file(&path)
                 }
-                None => Err(anyhow::anyhow!("远端未连接")),
-            }
-        } else if entry.is_dir {
-            std::fs::remove_dir(&entry.path).map_err(|error| anyhow::anyhow!(error))
+            });
         } else {
-            std::fs::remove_file(&entry.path).map_err(|error| anyhow::anyhow!(error))
-        };
-
-        match result {
-            Ok(()) => self.set_status(format!("已删除 {}", entry.name), cx),
-            Err(error) => self.set_status(format!("删除失败: {error:#}"), cx),
+            let result = if entry.is_dir {
+                std::fs::remove_dir(&entry.path).map_err(|error| anyhow::anyhow!(error))
+            } else {
+                std::fs::remove_file(&entry.path).map_err(|error| anyhow::anyhow!(error))
+            };
+            match result {
+                Ok(()) => self.set_status(format!("已删除 {}", entry.name), cx),
+                Err(error) => self.set_status(format!("删除失败: {error:#}"), cx),
+            }
+            let current = self.pane(side).path.clone();
+            self.navigate(side, current, cx);
         }
-        let current = self.pane(side).path.clone();
-        self.navigate(side, current, cx);
+        cx.notify();
     }
 
     fn show_properties(&mut self, side: PaneSide, index: usize, cx: &mut Context<Self>) {
@@ -798,7 +905,6 @@ impl SftpView {
         &mut self,
         generation: u64,
         event: TransferEvent,
-        queue: &std::sync::Arc<TransferQueue>,
         cx: &mut Context<Self>,
     ) {
         if generation != self.generation {
@@ -861,7 +967,9 @@ impl SftpView {
                 self.status_text = "传输已恢复".to_string();
             }
         }
-        self.transfers = queue.snapshots();
+        if let Some(queue) = self.queue.as_ref() {
+            self.transfers = queue.snapshots();
+        }
         cx.notify();
     }
 

@@ -158,24 +158,50 @@ impl SessionStore {
     where
         F: FnMut(&Session) -> Result<Session>,
     {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("读会话文件失败: {}", path.display()))?;
-
-        let wrapper: SessionFile = serde_json::from_str(&raw)
-            .with_context(|| format!("解析会话 JSON 失败: {}", path.display()))?;
-
-        // 版本迁移：旧版本直接兼容，新版本才 bail。
-        if wrapper.version > FILE_VERSION {
-            anyhow::bail!(
-                "会话文件版本 {} 高于当前支持的 {}，可能来自新版本 rterm",
-                wrapper.version, FILE_VERSION
-            );
-        }
-
-        let decrypted: Result<Vec<_>> = wrapper.sessions.iter().map(|s| decrypt_fn(s)).collect();
+        let wrapper = read_session_file(path)?;
+        let decrypted: Result<Vec<_>> = wrapper.sessions.iter().map(&mut decrypt_fn).collect();
         let sessions = decrypted.context("解密会话失败 — 密码或密钥可能不匹配")?;
 
         Ok(Self { sessions, dirty: false })
+    }
+
+    /// 容错加载：逐条解密，单条失败只记录 `LoadIssue`，不整体失败。
+    ///
+    /// 解密失败的条目保留磁盘上的原始内容（仍是 version=1 密文），
+    /// 因此后续 save 时不会被重复加密，也不会丢数据。
+    pub fn load_lossy<F>(path: &Path, mut decrypt_fn: F) -> Result<(Self, Vec<LoadIssue>)>
+    where
+        F: FnMut(&Session) -> Result<Session>,
+    {
+        if !path.exists() {
+            log::info!("会话文件不存在，返回空 store: {}", path.display());
+            return Ok((Self::new(), Vec::new()));
+        }
+
+        let wrapper = read_session_file(path)?;
+
+        let mut sessions = Vec::with_capacity(wrapper.sessions.len());
+        let mut issues = Vec::new();
+        for original in wrapper.sessions {
+            match decrypt_fn(&original) {
+                Ok(decrypted) => sessions.push(decrypted),
+                Err(e) => {
+                    log::error!(
+                        "会话 {}（{}）解密失败，保留原密文: {e:#}",
+                        original.name,
+                        original.id
+                    );
+                    issues.push(LoadIssue {
+                        id: original.id,
+                        name: original.name.clone(),
+                        error: format!("{e:#}"),
+                    });
+                    sessions.push(original);
+                }
+            }
+        }
+
+        Ok((Self { sessions, dirty: false }, issues))
     }
 
     /// save + load 往返验证（测试用）。
@@ -201,6 +227,14 @@ pub enum UpsertResult {
     Updated,
 }
 
+/// 单条会话解密失败的记录（`load_lossy` 用）。
+#[derive(Debug, Clone)]
+pub struct LoadIssue {
+    pub id: Uuid,
+    pub name: String,
+    pub error: String,
+}
+
 const FILE_VERSION: u32 = 1;
 
 /// 磁盘 JSON 包装格式。
@@ -209,6 +243,25 @@ struct SessionFile {
     version: u32,
     saved_at: chrono::DateTime<Utc>,
     sessions: Vec<Session>,
+}
+
+/// 读文件 + 解析 + 版本检查（load / load_lossy 共用）。
+fn read_session_file(path: &Path) -> Result<SessionFile> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("读会话文件失败: {}", path.display()))?;
+
+    let wrapper: SessionFile = serde_json::from_str(&raw)
+        .with_context(|| format!("解析会话 JSON 失败: {}", path.display()))?;
+
+    // 版本迁移：旧版本直接兼容，新版本才 bail。
+    if wrapper.version > FILE_VERSION {
+        anyhow::bail!(
+            "会话文件版本 {} 高于当前支持的 {}，可能来自新版本 rterm",
+            wrapper.version, FILE_VERSION
+        );
+    }
+
+    Ok(wrapper)
 }
 
 // ============================================================================

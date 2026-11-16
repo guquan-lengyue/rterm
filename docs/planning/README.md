@@ -16,9 +16,10 @@
 | **S5** | SSH 连接 & 终端核心 | [sprint-05-ssh-terminal.md](./sprint-05-ssh-terminal.md) | ✅ 已完成（2026-11-14） | S2 + S3 + S4 |
 | **S6** | 终端渲染 | [sprint-06-terminal-render.md](./sprint-06-terminal-render.md) | ✅ 已完成（2026-11-16） | S5 |
 | **S7** | SFTP 文件管理 | [sprint-07-sftp.md](./sprint-07-sftp.md) | 🚧 核心完成（2026-11-16） | S5 + S6 ✅ |
-| **S8** | 路径同步 | [sprint-08-sync.md](./sprint-08-sync.md) | ⏳ **下一个**（S7 核心已交付） | S6 ✅ + S7 🚧 |
+| **S7.5** | 技术债清偿（S8 前插入） | [sprint-07.5-tech-debt.md](./sprint-07.5-tech-debt.md) | 🚧 进行中（P0/P1 已完成） | S7 🚧 |
+| **S8** | 路径同步 | [sprint-08-sync.md](./sprint-08-sync.md) | 待开始（S7.5 后） | S6 ✅ + S7 🚧 + S7.5 |
 | **S9** | 远程性能监控 | [sprint-09-monitor.md](./sprint-09-monitor.md) | 待开始（可与 S8 并行） | S5 + S6 ✅ |
-| **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | 待开始（等 S7–S9） | S6 ✅–S9 |
+| **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | 待开始（等 S7.5–S9） | S6 ✅–S9 |
 | **S11** | v1.0 打磨 & 发布 | [sprint-11-release.md](./sprint-11-release.md) | 待开始（等 S10） | S10 |
 
 ---
@@ -33,21 +34,27 @@ S1 ✅ 基础设施 ────┐
                    │
 S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 ══▶ S4 ✅ 设置 + 导入导出
                    │
-                   └──▶ S5 ✅ SSH核心 ────┬──▶ S6 ✅ 终端渲染 ──▶ S8 路径同步（下一个）
-                                         ├──▶ S7 🚧 SFTP（核心完成）
-                                         └──▶ S9 远程监控
-                         │
-                         ▼
-                   S10 稳定性收尾 ──▶ S11 v1.0 发布
+                   └──▶ S5 ✅ SSH核心 ────┬──▶ S6 ✅ 终端渲染 ──▶ S7 🚧 SFTP
+                                         │                         │
+                                         │                         ▼
+                                         │                 S7.5 技术债清偿（下一个）
+                                         │                         │
+                                         │                         ▼
+                                         │                 S8 路径同步
+                                         │
+                                         └──▶ S9 远程监控（可与 S8 并行）
+
+                         S10 稳定性收尾 ──▶ S11 v1.0 发布
 ```
 
-**关键路径**：S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → S8 → S10 → S11
+**关键路径**：S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → **S7.5** → S8 → S10 → S11
 
 **可并行**：
 - S6（终端渲染）与 S7（SFTP 核心）已完成，TabBar / 多类型 Tab 可直接被 S8 / S9 复用
 - S9 可立即开始（与 S8 并行）
-- S8 依赖 S6 ✅ + S7 ✅（SftpNavigated 已就绪），可作为下一个 Sprint
-- S10 等 S7 收尾 / S8 / S9 都好
+- **S7.5 是 S8 的强制前置**：先清偿数据安全 / 线程生命周期 / 状态一致性债，再进入路径同步
+- S8 依赖 S6 ✅ + S7 ✅（SftpNavigated 已就绪）+ S7.5（SFTP 导航改为异步后事件语义保持不变）
+- S10 等 S7.5 收尾 / S8 / S9 都好
 
 ---
 
@@ -73,7 +80,7 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 
 | 我想…… | 去这里 |
 |--------|--------|
-| **开始写代码** | ⏳ **[sprint-08-sync.md](./sprint-08-sync.md)** |
+| **开始写代码** | **[sprint-07.5-tech-debt.md](./sprint-07.5-tech-debt.md)**（S8 前必做） |
 | 看 Sprint 完成总结 | [CHANGELOG.md](./CHANGELOG.md)（S1–S7 已记录） |
 | 看里程碑概览 + 风险缓解 | [roadmap.md](./roadmap.md) |
 | 看 UI 原型线框图 | `docs/architecture/ui-prototypes.md` |
@@ -84,6 +91,8 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 
 ## 变更记录
 
+- **2026-11-16** v3.7：S7.5 P0 数据可靠性 + P1 线程/资源已落地（workspace 66 passed / 1 ignored）；P2/P3 待续
+- **2026-11-16** v3.6：插入 **S7.5 技术债清偿**（里程碑走查产出；S8 前强制执行）；S8 状态改为待开始，依赖追加 S7.5；当前入口切到 S7.5
 - **2026-11-16** v3.5：S7 核心完成（SftpService / TransferQueue / 双栏 View / 多类型 Tab / 会话右键打开 SFTP）；拖拽与暂停取消 E2E 转入 S10
 - **2026-11-16** v3.4：S6 收尾——补 5.6 验收记录（vim/htop/多标签/回滚/复制粘贴），同步 roadmap / UI 原型 / S7–S11 交接说明（多类型 Tab 改造点、SyncBridge 挂载点、S6 遗留收口）
 - **2026-11-16** v3.3：S6 完成（Canvas 逐 Cell 渲染 / 光标 / 滚动 / 选择复制 / resize / 粘贴 / 主题调色板 / 标签页 / 字号缩放 / 状态栏）；S7 转为「下一个」

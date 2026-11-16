@@ -180,6 +180,7 @@ docs/                                ← 你在这里
     ├── sprint-05-ssh-terminal.md
     ├── sprint-06-terminal-render.md
     ├── sprint-07-sftp.md
+    ├── sprint-07.5-tech-debt.md      ← S8 前技术债清偿（强制）
     ├── sprint-08-sync.md
     ├── sprint-09-monitor.md
     ├── sprint-10-stability.md

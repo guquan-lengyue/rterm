@@ -305,6 +305,13 @@ impl ImportExportDialog {
                         store.upsert(s);
                     }
                 }
+
+                // 合并写回后立即落盘，失败只记日志（不阻断导入结果展示）。
+                let session_store = cx.global::<AppState>().session_store.clone();
+                if let Err(e) = crate::state::persist_sessions(&session_store) {
+                    log::error!("导入后保存会话失败: {e:#}");
+                }
+
                 self.emit(
                     cx,
                     AppEvent::SessionImported {

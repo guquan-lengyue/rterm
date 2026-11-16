@@ -1,20 +1,26 @@
 # Sprint 10 — 稳定性收尾
 
-> **状态**：待开始（S6 ✅ 已完成；前置 S7–S9）
-> **前置**：[Sprint 6](./sprint-06-terminal-render.md) ✅ + [Sprint 7](./sprint-07-sftp.md) + [Sprint 8](./sprint-08-sync.md) + [Sprint 9](./sprint-09-monitor.md) 全部（Perl ✅ 已完成）
-> **目标**：known_hosts 持久化 + 错误映射 + 命令面板 + 全局快捷键 + 日志 + 备份 + 全量 smoke test
+> **状态**：待开始（S6 ✅ 已完成；前置 S7–S9 + S7.5）
+> **前置**：[Sprint 6](./sprint-06-terminal-render.md) ✅ + [Sprint 7](./sprint-07-sftp.md) + [Sprint 7.5](./sprint-07.5-tech-debt.md) + [Sprint 8](./sprint-08-sync.md) + [Sprint 9](./sprint-09-monitor.md) 全部（Perl ✅ 已完成）
+> **目标**：known_hosts 回归 + 错误映射 + 命令面板 + 全局快捷键 + 日志 + 备份 + 全量 smoke test
 >
 > **S3/S4 遗留（本 Sprint 收口）**：
 > - 设置选择列表 / 导入预览超过上限无滚动（S4 遗留）→ 9.13
 > - 终端字体仅 4 个预设，未枚举系统字体（S4 遗留）→ 9.14
-> - 删除会话无二次确认（S3 遗留）→ 9.15
-> - `terminal_log_dir` / `data_dir` 仅存储未接线（S4 遗留）→ 9.16
+> - 删除会话无二次确认 → 已由 S7.5 7.5.3.10 交付；9.15 改为回归 + 边界补漏
+> - `data_dir` 接线 → 已由 S7.5 7.5.3.3 交付；9.16 只补 `terminal_log_dir` 接线
 > - SessionStore 退出保存（S3）与 Settings 保存时原子写盘（S4）已完成 → 9.10 只需回归验证
 >
 > **S6 遗留（本 Sprint 收口）**：
 > - 主题切换 / 高 DPI 鼠标 E2E 未覆盖 → 9.12.1 全量回归
 > - 光标方块对比度、滚动条拖拽、双击选词 / 三击整行 → 9.17
 > - 多类型 Tab（S7/S9 接入后）回归 → 9.12.1
+>
+> **S7.5 已提前收口（本 Sprint 只回归）**：
+> - 会话 CRUD 即时落盘、损坏文件保护、单条解密容错、DPAPI 用户级、单实例锁 → 9.10 回归
+> - 已知/变更主机密钥三选一 Modal → 9.1 回归
+> - 删除/覆盖二次确认 → 9.15 回归
+> - `data_dir` 接线 → 9.16 回归
 >
 > **S7 遗留（本 Sprint 收口）**：
 > - 拖拽上传/下载、暂停/继续/取消 GUI E2E、空白区右键菜单 → 9.18
@@ -27,21 +33,21 @@
 
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
-| 9.1 | 0.5h | `crates/rterm-ssh/src/known_hosts.rs` + `views/main_window.rs` | S5 已完成 TOFU 记录 / 变更检测；本任务补首次连接三选一 Modal（仅本次 / 保存 / 拒绝）与变更告警 UX | 首次连接弹窗；拒绝后不写 known_hosts |
+| 9.1 | 0.25h | `crates/rterm-ssh/src/known_hosts.rs` + `views/main_window.rs` | 已由 S7.5 7.5.4.1 交付首次连接三选一 Modal 与变更告警；本任务只回归 + 补错误文案边界 | 首次连接弹窗；拒绝后不写 known_hosts |
 | 9.2 | 0.5h | `crates/rterm-ssh/src/errors.rs` | ssh2 error_code → 用户友好文案 map（auth_failed, timeout, host_key_changed, network_error）| 错误弹窗显示中文 |
 | 9.3 | 1h | `crates/rterm-app/src/views/command_palette.rs` | Ctrl+P 命令面板：fuzzy-find 会话 + 设置入口 + 操作；↑/↓ 导航 Enter 执行 | 能搜 "db" 找到 db-prod |
 | 9.4 | 0.5h | `crates/rterm-app/src/main.rs` | 全局快捷键：Ctrl+, 设置 / Ctrl+Shift+N 新会话 / F11 全屏 | 6 个快捷键生效 |
 | 9.5 | 0.5h | `crates/rterm-terminal/src/engine.rs` | 会话日志：per-tab 开关；目录优先 `Settings.terminal_log_dir`，空则 `%APPDATA%\rterm\logs\`；可选时间戳前缀 | log 文件有内容；自定义目录生效 |
 | 9.6 | 0.25h | `crates/rterm-terminal/src/engine.rs` | OSC 52 远程剪贴板支持 | 远程 tmux copy 能到本地剪贴板 |
 | 9.7 | 0.25h | `crates/rterm-terminal/src/engine.rs` | vi 模式（alacritty_terminal 自带 ViMode 包装 + 入口）| Toggle 后 vi 导航可用 |
-| 9.8 | 0.25h | `crates/rterm-session/src/openssh.rs` | Include 递归 2 层 + Match 语法 | 复杂 config 能解析 |
+| 9.8 | 0.25h | `crates/rterm-session/src/openssh.rs` | S7.5 7.5.3.12 已修基础解析（顶层 Include / 多模式 Host / ProxyJump 端口 / Match 跳过）；本任务补 Include 递归 2 层 + Match 条件匹配 | 复杂 config 能解析 |
 | 9.9 | 0.25h | `crates/rterm-session/src/backup.rs` | 24h 自动备份 + 保留 7 份轮转 | 手动触发能生成 backup 文件 |
-| 9.10 | 0.25h | `crates/rterm-app/src/main.rs` | ✅ 已由 S3（SessionStore 退出保存）+ S4（Settings 保存时原子写盘）落地；本任务只做回归：退出 → 重启 → sessions/settings 都保留 | 退出后 JSON mtime 更新 |
+| 9.10 | 0.25h | `crates/rterm-app/src/main.rs` | S7.5 7.5.1.1 已改为 CRUD 即时落盘 + 退出兜底；本任务回归：新建/编辑/删除后强杀 → 重启数据在；正常退出 → sessions/settings 都保留 | 强杀与正常退出两种路径数据一致 |
 | 9.11 | 0.25h | `crates/rterm-app/src/main.rs` | 帮助 → 导出诊断包（logs + 版本 + 会话数 + OS）→ zip 导出 | 能生成 diag.zip |
 | 9.13 | 0.5h | `crates/rterm-app/src/views/settings.rs` + `import_export.rs` | 自绘滚动容器（gpui 0.3 无原生滚动）：鼠标滚轮 + 可视区裁剪 + 滚动条；用于 S4 的选择会话列表 / 导入预览列表 | 24+ 条会话能滚动选择；预览 12+ 条能滚动 |
 | 9.14 | 0.25h | `crates/rterm-app/src/views/settings.rs` | 字体选择改为枚举系统字体（DirectWrite / gpui 字体列表），保留现有 4 个预设作为 fallback | 能选到系统已装字体 |
-| 9.15 | 0.25h | `crates/rterm-app/src/views/main_window.rs` + `session_tree.rs` | 删除会话二次确认 Modal（S3 遗留）；删除后 emit SessionDeleted 并刷新树 | 点删除 → 确认 → 才真删 |
-| 9.16 | 0.25h | `crates/rterm-app/src/main.rs` + `state.rs` | `Settings.data_dir` 接线：sessions.json / settings.json / 备份统一到自定义目录；`terminal_log_dir` 供 9.5 使用 | 改数据目录 → 重启后新路径生效 |
+| 9.15 | 0.15h | `crates/rterm-app/src/views/main_window.rs` + `session_tree.rs` | 已由 S7.5 7.5.3.10 交付删除二次确认；本任务只回归：删除后 emit SessionDeleted 并刷新树 | 点删除 → 确认 → 才真删 |
+| 9.16 | 0.15h | `crates/rterm-app/src/main.rs` + `state.rs` | `data_dir` 已由 S7.5 7.5.3.3 接线；本任务只补 `terminal_log_dir` 供 9.5 使用，并回归自定义数据目录 | 改数据目录 → 重启后新路径生效 |
 | 9.17 | 0.5h | `crates/rterm-app/src/views/terminal.rs` | 终端交互打磨（S6 遗留）：方块光标改用反色/半透明提升对比度；滚动条支持鼠标拖拽；双击选中单词 / 三击选中整行 | 光标在任意配色下可辨认；滚动条可拖；双击选词 |
 | 9.18 | 1h | `crates/rterm-app/src/views/sftp.rs` | SFTP 交互补全（S7 遗留）：Pane 间拖拽上传/下载；暂停/继续/取消 GUI E2E；空白区右键菜单；列表虚拟化（大目录不卡） | 拖拽可传输；暂停后进度停止；1000 项目录滚动流畅 |
 

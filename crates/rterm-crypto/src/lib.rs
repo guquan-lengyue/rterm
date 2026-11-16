@@ -15,9 +15,8 @@ use anyhow::{Context, Result};
 /// Windows DPAPI protect — 绑定当前登录用户 + 当前机器。
 #[cfg(target_os = "windows")]
 pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
-    use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPTPROTECT_LOCAL_MACHINE, CRYPT_INTEGER_BLOB,
-    };
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
 
     let input = CRYPT_INTEGER_BLOB {
         cbData: plaintext.len() as u32,
@@ -32,7 +31,7 @@ pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
             None,  // entropy
             None,  // reserved
             None,  // prompt
-            CRYPTPROTECT_LOCAL_MACHINE,
+            0,     // 用户级作用域（不带 CRYPTPROTECT_LOCAL_MACHINE）
             &mut output,
         )
         .context("CryptProtectData failed")?;
@@ -41,13 +40,19 @@ pub fn dpapi_encrypt(plaintext: &[u8]) -> Result<Vec<u8>> {
     let result = unsafe {
         std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
     };
-    // output 由 CryptProtectData CoTaskMemAlloc，泄漏一点点内存无害
+    // DPAPI 用 LocalAlloc 分配输出缓冲区，复制后立即用 LocalFree 释放。
+    unsafe {
+        if !output.pbData.is_null() {
+            let _ = LocalFree(HLOCAL(output.pbData as *mut core::ffi::c_void));
+        }
+    }
     Ok(result)
 }
 
 /// Windows DPAPI unprotect。
 #[cfg(target_os = "windows")]
 pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<Vec<u8>> {
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Cryptography::{
         CryptUnprotectData, CRYPT_INTEGER_BLOB,
     };
@@ -74,9 +79,12 @@ pub fn dpapi_decrypt(ciphertext: &[u8]) -> Result<Vec<u8>> {
     let result = unsafe {
         std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
     };
-    // NOTE: CoTaskMemFree intentionally skipped — output.pbData was CoTaskMemAlloc'd
-    // by CryptUnprotectData. We leak a few hundred bytes per decrypt call (startup/save
-    // only) which is acceptable for a desktop app. Fix later if needed.
+    // 输出缓冲区由 LocalAlloc 分配，复制后用 LocalFree 释放，避免内存泄漏。
+    unsafe {
+        if !output.pbData.is_null() {
+            let _ = LocalFree(HLOCAL(output.pbData as *mut core::ffi::c_void));
+        }
+    }
     Ok(result)
 }
 

@@ -21,7 +21,6 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor};
-use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::StreamExt;
 use gpui::prelude::*;
 use gpui::{
@@ -43,6 +42,9 @@ use crate::theme::TerminalPalette;
 use crate::ui::theme as ui_theme;
 
 use super::{CONTENT_BORDER_W, SIDEBAR_W, STATUS_BAR_H, TAB_BAR_H, TERMINAL_HEADER_H, TOOLBAR_H};
+
+/// PTY 输出有界队列容量：队列满时后台线程阻塞等待 UI 消费（背压）。
+const PTY_OUTPUT_QUEUE_CAPACITY: usize = 256;
 
 // ---------------------------------------------------------------------------
 // 状态
@@ -100,6 +102,8 @@ struct Snapshot {
     line_h: f32,
     font_size: f32,
     font_family: String,
+    /// 已解析的主字体，避免 paint 时再次 resolve_font
+    font_id: FontId,
     scroll_offset: usize,
     scroll_total: usize,
 }
@@ -135,6 +139,8 @@ pub struct TerminalView {
     font_size: f32,
     cell_w: f32,
     line_height: f32,
+    /// 当前字体家族解析出的 FontId 缓存，避免每帧 `resolve_font`
+    font_id: Option<FontId>,
     cursor_style: CursorStyle,
     palette: TerminalPalette,
     glyph_cache: GlyphCache,
@@ -220,6 +226,7 @@ impl TerminalView {
             font_size,
             cell_w: font_size * 0.6,
             line_height: font_size * 1.35,
+            font_id: None,
             cursor_style,
             palette: crate::theme::terminal_palette(&theme_name),
             glyph_cache: Rc::new(RefCell::new(HashMap::new())),
@@ -265,6 +272,7 @@ impl TerminalView {
         if self.font_family != font_family || (self.font_size - font_size).abs() > f32::EPSILON {
             self.font_family = font_family;
             self.font_size = font_size;
+            self.font_id = None;
             self.glyph_cache.borrow_mut().clear();
         }
         self.cursor_style = cursor_style;
@@ -344,7 +352,9 @@ impl TerminalView {
         self.engine =
             TerminalEngine::new(self.cols as usize, self.rows as usize, self.scrollback);
 
-        let (output_tx, output_rx) = unbounded::<PtyEvent>();
+        // 有界队列：UI 消费不及时时后台线程阻塞等待，避免 `cat 50MB` 撑爆内存
+        let (output_tx, mut output_rx) =
+            futures::channel::mpsc::channel::<PtyEvent>(PTY_OUTPUT_QUEUE_CAPACITY);
         let (input_tx, input_rx) = std::sync::mpsc::channel::<PtyCommand>();
         self.input_tx = Some(input_tx);
 
@@ -359,7 +369,6 @@ impl TerminalView {
             return;
         }
 
-        let mut output_rx = output_rx;
         cx.spawn(async move |this, cx| {
             while let Some(event) = output_rx.next().await {
                 if this
@@ -540,7 +549,15 @@ impl TerminalView {
 
     fn measure_font(&mut self, window: &Window) -> FontId {
         let text_system = window.text_system();
-        let font_id = text_system.resolve_font(&font(self.font_family.clone()));
+        // FontId 只随字体家族变化，缓存后避免每帧 resolve_font
+        let font_id = match self.font_id {
+            Some(font_id) => font_id,
+            None => {
+                let font_id = text_system.resolve_font(&font(self.font_family.clone()));
+                self.font_id = Some(font_id);
+                font_id
+            }
+        };
         let cell_w = text_system
             .advance(font_id, px(self.font_size), 'M')
             .map(|advance| f32::from(advance.width))
@@ -551,7 +568,9 @@ impl TerminalView {
     }
 
     /// 窗口尺寸变化 → 重算 cols/rows → Engine + PTY 同步。
-    fn sync_grid_size(&mut self, window: &Window, cx: &mut Context<Self>) {
+    ///
+    /// 仅在 render 期间调用；不 emit / notify，避免事件订阅者重入。
+    fn sync_grid_size(&mut self, window: &Window) {
         let viewport = window.viewport_size();
         let available_w = (f32::from(viewport.width) - SIDEBAR_W - CONTENT_BORDER_W).max(1.0);
         let available_h = (f32::from(viewport.height)
@@ -579,16 +598,6 @@ impl TerminalView {
                 cols: cols as u32,
                 rows: rows as u32,
             });
-        }
-        if self.session_id.is_some() {
-            self.emit(
-                cx,
-                AppEvent::TerminalResize {
-                    tab_id: self.tab_id,
-                    cols: cols as u16,
-                    rows: rows as u16,
-                },
-            );
         }
     }
 
@@ -933,7 +942,7 @@ impl TerminalView {
         }
     }
 
-    fn build_snapshot(&self) -> Snapshot {
+    fn build_snapshot(&self, font_id: FontId) -> Snapshot {
         let grid = self.engine.grid();
         let display_offset = grid.display_offset() as i32;
         let cols = self.cols as usize;
@@ -994,6 +1003,7 @@ impl TerminalView {
             line_h: self.line_height,
             font_size: self.font_size,
             font_family: self.font_family.clone(),
+            font_id,
             scroll_offset: self.engine.display_offset(),
             scroll_total: self.scrollback + rows,
         }
@@ -1097,7 +1107,7 @@ fn paint_snapshot(
     // 4. 字形
     let text_system = window.text_system().clone();
     let primary_font = font(SharedString::from(snapshot.font_family.clone()));
-    let primary_font_id = text_system.resolve_font(&primary_font);
+    let primary_font_id = snapshot.font_id;
     let ascent = f32::from(text_system.ascent(primary_font_id, font_size));
     let descent = f32::from(text_system.descent(primary_font_id, font_size));
     let baseline_padding = ((f32::from(line_h) - ascent - descent) / 2.0).max(0.0);
@@ -1268,9 +1278,9 @@ impl Render for TerminalView {
             self.autofocus_pending = false;
         }
 
-        // 字体度量 → 窗口尺寸 → cols/rows
-        self.measure_font(window);
-        self.sync_grid_size(window, cx);
+        // 字体度量 → 窗口尺寸 → cols/rows（render 内只更新自身状态，不 emit/notify）
+        let font_id = self.measure_font(window);
+        self.sync_grid_size(window);
 
         let title = self
             .session
@@ -1332,7 +1342,7 @@ impl Render for TerminalView {
                     ),
             );
         } else {
-            let snapshot = self.build_snapshot();
+            let snapshot = self.build_snapshot(font_id);
             let metrics = self.metrics.clone();
             let cache = self.glyph_cache.clone();
 
@@ -1405,45 +1415,57 @@ fn run_connection(
     config: rterm_session::Session,
     cols: u16,
     rows: u16,
-    output: UnboundedSender<PtyEvent>,
+    mut output: futures::channel::mpsc::Sender<PtyEvent>,
     commands: Receiver<PtyCommand>,
 ) {
     let mut ssh = SshSession::new();
 
     if let Err(error) = ssh.connect(&config) {
         if let Some(info) = ssh.last_host_key() {
-            let _ = output.unbounded_send(PtyEvent::HostKey(info.clone()));
+            if !pty::send_event(&mut output, PtyEvent::HostKey(info.clone())) {
+                return;
+            }
         }
         let reason = format!("{error:#}");
         let retryable = connect_error_is_retryable(&reason);
-        let _ = output.unbounded_send(PtyEvent::Failed { reason, retryable });
+        let _ = pty::send_event(&mut output, PtyEvent::Failed { reason, retryable });
         return;
     }
 
     if let Some(info) = ssh.last_host_key() {
-        let _ = output.unbounded_send(PtyEvent::HostKey(info.clone()));
+        if !pty::send_event(&mut output, PtyEvent::HostKey(info.clone())) {
+            return;
+        }
     }
 
     let channel = match ssh.open_pty(cols as u32, rows as u32) {
         Ok(channel) => channel,
         Err(error) => {
-            let _ = output.unbounded_send(PtyEvent::Failed {
-                reason: format!("打开 PTY 失败: {error:#}"),
-                retryable: true,
-            });
+            let _ = pty::send_event(
+                &mut output,
+                PtyEvent::Failed {
+                    reason: format!("打开 PTY 失败: {error:#}"),
+                    retryable: true,
+                },
+            );
             return;
         }
     };
 
     let Some(session) = ssh.session_clone() else {
-        let _ = output.unbounded_send(PtyEvent::Failed {
-            reason: "SSH Session 丢失".into(),
-            retryable: false,
-        });
+        let _ = pty::send_event(
+            &mut output,
+            PtyEvent::Failed {
+                reason: "SSH Session 丢失".into(),
+                retryable: false,
+            },
+        );
         return;
     };
 
-    let _ = output.unbounded_send(PtyEvent::Connected);
+    if !pty::send_event(&mut output, PtyEvent::Connected) {
+        return;
+    }
     pty::run_io(channel, session, config.keepalive_secs, commands, output);
 }
 

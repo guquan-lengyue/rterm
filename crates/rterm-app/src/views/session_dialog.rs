@@ -138,7 +138,11 @@ impl SessionEditDialog {
                     (AuthType::Password, pw, String::new(), String::new())
                 }
                 rterm_session::AuthMethod::PrivateKey { path, passphrase } => {
-                    let pp = passphrase.as_ref().map(|_| String::new()).unwrap_or_default();
+                    // 已有口令 → 显示掩码占位；无口令则保持空
+                    let pp = match passphrase {
+                        Some(p) if !p.is_empty() => PASSWORD_SENTINEL.to_string(),
+                        _ => String::new(),
+                    };
                     (AuthType::PrivateKey, String::new(), path.to_string_lossy().into(), pp)
                 }
                 rterm_session::AuthMethod::Agent { .. } => {
@@ -216,7 +220,15 @@ impl SessionEditDialog {
             AuthType::PrivateKey => {
                 let path = std::path::PathBuf::from(self.key_path_input.read(cx).content.to_string());
                 let pp = self.passphrase_input.read(cx).content.to_string();
-                let passphrase = if pp.is_empty() {
+                let passphrase = if pp == PASSWORD_SENTINEL {
+                    // 口令框未被修改（仍是掩码占位）→ 原样保留旧口令
+                    match old.as_ref().map(|s| &s.auth) {
+                        Some(rterm_session::AuthMethod::PrivateKey { passphrase, .. }) => {
+                            passphrase.clone()
+                        }
+                        _ => None,
+                    }
+                } else if pp.is_empty() {
                     None
                 } else {
                     Some(rterm_session::EncryptedString::new(&pp))
@@ -253,6 +265,12 @@ impl SessionEditDialog {
             let state = cx.global_mut::<AppState>();
             let mut store = state.session_store.lock().unwrap();
             store.upsert(session);
+        }
+
+        // 写盘即时持久化：失败只记日志，不阻断后续 UI 流程。
+        let session_store = cx.global::<AppState>().session_store.clone();
+        if let Err(e) = crate::state::persist_sessions(&session_store) {
+            log::error!("会话保存到磁盘失败: {e:#}");
         }
 
         let host = cx.global::<AppState>().event_bus_host.clone();

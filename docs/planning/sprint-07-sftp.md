@@ -1,7 +1,8 @@
 # Sprint 7 — SFTP 文件管理
 
-> **状态**：🚧 **进行中**（核心已完成 2026-11-16；剩余拖拽上传/暂停取消 E2E）
+> **状态**：🚧 **核心完成**（2026-11-16）；技术债与收尾由 [Sprint 7.5](./sprint-07.5-tech-debt.md) 接手，拖拽上传/暂停取消 E2E 仍留 S10
 > **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH Session + sftp 子系统；Perl ✅ 已完成）
+> **后续**：[Sprint 7.5 — 技术债清偿](./sprint-07.5-tech-debt.md)（S8 前强制）
 > **目标**：SftpService + 双栏 View + 传输队列
 >
 > **S5 已就绪的接入点**：

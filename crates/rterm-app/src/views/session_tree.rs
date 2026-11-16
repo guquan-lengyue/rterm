@@ -84,26 +84,8 @@ pub struct SessionTreeView {
 }
 
 impl SessionTreeView {
-    pub fn new() -> Self {
-        Self {
-            expanded: HashSet::new(),
-            selected: None,
-            connection: HashMap::new(),
-        }
-    }
-
-    fn emit_event(&self, cx: &mut Context<Self>, ev: AppEvent) {
-        let host = cx.global::<AppState>().event_bus_host.clone();
-        cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
-            cx.emit(ev);
-        });
-    }
-}
-
-impl Render for SessionTreeView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
-
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        // 只在构造时订阅一次，避免 render 每次重绘泄漏订阅
         let host = cx.global::<AppState>().event_bus_host.clone();
         cx.subscribe(&host, |this: &mut Self, _host_entity, ev, cx| {
             match ev {
@@ -139,7 +121,27 @@ impl Render for SessionTreeView {
                 }
                 _ => {}
             }
-        }).detach();
+        })
+        .detach();
+
+        Self {
+            expanded: HashSet::new(),
+            selected: None,
+            connection: HashMap::new(),
+        }
+    }
+
+    fn emit_event(&self, cx: &mut Context<Self>, ev: AppEvent) {
+        let host = cx.global::<AppState>().event_bus_host.clone();
+        cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
+            cx.emit(ev);
+        });
+    }
+}
+
+impl Render for SessionTreeView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
 
         let state = cx.global::<AppState>();
         let sessions = state.session_store.lock().unwrap().list().to_vec();

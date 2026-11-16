@@ -89,6 +89,31 @@ pub fn settings_path() -> std::path::PathBuf {
     p
 }
 
+/// `%APPDATA%\rterm\sessions.json`。
+pub fn sessions_path() -> std::path::PathBuf {
+    let mut p = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    p.push("rterm");
+    p.push("sessions.json");
+    p
+}
+
+/// 立即把当前 SessionStore 写盘（DPAPI 加密），用于 CRUD 后即时持久化。
+///
+/// 调用方必须保证调用前已释放 store 的 MutexGuard，否则会死锁。
+pub fn persist_sessions(
+    store: &Arc<Mutex<rterm_session::SessionStore>>,
+) -> anyhow::Result<()> {
+    let mut guard = store
+        .lock()
+        .map_err(|e| anyhow::anyhow!("会话存储锁已损坏: {e}"))?;
+    guard
+        .save(
+            &sessions_path(),
+            rterm_session::crypto_bridge::encrypt_session_dpapi,
+        )
+        .map_err(|e| anyhow::anyhow!("保存会话失败: {e:#}"))
+}
+
 impl Settings {
     /// 加载设置。文件不存在 / 解析失败 → 返回默认值（不阻断启动）。
     pub fn load() -> Self {
@@ -186,6 +211,8 @@ pub struct AppState {
     pub tab_registry: TabRegistry,
     /// 当前主题（Arc<dyn Theme> 方便 clone 传递）
     pub theme: Arc<dyn Theme>,
+    /// 启动期加载会话时的错误提示（MainWindow 用红色横幅展示）。
+    pub startup_error: Option<String>,
 }
 
 // AppState 存 gpui::App::set_global，要求实现 Global
@@ -198,6 +225,7 @@ impl AppState {
         event_bus_host: Entity<EventBusHost>,
         session_store: Arc<Mutex<rterm_session::SessionStore>>,
         settings: Settings,
+        startup_error: Option<String>,
     ) -> Self {
         let theme = theme::theme_by_name(&settings.default_theme);
         Self {
@@ -206,6 +234,7 @@ impl AppState {
             session_store,
             tab_registry: TabRegistry::new(),
             theme,
+            startup_error,
         }
     }
 

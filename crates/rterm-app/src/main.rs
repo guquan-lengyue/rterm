@@ -6,6 +6,7 @@
 //   emit 必须通过 app.update_entity(&host, |_, cx| cx.emit(event))
 
 pub mod event;
+pub mod single_instance;
 pub mod state;
 pub mod theme;
 pub mod ui;
@@ -20,22 +21,23 @@ use views::main_window::MainWindow;
 
 use std::sync::{Arc, Mutex};
 
-// ---------- 启动路径 ----------
-fn sessions_path() -> std::path::PathBuf {
-    let mut p = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    p.push("rterm");
-    p.push("sessions.json");
-    p
-}
-
 // ---------- 入口 ----------
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("rterm-app starting (Sprint 7 — SFTP 文件管理)");
 
+    // 0. 单实例保护：已有实例在跑就直接退出。
+    //    guard 必须持有到 main 结束，否则互斥体会提前释放。
+    let _instance_guard = match single_instance::acquire() {
+        Some(guard) => guard,
+        None => {
+            log::warn!("已有 rterm 实例在运行，本次启动退出");
+            return;
+        }
+    };
+
     // 1. 启动加载 store + settings
-    let store = load_store();
-    let path = sessions_path();
+    let (store, startup_error, loaded_ok) = load_store();
     let settings = state::Settings::load();
 
     // 用 Arc<Mutex<>> 包装，AppState 和退出保存共享同一份。
@@ -57,6 +59,7 @@ fn main() {
             event_bus_host,
             shared_store_for_app,
             settings,
+            startup_error,
         );
         app.set_global(app_state);
 
@@ -123,42 +126,101 @@ fn main() {
     });
 
     // 3. 退出保存 —— 从共享 Arc 读，一定是最新状态
-    save_store(&path, &shared_store);
+    //    启动加载失败时绝不写盘，避免空库覆盖原文件。
+    if loaded_ok {
+        save_store(&shared_store);
+    } else {
+        log::warn!("启动加载失败，退出时不写 sessions.json，避免覆盖原文件");
+    }
 }
 
 // ---------- 辅助 ----------
 
-fn load_store() -> rterm_session::SessionStore {
-    let path = sessions_path();
+/// 启动加载会话。
+/// 返回 (store, 启动错误提示, 是否成功加载)。
+/// 加载失败返回空 store + 错误提示 + false；单条解密失败仍算成功（true）。
+fn load_store() -> (rterm_session::SessionStore, Option<String>, bool) {
+    let path = state::sessions_path();
     log::info!("Loading sessions from: {}", path.display());
 
-    let store = rterm_session::SessionStore::load(&path, |s| {
+    match rterm_session::SessionStore::load_lossy(&path, |s| {
         rterm_session::crypto_bridge::decrypt_session_dpapi(s)
-    })
-    .unwrap_or_else(|e| {
-        log::error!("加载会话失败（返回空 store）: {e:#}");
-        rterm_session::SessionStore::new()
-    });
-
-    log::info!("Loaded {} sessions", store.count());
-    store
+    }) {
+        Ok((store, issues)) => {
+            log::info!("Loaded {} sessions ({} issues)", store.count(), issues.len());
+            let startup_error = if issues.is_empty() {
+                None
+            } else {
+                Some(decrypt_issue_message(&issues))
+            };
+            (store, startup_error, true)
+        }
+        Err(e) => {
+            log::error!("加载会话失败（返回空 store）: {e:#}");
+            let backup = backup_corrupt_sessions(&path);
+            let msg = match backup {
+                Some(p) => format!("加载会话失败：{e:#}。原文件已备份到 {}", p.display()),
+                None => format!("加载会话失败：{e:#}"),
+            };
+            (rterm_session::SessionStore::new(), Some(msg), false)
+        }
+    }
 }
 
-fn save_store(
-    path: &std::path::Path,
-    shared: &Arc<Mutex<rterm_session::SessionStore>>,
-) {
-    let mut store = match shared.lock() {
-        Ok(g) => g.clone(),
+/// 单条会话解密失败的启动提示：最多列 2 个会话名。
+fn decrypt_issue_message(issues: &[rterm_session::LoadIssue]) -> String {
+    let names: Vec<String> = issues
+        .iter()
+        .take(2)
+        .map(|i| {
+            if i.name.is_empty() {
+                i.id.to_string()
+            } else {
+                i.name.clone()
+            }
+        })
+        .collect();
+    let mut msg = format!("{} 条会话无法解密：{}", issues.len(), names.join("、"));
+    if issues.len() > 2 {
+        msg.push_str(" 等");
+    }
+    msg
+}
+
+/// 加载失败时把原文件复制为 `sessions.corrupt-YYYYMMDD-HHMMSS.json`。
+/// 只备份、不移动/不覆盖原文件；失败仅记日志。
+fn backup_corrupt_sessions(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let backup = path.with_file_name(format!("sessions.corrupt-{ts}.json"));
+    match std::fs::copy(path, &backup) {
+        Ok(_) => {
+            log::warn!("损坏的会话文件已备份到 {}", backup.display());
+            Some(backup)
+        }
+        Err(e) => {
+            log::error!("备份损坏会话文件失败（原文件保持不动）: {e}");
+            None
+        }
+    }
+}
+
+/// 退出兜底保存：复用 state::persist_sessions。
+fn save_store(shared: &Arc<Mutex<rterm_session::SessionStore>>) {
+    let count = match shared.lock() {
+        Ok(g) => g.count(),
         Err(e) => {
             log::error!("Exit store lock poisoned: {e}");
             return;
         }
     };
 
-    log::info!("Saving {} sessions to: {}", store.count(), path.display());
-    match store.save(path, |s| rterm_session::crypto_bridge::encrypt_session_dpapi(s)) {
-        Ok(_) => log::info!("Saved OK"),
+    log::info!(
+        "Saving {} sessions to: {}",
+        count,
+        state::sessions_path().display()
+    );
+    match state::persist_sessions(shared) {
+        Ok(()) => log::info!("Saved OK"),
         Err(e) => log::error!("保存会话失败: {e:#}"),
     }
 }

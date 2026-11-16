@@ -134,15 +134,18 @@ pub struct MainWindow {
     settings_dialog: Option<Entity<SettingsView>>,
     import_export_dialog: Option<Entity<ImportExportDialog>>,
     context_menu: Option<ContextMenuState>,
+    /// 启动期加载会话的错误提示；点击横幅 ✕ 后清空。
+    startup_error: Option<String>,
 }
 
 impl MainWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let session_tree = cx.new(|_cx| SessionTreeView::new());
+        let session_tree = cx.new(|cx| SessionTreeView::new(cx));
         let status_bar = cx.new(|cx| StatusBar::new(cx));
         let tab_bar = cx.new(|_cx| TabBar::new());
 
         let host = cx.global::<AppState>().event_bus_host.clone();
+        let startup_error = cx.global::<AppState>().startup_error.clone();
         cx.subscribe(&host, |this: &mut Self, _host, event: &AppEvent, cx| {
             match event {
                 AppEvent::SessionConnectRequested { session_id } => {
@@ -197,6 +200,7 @@ impl MainWindow {
             settings_dialog: None,
             import_export_dialog: None,
             context_menu: None,
+            startup_error,
         }
     }
 
@@ -446,6 +450,13 @@ impl MainWindow {
             let state = cx.global_mut::<AppState>();
             state.session_store.lock().unwrap().delete(session_id);
         }
+
+        // 删除后立即写盘，失败只记日志（不阻断 UI）。
+        let session_store = cx.global::<AppState>().session_store.clone();
+        if let Err(e) = crate::state::persist_sessions(&session_store) {
+            log::error!("删除会话后保存失败: {e:#}");
+        }
+
         self.context_menu = None;
         let host = cx.global::<AppState>().event_bus_host.clone();
         cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
@@ -489,6 +500,7 @@ impl Render for MainWindow {
         let mut root = div()
             .size_full()
             .bg(t.app_bg())
+            .relative()
             .flex()
             .flex_col()
             // Toolbar
@@ -552,7 +564,9 @@ impl Render for MainWindow {
                             .justify_center()
                             .child("⚙ 设置"),
                     ),
-            )
+            );
+
+        root = root
             // 左 SessionTree + 右 TabBar + Content
             .child(
                 div()
@@ -587,6 +601,40 @@ impl Render for MainWindow {
             )
             // 底部 StatusBar
             .child(self.status_bar.clone());
+
+        // 启动加载出错时的红色横幅：绝对定位覆盖在内容区顶部，
+        // 不参与布局高度计算（否则终端 cols/rows 会算错）。
+        if let Some(err) = self.startup_error.clone() {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top(px(TOOLBAR_H))
+                    .left(px(SIDEBAR_W))
+                    .right_0()
+                    .px_3()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .bg(t.danger())
+                    .text_color(t.text_on_primary_btn())
+                    .text_size(px(11.))
+                    .child(div().flex_1().truncate().child(err))
+                    .child(
+                        div()
+                            .id("rterm-dismiss-startup-error")
+                            .px_2()
+                            .cursor_pointer()
+                            .child("✕")
+                            .on_click(cx.listener(
+                                |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                                    this.startup_error = None;
+                                    cx.notify();
+                                },
+                            )),
+                    ),
+            );
+        }
 
         if let Some(menu_state) = self.context_menu {
             let viewport = window.viewport_size();
