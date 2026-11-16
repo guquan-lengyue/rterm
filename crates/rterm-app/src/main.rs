@@ -17,8 +17,6 @@ use gpui_platform;
 
 use state::AppState;
 use views::main_window::MainWindow;
-use views::session_tree::SessionTreeView;
-use views::status_bar::StatusBar;
 
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +31,7 @@ fn sessions_path() -> std::path::PathBuf {
 // ---------- 入口 ----------
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    log::info!("rterm-app starting (Sprint 5 — SSH + 终端核心)");
+    log::info!("rterm-app starting (Sprint 6 — 终端 Canvas 渲染)");
 
     // 1. 启动加载 store + settings
     let store = load_store();
@@ -74,13 +72,11 @@ fn main() {
             KeyBinding::new("cmd-a", views::text_input::SelectAll, Some("TextInput")),
         ];
         bindings.extend(views::settings::key_bindings());
+        bindings.extend(views::main_window::key_bindings());
         app.bind_keys(bindings);
 
         let window_handle = app.open_window(WindowOptions::default(), |_window, app| {
-            let session_tree = app.new(|_cx| SessionTreeView::new());
-            let status_bar = app.new(|_cx| StatusBar::new());
-            let terminal_view = app.new(|cx| views::terminal::TerminalView::new(cx));
-            app.new(|_cx| MainWindow::new(session_tree, status_bar, terminal_view))
+            app.new(|cx| MainWindow::new(cx))
         }).unwrap();
 
         // Ctrl+, → 全局打开设置。
@@ -95,6 +91,32 @@ fn main() {
                 let handle = WindowHandle::<MainWindow>::new(window_id);
                 if let Err(e) = handle.update(app, |main, _window, cx| main.open_settings(cx)) {
                     log::error!("[shortcut] 打开设置失败: {e:#}");
+                }
+            });
+        });
+
+        // Ctrl+T / Ctrl+Tab / Ctrl+W → Tab 管理
+        app.on_action(move |_: &views::main_window::NewTab, app: &mut App| {
+            app.defer(move |app| {
+                let handle = WindowHandle::<MainWindow>::new(window_id);
+                if let Err(e) = handle.update(app, |main, _window, cx| main.new_tab_shortcut(cx)) {
+                    log::error!("[shortcut] 新建标签失败: {e:#}");
+                }
+            });
+        });
+        app.on_action(move |_: &views::main_window::NextTab, app: &mut App| {
+            app.defer(move |app| {
+                let handle = WindowHandle::<MainWindow>::new(window_id);
+                if let Err(e) = handle.update(app, |main, _window, cx| main.next_tab_shortcut(cx)) {
+                    log::error!("[shortcut] 切换标签失败: {e:#}");
+                }
+            });
+        });
+        app.on_action(move |_: &views::main_window::CloseTab, app: &mut App| {
+            app.defer(move |app| {
+                let handle = WindowHandle::<MainWindow>::new(window_id);
+                if let Err(e) = handle.update(app, |main, _window, cx| main.close_tab_shortcut(cx)) {
+                    log::error!("[shortcut] 关闭标签失败: {e:#}");
                 }
             });
         });

@@ -27,6 +27,8 @@ pub enum AppEvent {
     SessionFailed { session_id: Uuid, reason: String },
     SessionDisconnected { session_id: Uuid, reason: String },
     SessionReconnecting { session_id: Uuid, attempt: u8 },
+    /// SSH 握手 + 认证 + PTY 就绪耗时（Sprint 6 状态栏显示）
+    SessionLatency { session_id: Uuid, latency_ms: u64 },
 
     // ---- 终端 ----
     TerminalOpened { tab_id: Uuid, session_id: Uuid },
@@ -34,6 +36,12 @@ pub enum AppEvent {
     TerminalCwdHint { tab_id: Uuid, session_id: Uuid, cwd: String, source: CwdSource },
     TerminalResize { tab_id: Uuid, cols: u16, rows: u16 },
     TerminalClosed { tab_id: Uuid },
+
+    // ---- 标签页（TabBar → MainWindow） ----
+    TabSelectRequested { tab_id: Uuid },
+    TabCloseRequested { tab_id: Uuid },
+    TabCloseOthersRequested { tab_id: Uuid },
+    TabCloseRightRequested { tab_id: Uuid },
 
     // ---- SFTP ----
     SftpOpened { tab_id: Uuid, session_id: Uuid },

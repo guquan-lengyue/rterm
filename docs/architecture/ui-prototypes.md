@@ -259,7 +259,7 @@ on "保存":
 
 ---
 
-## 6. MainWindow TabBar（S5 做 Tab 打开后会用到）
+## 6. MainWindow TabBar（S6 已完成）
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -405,10 +405,10 @@ App (gpui::Application)
 | 启动/退出持久化 | **S3** 3.5 | ✅ 已完成 |
 | SettingsView | **S4** 4.1 | ✅ 已完成 |
 | ImportExportDialog | **S4** 4.2 | ✅ 已完成 |
-| TabBar | **S5** 5.2 + **S6** 6.3 | ⏳ |
-| 终端 Canvas View | **S6** 6.1 | ⏳ |
+| TabBar | **S6** 5.4 | ✅ 已完成 |
+| 终端 Canvas View | **S6** 5.1 | ✅ 已完成 |
 | SFTP 双栏 View | **S7** 7.2 | ⏳ |
 | 监控折线图 View | **S9** 9.2 | ⏳ |
 | 命令面板 | **S10** 10.3 | ⏳ |
 | HostKey/Delete 确认 | **S3** / **S10** | ⏳ |
-| StatusBar（真实） | **S3** / **S5** | ⏳ |
+| StatusBar（真实） | **S6** 5.5.2 | ✅ 已完成 |

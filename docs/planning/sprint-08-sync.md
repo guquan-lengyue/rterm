@@ -1,13 +1,13 @@
 # Sprint 8 — 路径同步
 
-> **状态**：待开始（前置 S6 + S7 完成）
-> **前置**：[Sprint 6](./sprint-06-terminal-render.md)（Terminal PTY 输出）+ [Sprint 7](./sprint-07-sftp.md)（SFTP 导航；Perl ✅ 已完成）+ [Sprint 4](./sprint-04-settings-io.md)（`Settings.sftp_sync_mode` 已持久化）
+> **状态**：待开始（前置 S6 ✅ + S7）
+> **前置**：[Sprint 6](./sprint-06-terminal-render.md)（Terminal PTY 输出 ✅）+ [Sprint 7](./sprint-07-sftp.md)（SFTP 导航；Perl ✅ 已完成）+ [Sprint 4](./sprint-04-settings-io.md)（`Settings.sftp_sync_mode` 已持久化）
 > **目标**：SyncBridge + PS1 正则 + ignore 防回环
 > **定位**：rterm 独有杀手功能
 >
 > **S5 已就绪的接入点**：
 > - `TerminalData { tab_id, session_id, bytes }` 已在每个 PTY chunk 实时 emit → SyncBridge 可直接订阅，无需改 TerminalView 的连接层
-> - S5 只有单 TerminalView；S6 TabRegistry 会提供多 tab 的 `tab_id → session_id` 映射，S8 按 tab 隔离 SyncBridge 状态
+> - **S6 已交付多 Tab 映射**：`MainWindow.tabs: Vec<TabEntry { id, session_id, view }>`，S8 按 tab 隔离 SyncBridge 状态
 > - `SshSession::session_clone()` 可用于 SFTP 侧连接
 >
 > **S4 已就绪的接入点**：

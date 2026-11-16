@@ -14,8 +14,8 @@
 | **S3** | 会话树 + 编辑对话框 | [sprint-03-session-tree.md](./sprint-03-session-tree.md) | ✅ 已完成（2026-11-14） | S2 |
 | **S4** | 设置 + 导入导出 | [sprint-04-settings-io.md](./sprint-04-settings-io.md) | ✅ 已完成（2026-11-14） | S3 |
 | **S5** | SSH 连接 & 终端核心 | [sprint-05-ssh-terminal.md](./sprint-05-ssh-terminal.md) | ✅ 已完成（2026-11-14） | S2 + S3 + S4 |
-| **S6** | 终端渲染 | [sprint-06-terminal-render.md](./sprint-06-terminal-render.md) | ⏳ **下一个** | S5 |
-| **S7** | SFTP 文件管理 | [sprint-07-sftp.md](./sprint-07-sftp.md) | — | S5 |
+| **S6** | 终端渲染 | [sprint-06-terminal-render.md](./sprint-06-terminal-render.md) | ✅ 已完成（2026-11-16） | S5 |
+| **S7** | SFTP 文件管理 | [sprint-07-sftp.md](./sprint-07-sftp.md) | ⏳ **下一个** | S5 |
 | **S8** | 路径同步 | [sprint-08-sync.md](./sprint-08-sync.md) | — | S6 + S7 |
 | **S9** | 远程性能监控 | [sprint-09-monitor.md](./sprint-09-monitor.md) | — | S5 |
 | **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | — | S6–S9 |
@@ -33,11 +33,9 @@ S1 ✅ 基础设施 ────┐
                    │
 S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 ══▶ S4 ✅ 设置 + 导入导出
                    │
-                   └──▶ S5 ✅ SSH核心 ────┬──▶ S6（下一个）终端渲染
-                                         ├──▶ S7 SFTP 文件管理
+                   └──▶ S5 ✅ SSH核心 ────┬──▶ S6 ✅ 终端渲染 ──▶ S8 路径同步（S6 ✅ + S7）
+                                         ├──▶ S7（下一个）SFTP 文件管理
                                          └──▶ S9 远程监控
-                   │
-                   └──▶ S8 路径同步（依赖 S6 + S7）
                          │
                          ▼
                    S10 稳定性收尾 ──▶ S11 v1.0 发布
@@ -46,10 +44,10 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 **关键路径**：S0 → S1 → S2 → S3 → S4 → S5 → S6 → S10 → S11
 
 **可并行**：
-- S5（SSH核心）已完成，S6（终端渲染）现在可以开始
-- S7 / S9 的 service / 采集器可与 S6 并行；但它们的 Tab 入口依赖 S6 5.4（TabRegistry/TabBar）
-- S8 等 S6 + S7 都好
-- S10 等 S6 / S7 / S8 / S9 都好
+- S6（终端渲染）已完成，TabBar / Tab 生命周期可直接被 S7 / S9 复用
+- S7 / S9 可并行开始（Tab 入口已就绪）
+- S8 等 S7 完成后开始
+- S10 等 S7 / S8 / S9 都好
 
 ---
 
@@ -75,8 +73,8 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 
 | 我想…… | 去这里 |
 |--------|--------|
-| **开始写代码** | ⏳ **[sprint-06-terminal-render.md](./sprint-06-terminal-render.md)** |
-| 看 Sprint 完成总结 | [CHANGELOG.md](./CHANGELOG.md)（S1–S5 已记录） |
+| **开始写代码** | ⏳ **[sprint-07-sftp.md](./sprint-07-sftp.md)** |
+| 看 Sprint 完成总结 | [CHANGELOG.md](./CHANGELOG.md)（S1–S6 已记录） |
 | 看里程碑概览 + 风险缓解 | [roadmap.md](./roadmap.md) |
 | 看 UI 原型线框图 | `docs/architecture/ui-prototypes.md` |
 | 查依赖图 | 本文件「依赖图」章节 |
@@ -86,6 +84,7 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 
 ## 变更记录
 
+- **2026-11-16** v3.3：S6 完成（Canvas 逐 Cell 渲染 / 光标 / 滚动 / 选择复制 / resize / 粘贴 / 主题调色板 / 标签页 / 字号缩放 / 状态栏）；S7 转为「下一个」
 - **2026-11-14** v3.2：S5 完成（SSH 连接 / 认证 / known_hosts / PTY / TerminalEngine / 重连）；S6 转为「下一个」；S5 落地说明与遗留写入 CHANGELOG
 - **2026-11-14** v3.1：S4 完成（设置 + 导入导出）；S5 转为「下一个」；把 S4 交付资产（Settings 默认值 / 终端外观 / 同步模式 / 监控阈值 / 事件）写入 S5–S10 的接入点与任务
 - **2026-11-13** v3.0：拆分 S3 为 S3（会话树+编辑对话框）和 S4（设置+导入导出），后续全顺延 → S11；新增 UI 原型线框图（`docs/architecture/ui-prototypes.md`）

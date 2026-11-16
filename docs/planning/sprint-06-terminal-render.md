@@ -1,6 +1,6 @@
-﻿# Sprint 6 — 终端渲染
+﻿﻿# Sprint 6 — 终端渲染
 
-> **状态**：⏳ **下一个**（S5 已完成，2026-11-14）
+> **状态**：✅ **已完成**（2026-11-16）
 > **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（TerminalEngine + PTY 字节流 + TerminalView 连接编排；Perl ✅ 已完成）+ [Sprint 4](./sprint-04-settings-io.md)（终端外观 Settings + UI 主题）
 > **目标**：gpui Canvas 渲染 Grid + 主题 + 复制粘贴 + 标签页
 >
@@ -67,3 +67,16 @@
 | # | 粒度 | 验收 |
 |---|------|------|
 | 5.6.1 | 0.5h | vim / nano / htop / tmux / less 全部能操作；三标签 Ctrl+Tab 切换；Shift+PageUp 回滚；右键复制粘贴；切 Dracula 主题；Ctrl+T 新标签 Ctrl+W 关闭；窗口缩放后 `stty size` 同步 |
+
+### 5.6 验收记录（2026-11-16，真实服务器 192.168.1.95）
+
+| 验收项 | 结果 |
+|--------|------|
+| vim / htop 全屏程序 | ✅ Canvas 下正常渲染与操作（htop alt-screen + CPU 彩条；vim 启动页 + `:q!` 退出） |
+| 多标签 Ctrl+T / Ctrl+Tab / Ctrl+W | ✅ 两标签实测新建、切换、关闭（关闭后 SSH 断开） |
+| Shift+PageUp 回滚 | ✅ `seq 1 200` 后回看到历史 118–145 行 |
+| 拖选 + 右键粘贴 | ✅ 复制 21 字符，粘贴回 shell |
+| 窗口缩放 / 字号缩放 → `stty size` | ✅ 49×157；字号 15 / 16 时 147×45 / 138×42 |
+| 切主题即时变色 | ⚠️ 代码路径已接（预览即广播 `AppThemeChanged`）；高 DPI 环境鼠标 E2E 留 S10 回归 |
+
+详细交付与遗留见 [CHANGELOG](../planning/CHANGELOG.md#sprint-6--终端渲染)。

@@ -289,6 +289,12 @@ impl SettingsView {
         // 取消时把实时预览的主题还原成已保存的主题
         let saved_theme = cx.global::<AppState>().settings.default_theme.clone();
         cx.global_mut::<AppState>().theme = theme::theme_by_name(&saved_theme);
+        self.emit(
+            cx,
+            AppEvent::AppThemeChanged {
+                name: saved_theme,
+            },
+        );
         self.emit(cx, AppEvent::SettingsCloseRequested { saved: false });
     }
 
@@ -297,6 +303,7 @@ impl SettingsView {
         self.sync_inputs(cx);
         let name = self.draft.default_theme.clone();
         cx.global_mut::<AppState>().theme = theme::theme_by_name(&name);
+        self.emit(cx, AppEvent::AppThemeChanged { name });
         self.error = None;
         cx.notify();
     }
@@ -544,6 +551,9 @@ impl SettingsView {
                         // 主题即时生效（取消时还原）
                         cx.global_mut::<AppState>().theme =
                             crate::theme::theme_by_name(&this.draft.default_theme);
+                        // 终端调色板跟随预览（Sprint 6）
+                        let name = this.draft.default_theme.clone();
+                        this.emit(cx, AppEvent::AppThemeChanged { name });
                         cx.notify();
                     }))
                     .child(if selected {

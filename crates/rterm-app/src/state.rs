@@ -142,7 +142,8 @@ impl Settings {
 // 用 crate 引用：state.rs 里 SessionStore 字段类型直接是 rterm_session::SessionStore
 
 // ---------------------------------------------------------------------------
-// TabRegistry（Sprint 5 完成；当前空占位）
+// TabRegistry（Sprint 6：TabInfo / TabKind 已被 TabBar 使用；
+// 实际 Tab 列表与生命周期在 MainWindow.tabs，此处保留给 S7/S9 抽公共 Registry）
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]

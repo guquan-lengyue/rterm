@@ -9,7 +9,7 @@
 |-------|------|------|----------|
 | **P0 环境 & 骨架** | gpui 空窗口可运行 + 所有 crate 骨架 + MSVC 环境脚本 | ✅ 已完成 | VS Build Tools、perl、bezel-gpui 0.3 |
 | **P1 会话管理** | 会话树 View + SessionStore CRUD + 持久化 JSON + 导入导出 + 全局设置界面 | ✅ 已完成（S2–S4） | serde / uuid / rterm-crypto |
-| **P2 SSH 连接 & 终端** | ssh2 Session 封装 + PTY + alacritty_terminal glue + gpui Canvas 渲染 + 基础主题 | 🚧 核心完成（S5）；渲染 S6 | ssh2 vendored-openssl / alacritty_terminal |
+| **P2 SSH 连接 & 终端** | ssh2 Session 封装 + PTY + alacritty_terminal glue + gpui Canvas 渲染 + 基础主题 | ✅ 已完成（S5 + S6） | ssh2 vendored-openssl / alacritty_terminal |
 | **P3 SFTP 文件管理** | SFTP 双栏浏览 + 传输队列 + 进度条 + 拖拽 | — | ssh2 Sftp / walkdir |
 | **P4 路径同步** | SyncBridge + PS1 正则 + ignore 防回环 + 双向开关 | — | regex |
 | **P5 远程性能监控** | MonitorCollector + 折线图 + Top 进程 + 阈值告警 | — | tokio 定时 + Canvas 折线图 |
@@ -97,7 +97,7 @@
 
 ---
 
-## Phase 2 — SSH 连接 & 终端 🚧（S5 完成核心；S6 渲染）
+## Phase 2 — SSH 连接 & 终端 ✅（S5 + S6）
 
 ### 前置条件
 - [x] P0（gpui 空窗口）
@@ -129,22 +129,22 @@
 - [ ] PS1 解析正则集合（bash / zsh / generic）→ S8
 - [ ] 终端输入回显抑制（SyncBridge 注入 cd 时）→ S8
 
-#### 2.4 Terminal View（gpui Canvas 渲染）→ S6
+#### 2.4 Terminal View（gpui Canvas 渲染）✅（S6）
 - [x] S5 文本 placeholder（实时显示 PTY 输出）
-- [ ] Canvas 渲染 `Grid<Cell>`：逐 Cell 画文字 + 背景矩形
-- [ ] 光标渲染（方块 / 下划线 / 竖线，blink 动画）
-- [ ] 滚动缓冲绘制 + 滚动条 + 鼠标滚轮
-- [ ] 鼠标选择（按住左键拖动画选区 → 复制系统剪贴板）
-- [ ] 右键粘贴（从系统剪贴板读 → PTY 注入）
+- [x] Canvas 渲染 `Grid<Cell>`：逐 Cell 画文字 + 背景矩形
+- [x] 光标渲染（方块 / 下划线 / 竖线，blink 动画）
+- [x] 滚动缓冲绘制 + 滚动条 + 鼠标滚轮
+- [x] 鼠标选择（按住左键拖动画选区 → 复制系统剪贴板）
+- [x] 右键粘贴（从系统剪贴板读 → PTY 注入）
 - [x] 键盘事件：终端按键 → TerminalEngine.input_key → PTY
-- [ ] 主题切换（fg / bg / 16 ANSI + 256 + 真彩色）
-- [ ] 字体 + Nerd Font 字形支持（gpui 自带 DirectWrite）
+- [x] 主题切换（fg / bg / 16 ANSI + 256 + 真彩色）
+- [x] 字体 + Nerd Font 字形支持（gpui 自带 DirectWrite）
 
-#### 2.5 标签页框架 → S6
-- [ ] `TabRegistry`：Vec<TabInfo> + active_index
-- [ ] TabBar View：水平标签 + 关闭按钮 + 新建 + 右键菜单
-- [ ] 标签 kinds：Terminal / Sftp / Monitor
-- [ ] 快捷键：Ctrl+T 新标签 / Ctrl+Tab 切换 / Ctrl+W 关闭
+#### 2.5 标签页框架 ✅（S6）
+- [x] `TabRegistry`：Vec<TabInfo> + active_index
+- [x] TabBar View：水平标签 + 关闭按钮 + 关闭菜单
+- [x] 标签 kinds：Terminal / Sftp / Monitor
+- [x] 快捷键：Ctrl+T 新标签 / Ctrl+Tab 切换 / Ctrl+W 关闭
 
 ---
 

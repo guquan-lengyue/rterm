@@ -4593,9 +4593,11 @@ dependencies = [
 name = "rterm-app"
 version = "0.1.0"
 dependencies = [
+ "alacritty_terminal",
  "anyhow",
  "bezel-gpui",
  "bezel-gpui-platform",
+ "chrono",
  "dirs",
  "env_logger",
  "futures",

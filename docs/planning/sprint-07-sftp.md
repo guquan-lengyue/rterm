@@ -1,13 +1,13 @@
 # Sprint 7 — SFTP 文件管理
 
-> **状态**：待开始（S5 已完成；Tab 入口依赖 S6 5.4）
+> **状态**：⏳ **下一个**（S6 已完成，Tab 入口已就绪）
 > **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH Session + sftp 子系统；Perl ✅ 已完成）
 > **目标**：SftpService + 双栏 View + 传输队列
 >
 > **S5 已就绪的接入点**：
 > - `SshSession::session_clone()` 可用于在独立线程建立 `sftp()` 子系统
-> - `FileTransfer*` 事件已定义；SFTP 连接可与 S6 并行
-> - **Tab 入口（6.4.1）依赖 S6 5.4.1/5.4.2 的 TabRegistry/TabBar** → 先做 6.1–6.3 的 service/队列/双栏 View，Tab 接线等 S6 完成
+> - `FileTransfer*` 事件已定义
+> - **Tab 入口已就绪（S6 5.4）**：`views/tab_bar.rs` + `MainWindow.tabs`（`TabEntry { id, session_id, view }`，`TabKind::Sftp` 已预留）；新增 Tab 直接复用 TabBar / Ctrl+T / Ctrl+W
 >
 > **S4 已就绪的接入点**：
 > - `FileTransferStarted/Progress/Completed/Failed` 事件已在 `event.rs` 定义，本 Sprint 只需 emit

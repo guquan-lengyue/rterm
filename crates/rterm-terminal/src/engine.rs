@@ -8,11 +8,11 @@
 //! `Term` 是 `!Send + !Sync`，所以本类型只能在 gpui 主线程创建和使用。
 
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::{Dimensions, Grid};
+use alacritty_terminal::grid::{Dimensions, Grid, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::term::{Config, RenderableCursor, Term};
+use alacritty_terminal::term::{Config, RenderableCursor, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 
 // ---------------------------------------------------------------------------
@@ -83,6 +83,11 @@ pub enum TerminalKey {
     Insert,
     F(u8),
     Ctrl(char),
+    Alt(String),
+    CtrlUp,
+    CtrlDown,
+    CtrlLeft,
+    CtrlRight,
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +207,103 @@ impl TerminalEngine {
             TerminalKey::Insert => b"\x1b[2~".to_vec(),
             TerminalKey::F(n) => f_key_sequence(n),
             TerminalKey::Ctrl(c) => vec![(c as u8) & 0x1f],
+            TerminalKey::Alt(text) => {
+                let mut bytes = Vec::with_capacity(text.len() + 1);
+                bytes.push(0x1b);
+                bytes.extend_from_slice(text.as_bytes());
+                bytes
+            }
+            TerminalKey::CtrlUp => b"\x1b[1;5A".to_vec(),
+            TerminalKey::CtrlDown => b"\x1b[1;5B".to_vec(),
+            TerminalKey::CtrlRight => b"\x1b[1;5C".to_vec(),
+            TerminalKey::CtrlLeft => b"\x1b[1;5D".to_vec(),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sprint 6：滚动 / 模式 / 选区文本
+    // -----------------------------------------------------------------------
+
+    pub fn mode(&self) -> TermMode {
+        *self.term.mode()
+    }
+
+    /// 终端是否请求了 bracketed paste（DECSET 2004）。
+    pub fn bracketed_paste(&self) -> bool {
+        self.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    /// 滚动历史缓冲：正数向上（看历史），负数向下。
+    pub fn scroll_display(&mut self, delta: i32) {
+        if delta != 0 {
+            self.term.scroll_display(Scroll::Delta(delta));
+        }
+    }
+
+    pub fn scroll_page(&mut self, up: bool) {
+        self.term.scroll_display(if up {
+            Scroll::PageUp
+        } else {
+            Scroll::PageDown
+        });
+    }
+
+    /// 回到最底部（有新输入时调用）。
+    pub fn scroll_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    /// 视口坐标 → Grid Cell。行 0 = 屏幕顶部，已考虑 display_offset。
+    pub fn cell_at(&self, row: usize, col: usize) -> Option<&Cell> {
+        if row >= self.rows || col >= self.cols {
+            return None;
+        }
+        let line = Line(row as i32 - self.display_offset() as i32);
+        Some(&self.term.grid()[line][Column(col)])
+    }
+
+    /// 视口坐标区间 `(row, col)` 的文本（含端点），每行去尾部空格，
+    /// 行间用 `\n` 连接。宽字符只取一次，跳过 spacer。
+    pub fn text_in_range(
+        &self,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) -> String {
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+
+        let mut rows = Vec::new();
+        for row in start.0..=end.0.min(self.rows.saturating_sub(1)) {
+            let line = Line(row as i32 - self.display_offset() as i32);
+            let cells = &self.term.grid()[line];
+            let from = if row == start.0 { start.1 } else { 0 };
+            let to = if row == end.0 {
+                end.1.min(self.cols.saturating_sub(1))
+            } else {
+                self.cols.saturating_sub(1)
+            };
+
+            let mut text = String::new();
+            for col in from..=to {
+                let cell = &cells[Column(col)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                text.push(cell.c);
+            }
+            rows.push(text.trim_end_matches(' ').to_string());
+        }
+        rows.join("\n")
     }
 }
 
@@ -281,5 +382,47 @@ mod tests {
             engine.input_key(TerminalKey::Char("pwd".into())),
             b"pwd".to_vec()
         );
+    }
+
+    #[test]
+    fn modified_key_sequences() {
+        let mut engine = TerminalEngine::new(80, 24, 1_000);
+        assert_eq!(engine.input_key(TerminalKey::Alt("f".into())), b"\x1bf");
+        assert_eq!(engine.input_key(TerminalKey::CtrlUp), b"\x1b[1;5A");
+        assert_eq!(engine.input_key(TerminalKey::CtrlLeft), b"\x1b[1;5D");
+    }
+
+    #[test]
+    fn text_in_range_reads_visible_rows() {
+        let mut engine = TerminalEngine::new(20, 5, 100);
+        engine.input_bytes(b"hello\r\nworld");
+        assert_eq!(engine.text_in_range((0, 0), (0, 4)), "hello");
+        assert_eq!(engine.text_in_range((0, 0), (1, 4)), "hello\nworld");
+        assert_eq!(engine.text_in_range((0, 2), (0, 9)), "llo");
+        // 反向区间自动归一化
+        assert_eq!(engine.text_in_range((1, 4), (0, 0)), "hello\nworld");
+    }
+
+    #[test]
+    fn scrollback_changes_display_offset() {
+        let mut engine = TerminalEngine::new(10, 3, 100);
+        for i in 0..10 {
+            engine.input_bytes(format!("line{i}\r\n").as_bytes());
+        }
+        assert_eq!(engine.display_offset(), 0);
+        engine.scroll_display(2);
+        assert!(engine.display_offset() > 0);
+        engine.scroll_bottom();
+        assert_eq!(engine.display_offset(), 0);
+    }
+
+    #[test]
+    fn bracketed_paste_tracks_terminal_mode() {
+        let mut engine = TerminalEngine::new(10, 3, 100);
+        assert!(!engine.bracketed_paste());
+        engine.input_bytes(b"\x1b[?2004h");
+        assert!(engine.bracketed_paste());
+        engine.input_bytes(b"\x1b[?2004l");
+        assert!(!engine.bracketed_paste());
     }
 }

@@ -4,6 +4,71 @@
 
 ---
 
+## Sprint 6 — 终端渲染
+
+**状态**：✅ COMPLETED | **Commit**：待提交 | **时间**：2026-11-16
+**前置**：S5（TerminalEngine / PTY / 连接编排）+ S4（Settings / 4 套 UI 主题）
+**后续**：S7（SFTP）/ S9（监控）可直接复用 TabBar
+
+### 交付清单
+
+| # | 任务 | 产出文件 | 验收 |
+|---|------|----------|------|
+| 5.1.1 | gpui Canvas 逐 Cell 渲染（背景 quad + DirectWrite glyph + ANSI 色） | `views/terminal.rs` | ✅ 真实远程 shell 文字/颜色正确 |
+| 5.1.2 | 光标 Block / Underline / Bar + 500ms blink，读 `terminal_cursor_style` | `views/terminal.rs` | ✅ 方块光标可见并闪烁 |
+| 5.1.3 | 滚动缓冲：滚轮 + Shift+PageUp/PageDown + 右侧滚动条 | `views/terminal.rs` + `engine.rs` | ✅ `seq 1 200` 后 Shift+PageUp 回看到 118–145 行 |
+| 5.1.4 | 鼠标拖选高亮 + 松开自动写剪贴板 | `views/terminal.rs` + `engine.rs` | ✅ 拖选 21 字符自动复制，右键可粘贴回来 |
+| 5.1.5 | 窗口/字号变化 → cols/rows → Engine + `PtyCommand::Resize` | `views/terminal.rs` | ✅ `stty size` = 49×157；字号 14→15→16 时同步 147×45 / 138×42 |
+| 5.2.1 | 右键粘贴 + bracketed paste 保护 | `views/terminal.rs` | ✅ 单行/多行粘贴走 `\x1b[200~…\x1b[201~` |
+| 5.2.2 | Alt / Ctrl+方向 / F1–F12 / Home/End/PageUp/PageDown | `views/terminal.rs` + `engine.rs` | ✅ 映射表补全；Ctrl+C 可中断 |
+| 5.3.1 | `TerminalPalette`（fg / bg / ANSI16 / cursor）+ 4 套主题调色板 | `theme.rs` | ✅ 4 套调色板可构造；单元测试覆盖 |
+| 5.3.2 | `AppThemeChanged` / `AppSettingsChanged` → 终端即时换色/换字体 | `views/terminal.rs` + `views/settings.rs` | ✅ 设置预览切主题即广播，取消/恢复默认会还原 |
+| 5.4.1 | `TabBar`：标签列表 + ✕ + 右键（关闭/其他/右侧） | `views/tab_bar.rs` | ✅ 点击切换、✕ 关闭 |
+| 5.4.2 | Tab 生命周期：新建 = 新 TerminalView + SSH/PTY；关闭 = `PtyCommand::Close` + drop Engine | `views/main_window.rs` | ✅ 关 tab 断开；重开重连 |
+| 5.4.3 | Ctrl+T / Ctrl+Tab / Ctrl+W（全局 action） | `main.rs` + `views/main_window.rs` | ✅ 三快捷键实测 |
+| 5.5.1 | Ctrl+= / Ctrl+- / Ctrl+0 字号缩放并写回 Settings | `views/terminal.rs` | ✅ 立即生效 + 落盘 `settings.json` |
+| 5.5.2 | 真实状态栏：主机 + 连接延迟 + 重连次数 + 时钟 | `views/status_bar.rs` | ✅ 订阅 `SessionConnected/Latency/Reconnecting/...`，时钟每秒刷新 |
+| — | `SessionLatency` / Tab 事件 | `event.rs` | ✅ 状态栏与 TabBar 解耦 |
+
+### 测试 & 验收
+
+| 项 | 结果 |
+|----|------|
+| `cargo test --workspace` | ✅ **50 passed, 0 failed, 1 ignored**（live_ssh） |
+| `cargo build -p rterm-app` | ✅ 成功（仅 OpenSSL PDB 链接警告） |
+| GUI E2E：双击 `pw-test` → 连接 192.168.1.95 | ✅ 登录 banner 按 ANSI 色渲染，标题栏显示 `已连接 · 延迟` |
+| GUI E2E：键盘 `pwd` / `stty size` | ✅ `/home/ubuntu`；`49 157` |
+| GUI E2E：Ctrl+T / Ctrl+Tab / Ctrl+W | ✅ 两标签并存、切换、关闭后 SSH 断开 |
+| GUI E2E：字号缩放 | ✅ Ctrl+= 两次（14→16），列数 157→138，重启后保留 |
+| GUI E2E：拖选 + 右键粘贴 | ✅ 复制 21 字符，粘贴回 shell |
+| GUI E2E：Shift+PageUp 回滚 | ✅ 视口上移到历史行 |
+| GUI E2E：htop / vim 全屏程序 | ✅ htop alt-screen + CPU 彩条；vim 启动页正常、`:q!` 退出 |
+| GUI E2E：`seq 1 200` / 长时间输出 | ✅ 无卡顿、无 panic |
+
+### 踩坑 & 解法（6 个坑）
+
+| # | 问题 | 解法 |
+|---|------|------|
+| 1 | `App::text_system()` 返回的 `TextSystem` 没有 `shape_line` | 字形缓存改用 `window.text_system()`（`WindowTextSystem`） |
+| 2 | gpui `Rgba` 没有 `Rgb` 类型，计划里的 `ansi16: [Rgb;16]` 不可用 | 改为 `[Rgba; 16]`，颜色用 `rgb(0x…)` 构造 |
+| 3 | `div.on_mouse_down` 需要显式 `MouseButton` 参数 | 左键选择、右键粘贴各注册一个 listener |
+| 4 | 每帧逐 Cell 排版 3000+ 字符会反复 shaping | `HashMap<(char,bold,italic)>` 字形缓存，字号/字体变化时清空 |
+| 5 | 终端 Grid 宽度与 CJK 宽字符对齐 | 按 cell 定位绘制；`WIDE_CHAR_SPACER` 跳过，宽字符只画一次 |
+| 6 | 关闭 Tab 时后台 SSH 线程仍持有旧输出 | `generation` 代际号丢弃过期事件 + `PtyCommand::Close` 主动断开 |
+
+### 遗留
+
+| 项 | 后续 |
+|----|------|
+| 高 DPI（150%）环境下 gpui 窗口/弹窗坐标与自动化工具换算不一致，主题切换未完成鼠标 E2E | S10 统一做一次 GUI 回归 |
+| 光标方块绘制在字形下方，光标色与前景色相近时对比度一般 | S10 视觉打磨 |
+| 滚动条仅绘制，不支持拖拽 | S10 |
+| 双击选中单词 / 三击整行、URL 点击 | S10 |
+| 系统字体枚举（S4 遗留） | S10 |
+| `TabRegistry` 结构体仍为占位，实际 Tab 列表在 `MainWindow.tabs` | S7/S9 接入时再抽公共 Registry |
+
+---
+
 ## Sprint 5 — SSH 连接 & 终端核心
 
 **状态**：✅ COMPLETED | **Commit**：待提交 | **时间**：2026-11-14
