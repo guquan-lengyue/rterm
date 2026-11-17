@@ -23,8 +23,8 @@ use std::sync::{Arc, Mutex};
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, AnyElement, ClickEvent, Context, Entity, FocusHandle, IntoElement,
-    KeyBinding, MouseDownEvent, Render, Window,
+    actions, div, px, AnyElement, ClickEvent, Context, CursorStyle, Entity, FocusHandle,
+    IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Render, Window,
 };
 use rterm_sync::SyncBridge;
 use uuid::Uuid;
@@ -33,6 +33,7 @@ use crate::event::{AppEvent, EventBusHost};
 use crate::state::{lock_or_recover, AppState, TabInfo, TabKind};
 use crate::ui::theme;
 
+use super::command_palette::{PaletteAction, PaletteItem, PaletteState};
 use super::import_export::{ImportExportDialog, IoMode};
 use super::monitor::MonitorView;
 use super::session_dialog::SessionEditDialog;
@@ -56,11 +57,16 @@ actions!(
         CloseTab,
         NewSession,
         ToggleFullscreen,
-        ToggleSessionLog
+        ToggleSessionLog,
+        OpenPalette,
+        PaletteUp,
+        PaletteDown,
+        PaletteConfirm,
+        PaletteClose
     ]
 );
 
-pub fn key_bindings() -> [KeyBinding; 6] {
+pub fn key_bindings() -> [KeyBinding; 11] {
     [
         KeyBinding::new("ctrl-t", NewTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
@@ -68,6 +74,11 @@ pub fn key_bindings() -> [KeyBinding; 6] {
         KeyBinding::new("ctrl-shift-n", NewSession, None),
         KeyBinding::new("f11", ToggleFullscreen, None),
         KeyBinding::new("ctrl-shift-l", ToggleSessionLog, None),
+        KeyBinding::new("ctrl-p", OpenPalette, None),
+        KeyBinding::new("up", PaletteUp, Some("CommandPalette")),
+        KeyBinding::new("down", PaletteDown, Some("CommandPalette")),
+        KeyBinding::new("enter", PaletteConfirm, Some("CommandPalette")),
+        KeyBinding::new("escape", PaletteClose, Some("CommandPalette")),
     ]
 }
 
@@ -175,6 +186,9 @@ pub struct MainWindow {
     pending_delete: Option<Uuid>,
     /// 启动期加载会话的错误提示；点击横幅 ✕ 后清空。
     startup_error: Option<String>,
+    /// Ctrl+P 命令面板（打开期间独占键盘焦点）。
+    palette: Option<PaletteState>,
+    palette_focus: FocusHandle,
 }
 
 impl MainWindow {
@@ -332,6 +346,8 @@ impl MainWindow {
             context_menu: None,
             pending_delete: None,
             startup_error,
+            palette: None,
+            palette_focus: cx.focus_handle(),
         }
     }
 
@@ -535,7 +551,8 @@ impl MainWindow {
 
     /// 是否有任何弹窗 / 确认卡片打开（弹窗期间屏蔽全局 Tab 快捷键）。
     fn dialogs_open(&self, cx: &mut Context<Self>) -> bool {
-        self.settings_dialog.is_some()
+        self.palette.is_some()
+            || self.settings_dialog.is_some()
             || self.edit_dialog.is_some()
             || self.import_export_dialog.is_some()
             || self.pending_delete.is_some()
@@ -608,6 +625,250 @@ impl MainWindow {
             }
             None => self.set_status("当前标签不是终端，无法开启会话日志", cx),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 命令面板（Ctrl+P）
+    // -----------------------------------------------------------------------
+
+    /// 打开命令面板：会话（终端 / SFTP / 监控）+ 常用操作。
+    pub fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some()
+            || self.settings_dialog.is_some()
+            || self.edit_dialog.is_some()
+            || self.import_export_dialog.is_some()
+            || self.pending_delete.is_some()
+        {
+            return;
+        }
+        let mut items = Vec::new();
+        {
+            let state = cx.global::<AppState>();
+            let store = lock_or_recover(&state.session_store);
+            for session in store.list() {
+                let label = session.display_label();
+                let id = session.id;
+                items.push(PaletteItem::new(
+                    format!("打开终端 · {label}"),
+                    "终端",
+                    PaletteAction::OpenTerminal(id),
+                ));
+                items.push(PaletteItem::new(
+                    format!("打开 SFTP · {label}"),
+                    "SFTP",
+                    PaletteAction::OpenSftp(id),
+                ));
+                items.push(PaletteItem::new(
+                    format!("打开监控 · {label}"),
+                    "监控",
+                    PaletteAction::OpenMonitor(id),
+                ));
+            }
+        }
+        items.push(PaletteItem::new(
+            "新建会话…",
+            "会话",
+            PaletteAction::NewSession,
+        ));
+        items.push(PaletteItem::new(
+            "打开设置…",
+            "设置",
+            PaletteAction::OpenSettings,
+        ));
+        items.push(PaletteItem::new(
+            "导入会话…",
+            "会话",
+            PaletteAction::ImportSessions,
+        ));
+        items.push(PaletteItem::new(
+            "导出会话…",
+            "会话",
+            PaletteAction::ExportSessions,
+        ));
+
+        self.palette = Some(PaletteState::new(items));
+        self.context_menu = None;
+        window.focus(&self.palette_focus, cx);
+        cx.notify();
+    }
+
+    fn close_command_palette(&mut self, cx: &mut Context<Self>) {
+        if self.palette.take().is_some() {
+            self.focus_pending = true;
+            cx.notify();
+        }
+    }
+
+    fn palette_move(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(palette) = self.palette.as_mut() {
+            palette.move_selection(delta);
+            cx.notify();
+        }
+    }
+
+    fn palette_confirm(&mut self, cx: &mut Context<Self>) {
+        let Some(action) = self
+            .palette
+            .as_ref()
+            .and_then(|palette| palette.selected_item().map(|item| item.action.clone()))
+        else {
+            self.close_command_palette(cx);
+            return;
+        };
+        self.close_command_palette(cx);
+        match action {
+            PaletteAction::OpenTerminal(session_id) => self.open_terminal_tab(session_id, cx),
+            PaletteAction::OpenSftp(session_id) => self.open_sftp_tab(session_id, cx),
+            PaletteAction::OpenMonitor(session_id) => self.open_monitor_tab(session_id, cx),
+            PaletteAction::NewSession => self.open_edit_dialog(None, cx),
+            PaletteAction::OpenSettings => self.open_settings(cx),
+            PaletteAction::ImportSessions => self.open_import_export(false, cx),
+            PaletteAction::ExportSessions => self.open_import_export(true, cx),
+        }
+    }
+
+    /// 面板内文本输入：只处理可打印字符与退格（ASCII 足够检索会话名）。
+    fn palette_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.control || keystroke.modifiers.platform || keystroke.modifiers.alt {
+            return;
+        }
+        if keystroke.key == "backspace" {
+            palette.backspace();
+            cx.notify();
+            return;
+        }
+        if keystroke.key == "space" {
+            palette.type_char(' ');
+            cx.notify();
+            return;
+        }
+        if let Some(text) = keystroke.key_char.as_ref() {
+            for ch in text.chars() {
+                palette.type_char(ch);
+            }
+            cx.notify();
+        }
+    }
+
+    fn render_command_palette(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let Some(palette) = self.palette.as_ref() else {
+            return div().into_any_element();
+        };
+        let visible = palette.visible();
+
+        let mut list = div().w_full().flex().flex_col();
+        if visible.is_empty() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.))
+                    .text_color(t.text_subtle())
+                    .child("没有匹配的命令"),
+            );
+        }
+        for (index, item) in visible.iter().enumerate() {
+            let selected = index == palette.selected;
+            let row_bg = if selected {
+                t.secondary_btn_hover()
+            } else {
+                t.card_bg()
+            };
+            list = list.child(
+                div()
+                    .id(("rterm-palette-row", index))
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .bg(row_bg)
+                    .cursor(CursorStyle::PointingHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
+                            if let Some(palette) = this.palette.as_mut() {
+                                palette.selected = index;
+                            }
+                            this.palette_confirm(cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.))
+                            .text_color(t.text_on_card_bg())
+                            .child(item.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(t.text_subtle())
+                            .child(item.hint.clone()),
+                    ),
+            );
+        }
+
+        let (query_text, query_color) = if palette.query.is_empty() {
+            ("输入以搜索会话或命令…".to_string(), t.text_placeholder())
+        } else {
+            (palette.query.clone(), t.text_on_card_bg())
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .bg(t.modal_overlay())
+            .flex()
+            .justify_center()
+            .pt(px(80.))
+            .key_context("CommandPalette")
+            .track_focus(&self.palette_focus)
+            .on_key_down(cx.listener(Self::palette_key_down))
+            .on_action(cx.listener(|this, _: &PaletteUp, _window, cx| this.palette_move(-1, cx)))
+            .on_action(cx.listener(|this, _: &PaletteDown, _window, cx| this.palette_move(1, cx)))
+            .on_action(
+                cx.listener(|this, _: &PaletteConfirm, _window, cx| this.palette_confirm(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &PaletteClose, _window, cx| this.close_command_palette(cx)),
+            )
+            .child(
+                div()
+                    .w(px(520.))
+                    .max_h(px(420.))
+                    .overflow_hidden()
+                    .bg(t.card_bg())
+                    .border_1()
+                    .border_color(t.border_medium())
+                    .rounded_lg()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(t.border_subtle())
+                            .text_size(px(13.))
+                            .text_color(query_color)
+                            .child(query_text),
+                    )
+                    .child(list),
+            )
+            .into_any_element()
     }
 
     // -----------------------------------------------------------------------
@@ -993,6 +1254,11 @@ impl Render for MainWindow {
         }
         if let Some(dialog) = &self.import_export_dialog {
             root = root.child(dialog.clone());
+        }
+
+        // Ctrl+P 命令面板（最上层）。
+        if self.palette.is_some() {
+            root = root.child(self.render_command_palette(cx));
         }
 
         // 删除会话二次确认（S7.5.3.10）。

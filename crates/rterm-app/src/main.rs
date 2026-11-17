@@ -184,6 +184,18 @@ fn main() {
                 });
             },
         );
+
+        // Ctrl+P → 命令面板
+        app.on_action(move |_: &views::main_window::OpenPalette, app: &mut App| {
+            app.defer(move |app| {
+                let handle = WindowHandle::<MainWindow>::new(window_id);
+                if let Err(e) = handle.update(app, |main, window, cx| {
+                    main.open_command_palette(window, cx)
+                }) {
+                    log::error!("[shortcut] 打开命令面板失败: {e:#}");
+                }
+            });
+        });
     });
 
     // 3. 退出保存 —— 从共享 Arc 读，一定是最新状态

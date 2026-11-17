@@ -4,6 +4,7 @@
 //! 订阅 EventBus 里的 AppEvent 或等待后台任务结果，更新内部状态 → `cx.notify()` 触发重绘。
 //! 已知例外：SFTP 本地文件系统操作仍在 UI 线程同步执行（远端 I/O 已后台化）。
 
+pub mod command_palette;
 pub mod import_export;
 pub mod main_window;
 pub mod monitor;
