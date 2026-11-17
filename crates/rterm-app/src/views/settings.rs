@@ -12,7 +12,7 @@
 use gpui::prelude::*;
 use gpui::{
     actions, div, px, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, Render, ScrollWheelEvent, SharedString, Window,
+    MouseButton, MouseDownEvent, Render, ScrollHandle, ScrollWheelEvent, SharedString, Window,
 };
 
 use crate::event::{AppEvent, EventBusHost};
@@ -131,6 +131,8 @@ pub struct SettingsView {
     /// 系统已装字体（打开设置时枚举一次，见 9.14）
     font_choices: Vec<String>,
     font_scroll: ScrollMetrics,
+    /// 表单滚动状态：窗口变矮时表单可滚动，切换 Tab 时复位到顶部
+    form_scroll: ScrollHandle,
 }
 
 impl SettingsView {
@@ -168,6 +170,7 @@ impl SettingsView {
             error: None,
             font_choices,
             font_scroll: ScrollMetrics::new(FONT_LIST_VIEW_H, FONT_ROW_H),
+            form_scroll: ScrollHandle::new(),
         }
     }
 
@@ -1071,6 +1074,8 @@ impl SettingsView {
             .on_click(
                 cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
                     this.active_tab = tab;
+                    // 新 Tab 从顶部开始阅读
+                    this.form_scroll = ScrollHandle::new();
                     cx.notify();
                 }),
             )
@@ -1086,8 +1091,13 @@ impl Focusable for SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+
+        // 自适应尺寸：默认 760×680，窗口更小时收缩；表单区域支持纵向滚动
+        let (card_w, card_h) = super::adaptive_dialog_size(window, 760.0, 680.0);
+        let card_w = card_w.max(560.0);
+        let card_h = card_h.max(320.0);
 
         let mut tabs = div()
             .w(px(140.))
@@ -1168,11 +1178,9 @@ impl Render for SettingsView {
             )
             .child(
                 div()
-                    .w(px(760.))
-                    // 终端外观页在 12.7 新增 SFTP 侧栏分组后需要更高一档。
-                    // 高度不足时内容会把 footer 挤到卡片外（命中区域仍在卡片内，
-                    // 表现为「保存」点不到），故这里给足高度并允许内容区收缩。
-                    .h(px(680.))
+                    .w(px(card_w))
+                    // 高度随窗口收缩；表单内容超出时由下方滚动容器接管
+                    .h(px(card_h))
                     .bg(t.card_bg())
                     .border_1()
                     .border_color(t.border_medium())
@@ -1205,6 +1213,7 @@ impl Render for SettingsView {
                             .child(tabs)
                             .child(
                                 div()
+                                    .id("settings-form")
                                     .flex_1()
                                     .min_h(px(0.))
                                     .h_full()
@@ -1212,7 +1221,8 @@ impl Render for SettingsView {
                                     .py_3()
                                     .flex()
                                     .flex_col()
-                                    .overflow_hidden()
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.form_scroll)
                                     .child(content),
                             ),
                     )

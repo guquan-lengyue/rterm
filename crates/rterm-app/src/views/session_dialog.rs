@@ -7,7 +7,7 @@
 //! 主程序退出时 crypto_bridge 统一 DPAPI 加密。
 
 use gpui::prelude::*;
-use gpui::{div, px, Entity, FocusHandle, Focusable, IntoElement, Render, Window};
+use gpui::{div, px, Entity, FocusHandle, Focusable, IntoElement, Render, ScrollHandle, Window};
 use uuid::Uuid;
 
 use crate::event::{AppEvent, EventBusHost};
@@ -96,6 +96,9 @@ pub struct SessionEditDialog {
 
     // 表单校验错误（保存时展示在 footer）
     pub form_error: Option<String>,
+
+    /// 表单滚动状态：窗口变矮时可滚动，切换 Tab 复位
+    form_scroll: ScrollHandle,
 }
 
 impl SessionEditDialog {
@@ -207,6 +210,7 @@ impl SessionEditDialog {
             compress_enabled: compress,
             test_status: None,
             form_error: None,
+            form_scroll: ScrollHandle::new(),
         }
     }
 
@@ -478,13 +482,17 @@ impl Focusable for SessionEditDialog {
 // ---------------------------------------------------------------------------
 
 impl Render for SessionEditDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let title = if self.editing_id.is_some() {
             "编辑会话"
         } else {
             "新建会话"
         };
+        // 自适应尺寸：默认 520×470，窗口更小时收缩，内容放不下时滚动
+        let (card_w, card_h) = super::adaptive_dialog_size(window, 520.0, 470.0);
+        let card_w = card_w.max(420.0);
+        let card_h = card_h.max(300.0);
 
         div()
             .size_full()
@@ -497,10 +505,9 @@ impl Render for SessionEditDialog {
             .track_focus(&self.focus_handle)
             .child(
                 div()
-                    .w(px(520.))
-                    // 固定高度：基础 Tab 有 5 个字段，若不限高，内容会溢到 footer，
-                    // 覆盖“取消/保存”按钮的点击区域（S7.5 手工回归发现）。
-                    .h(px(470.))
+                    .w(px(card_w))
+                    // 高度随窗口收缩；字段超出时内容区滚动，footer 始终可见
+                    .h(px(card_h))
                     .bg(t.card_bg())
                     .border_1()
                     .border_color(t.border_medium())
@@ -537,11 +544,14 @@ impl Render for SessionEditDialog {
                             .child(self.render_tab_header(DialogTab::Advanced, cx)),
                     )
                     .child(
-                        // 内容区固定占用剩余高度并裁剪，避免字段溢出盖住 footer 按钮。
+                        // 内容区占用剩余高度；窗口变矮时可滚动，避免字段盖住 footer
                         div()
+                            .id("session-form")
                             .w_full()
                             .flex_1()
-                            .overflow_hidden()
+                            .min_h(px(0.))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.form_scroll)
                             .child(self.render_tab_content(cx)),
                     )
                     .child(
@@ -606,6 +616,7 @@ impl SessionEditDialog {
             .on_click(
                 cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
                     this.active_tab = tab;
+                    this.form_scroll = ScrollHandle::new();
                     cx.notify();
                 }),
             )

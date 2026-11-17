@@ -40,3 +40,18 @@ pub(crate) const SFTP_MENU_W: f32 = 190.0;
 pub(crate) const MENU_ITEM_H: f32 = 28.0;
 /// 菜单容器上下 `py_1` 合计
 pub(crate) const MENU_PADDING_Y: f32 = 8.0;
+
+// ---------------------------------------------------------------------------
+// 弹窗自适应尺寸
+// ---------------------------------------------------------------------------
+
+/// 弹窗尺寸随窗口收缩：优先使用设计尺寸，视口不足时四周保留 24px 边距。
+///
+/// 只负责“封顶”，不做“保底”——调用方按各自最小可用宽度再 `.max()`；
+/// 高度缩到放不下内容时，由弹窗内部的 `overflow_y_scroll` 容器兜底。
+pub(crate) fn adaptive_dialog_size(window: &gpui::Window, pref_w: f32, pref_h: f32) -> (f32, f32) {
+    let viewport = window.viewport_size();
+    let width = (f32::from(viewport.width) - 48.0).min(pref_w);
+    let height = (f32::from(viewport.height) - 48.0).min(pref_h);
+    (width.max(1.0), height.max(1.0))
+}

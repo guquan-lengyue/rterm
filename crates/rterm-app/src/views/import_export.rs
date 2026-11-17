@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use gpui::prelude::*;
 use gpui::{
     div, px, ClickEvent, Context, Entity, IntoElement, MouseButton, MouseDownEvent, Render,
-    ScrollWheelEvent, SharedString, Window,
+    ScrollHandle, ScrollWheelEvent, SharedString, Window,
 };
 use uuid::Uuid;
 
@@ -81,6 +81,8 @@ pub struct ImportExportDialog {
     /// 勾选会话 / 预览列表的滚动状态（9.13）
     select_scroll: ScrollMetrics,
     preview_scroll: ScrollMetrics,
+    /// 弹窗主体滚动状态：窗口变矮时表单可滚动，切换导入/导出复位
+    body_scroll: ScrollHandle,
 
     /// (是否成功, 文本)
     pub message: Option<(bool, String)>,
@@ -116,6 +118,7 @@ impl ImportExportDialog {
 
             select_scroll: ScrollMetrics::new(SELECT_LIST_VIEW_H, LIST_ROW_H),
             preview_scroll: ScrollMetrics::new(PREVIEW_LIST_VIEW_H, LIST_ROW_H),
+            body_scroll: ScrollHandle::new(),
 
             message: None,
         }
@@ -525,6 +528,7 @@ impl ImportExportDialog {
                     this.mode = mode;
                     this.message = None;
                     this.preview = None;
+                    this.body_scroll = ScrollHandle::new();
                     cx.notify();
                 }),
             )
@@ -934,8 +938,12 @@ fn count_scope(sessions: &[rterm_session::Session], scope: &rterm_session::Expor
 // ---------------------------------------------------------------------------
 
 impl Render for ImportExportDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        // 自适应尺寸：默认 620×600，窗口更小时收缩，主体可滚动
+        let (card_w, card_h) = super::adaptive_dialog_size(window, 620.0, 600.0);
+        let card_w = card_w.max(520.0);
+        let card_h = card_h.max(320.0);
 
         let body = match self.mode {
             IoMode::Export => self.render_export_body(cx),
@@ -1024,8 +1032,8 @@ impl Render for ImportExportDialog {
             )
             .child(
                 div()
-                    .w(px(620.))
-                    .h(px(600.))
+                    .w(px(card_w))
+                    .h(px(card_h))
                     .bg(t.card_bg())
                     .border_1()
                     .border_color(t.border_medium())
@@ -1058,13 +1066,16 @@ impl Render for ImportExportDialog {
                     )
                     .child(
                         div()
+                            .id("io-body")
                             .w_full()
                             .flex_1()
+                            .min_h(px(0.))
                             .px_4()
                             .py_2()
                             .flex()
                             .flex_col()
-                            .overflow_hidden()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.body_scroll)
                             .child(body),
                     )
                     .child(footer),

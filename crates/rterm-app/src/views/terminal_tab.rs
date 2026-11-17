@@ -22,6 +22,7 @@ use crate::ui::theme;
 
 use super::sftp::{SftpDisplayMode, SftpView};
 use super::terminal::TerminalView;
+use super::SIDEBAR_W;
 
 /// 侧栏宽度范围（12.7 默认值与当前宽度写入设置）
 const DOCK_MIN_W: f32 = 280.0;
@@ -205,12 +206,12 @@ impl TerminalTabView {
         cx.notify();
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &Window, cx: &mut Context<Self>) {
         if !self.resizing {
             return;
         }
         let dx = f32::from(event.position.x) - self.resize_start_x;
-        let next = (self.resize_start_width - dx).clamp(DOCK_MIN_W, DOCK_MAX_W);
+        let next = (self.resize_start_width - dx).clamp(DOCK_MIN_W, dock_max_width(window));
         if (next - self.dock_width).abs() < 0.5 {
             return;
         }
@@ -269,15 +270,22 @@ fn terminal_to_sftp_enabled(cx: &mut Context<TerminalTabView>) -> bool {
     )
 }
 
+/// 侧栏宽度上限：随窗口自适应，最多占内容区（扣除会话栏）的 45%。
+fn dock_max_width(window: &Window) -> f32 {
+    let content_w = (f32::from(window.viewport_size().width) - SIDEBAR_W).max(0.0);
+    (content_w * 0.45).clamp(DOCK_MIN_W, DOCK_MAX_W)
+}
+
 impl Render for TerminalTabView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        let dock_w = self.dock_width.min(dock_max_width(window));
         let mut root = div()
             .size_full()
             .relative()
             .flex()
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _w, cx| {
-                this.on_mouse_move(event, cx);
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.on_mouse_move(event, window, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -297,7 +305,7 @@ impl Render for TerminalTabView {
             if let Some(dock) = &self.dock {
                 root = root.child(self.render_divider(cx)).child(
                     div()
-                        .w(px(self.dock_width))
+                        .w(px(dock_w))
                         .h_full()
                         .flex_none()
                         .overflow_hidden()
