@@ -187,6 +187,10 @@ pub struct TerminalView {
     host_key_prompt: Option<HostKeyPromptState>,
     /// 该终端 Tab 独占的路径同步状态机；MainWindow 通过 clone 读取同一实例。
     sync_bridge: Arc<Mutex<SyncBridge>>,
+    /// 会话日志按 Tab 开关（Ctrl+Shift+L）；开启时把 PTY 原始输出追加到文件。
+    log_enabled: bool,
+    log_dir: std::path::PathBuf,
+    log: Option<rterm_terminal::SessionLog>,
 }
 
 impl TerminalView {
@@ -278,6 +282,9 @@ impl TerminalView {
             last_latency_ms: None,
             host_key_prompt: None,
             sync_bridge: Arc::new(Mutex::new(SyncBridge::new(sync_mode))),
+            log_enabled: false,
+            log_dir: crate::state::logs_dir_path(&cx.global::<AppState>().settings),
+            log: None,
         }
     }
 
@@ -301,6 +308,91 @@ impl TerminalView {
 
     pub fn session_label(&self) -> Option<String> {
         self.session.as_ref().map(|session| session.display_label())
+    }
+
+    /// Ctrl+Shift+L：按 Tab 开关会话日志。
+    pub fn toggle_session_log(&mut self, cx: &mut Context<Self>) {
+        self.log_enabled = !self.log_enabled;
+        if self.log_enabled {
+            let path = self.log_file_path();
+            match rterm_terminal::SessionLog::create(&path, false) {
+                Ok(log) => {
+                    self.log = Some(log);
+                    self.emit(
+                        cx,
+                        AppEvent::StatusBarMessage {
+                            text: format!("会话日志已开启: {}", path.display()),
+                            duration_ms: 6000,
+                        },
+                    );
+                }
+                Err(error) => {
+                    self.log_enabled = false;
+                    self.emit(
+                        cx,
+                        AppEvent::StatusBarMessage {
+                            text: format!("会话日志开启失败: {error:#}"),
+                            duration_ms: 6000,
+                        },
+                    );
+                }
+            }
+        } else {
+            if let Some(mut log) = self.log.take() {
+                log.flush();
+            }
+            self.emit(
+                cx,
+                AppEvent::StatusBarMessage {
+                    text: "会话日志已停止".into(),
+                    duration_ms: 4000,
+                },
+            );
+        }
+        cx.notify();
+    }
+
+    /// 日志文件名：`<会话名>-<时间戳>-<tab8>.log`，非字母数字替换为 `_`。
+    fn log_file_path(&self) -> std::path::PathBuf {
+        let label = self
+            .session
+            .as_ref()
+            .map(|session| session.display_label())
+            .unwrap_or_else(|| "terminal".to_string());
+        let safe: String = label
+            .chars()
+            .map(|ch| {
+                if ch.is_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let tab_id = self.tab_id.simple().to_string();
+        let tab = &tab_id[..8.min(tab_id.len())];
+        self.log_dir.join(format!("{safe}-{stamp}-{tab}.log"))
+    }
+
+    /// 把一段 PTY 输出追加到会话日志（未开启时直接返回）。
+    fn write_session_log(&mut self, bytes: &[u8]) {
+        if !self.log_enabled {
+            return;
+        }
+        if self.log.is_none() {
+            match rterm_terminal::SessionLog::create(&self.log_file_path(), false) {
+                Ok(log) => self.log = Some(log),
+                Err(error) => {
+                    log::warn!("[terminal] 会话日志打开失败: {error:#}");
+                    self.log_enabled = false;
+                    return;
+                }
+            }
+        }
+        if let Some(log) = self.log.as_mut() {
+            log.write(bytes);
+        }
     }
 
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
@@ -491,6 +583,7 @@ impl TerminalView {
                 cx.notify();
             }
             PtyEvent::Data(bytes) => {
+                self.write_session_log(&bytes);
                 self.engine.input_bytes(&bytes);
                 // DSR / DA 等查询会通过 Event::PtyWrite 产生应答，写回 PTY
                 self.drain_engine_responses();

@@ -50,16 +50,24 @@ use super::{CONTEXT_MENU_ITEM_H, CONTEXT_MENU_W, MENU_PADDING_Y, SIDEBAR_W, TOOL
 
 actions!(
     rterm_tabs,
-    [NewTab, NextTab, CloseTab, NewSession, ToggleFullscreen]
+    [
+        NewTab,
+        NextTab,
+        CloseTab,
+        NewSession,
+        ToggleFullscreen,
+        ToggleSessionLog
+    ]
 );
 
-pub fn key_bindings() -> [KeyBinding; 5] {
+pub fn key_bindings() -> [KeyBinding; 6] {
     [
         KeyBinding::new("ctrl-t", NewTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-w", CloseTab, None),
         KeyBinding::new("ctrl-shift-n", NewSession, None),
         KeyBinding::new("f11", ToggleFullscreen, None),
+        KeyBinding::new("ctrl-shift-l", ToggleSessionLog, None),
     ]
 }
 
@@ -580,6 +588,26 @@ impl MainWindow {
             return;
         }
         self.open_edit_dialog(None, cx);
+    }
+
+    /// Ctrl+Shift+L：按 Tab 开关当前终端的会话日志。
+    pub fn toggle_session_log_shortcut(&mut self, cx: &mut Context<Self>) {
+        if self.dialogs_open(cx) {
+            return;
+        }
+        let terminal = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| match &tab.content {
+                TabContentView::Terminal(view) => Some(view.clone()),
+                _ => None,
+            });
+        match terminal {
+            Some(view) => {
+                view.update(cx, |view, cx| view.toggle_session_log(cx));
+            }
+            None => self.set_status("当前标签不是终端，无法开启会话日志", cx),
+        }
     }
 
     // -----------------------------------------------------------------------

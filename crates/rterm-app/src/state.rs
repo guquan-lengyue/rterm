@@ -127,6 +127,14 @@ pub fn sessions_path() -> std::path::PathBuf {
     data_dir_path().join("sessions.json")
 }
 
+/// 终端会话日志目录：`Settings.terminal_log_dir`（非空时）否则 `<data_dir>\logs`。
+pub fn logs_dir_path(settings: &Settings) -> std::path::PathBuf {
+    match settings.terminal_log_dir.as_deref() {
+        Some(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir.trim()),
+        _ => data_dir_path().join("logs"),
+    }
+}
+
 /// 立即把当前 SessionStore 写盘（DPAPI 加密），用于 CRUD 后即时持久化。
 ///
 /// 调用方必须保证调用前已释放 store 的 MutexGuard，否则会死锁。

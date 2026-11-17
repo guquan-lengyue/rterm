@@ -170,6 +170,20 @@ fn main() {
                 });
             },
         );
+
+        // Ctrl+Shift+L → 开关当前终端会话日志
+        app.on_action(
+            move |_: &views::main_window::ToggleSessionLog, app: &mut App| {
+                app.defer(move |app| {
+                    let handle = WindowHandle::<MainWindow>::new(window_id);
+                    if let Err(e) = handle.update(app, |main, _window, cx| {
+                        main.toggle_session_log_shortcut(cx)
+                    }) {
+                        log::error!("[shortcut] 切换会话日志失败: {e:#}");
+                    }
+                });
+            },
+        );
     });
 
     // 3. 退出保存 —— 从共享 Arc 读，一定是最新状态
