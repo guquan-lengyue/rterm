@@ -206,7 +206,7 @@ impl MonitorView {
                 let result = ssh
                     .connect(&session)
                     .map(|()| ssh)
-                    .map_err(|e| format!("{e:#}"));
+                    .map_err(|e| rterm_ssh::errors::describe(&e));
                 let _ = tx.unbounded_send(result);
             });
         if let Err(error) = spawned {

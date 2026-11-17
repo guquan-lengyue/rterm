@@ -1700,7 +1700,7 @@ fn run_connection(
     };
 
     if let Err(error) = ssh.connect_with_verifier(&config, Some(Box::new(verifier))) {
-        let reason = format!("{error:#}");
+        let reason = rterm_ssh::errors::describe(&error);
         let retryable = connect_error_is_retryable(&reason);
         let _ = pty::send_event(&mut output, PtyEvent::Failed { reason, retryable });
         return;
@@ -1739,12 +1739,19 @@ fn run_connection(
 
 /// 认证 / 配置 / 主机密钥错误重试没有意义，只有网络类错误才退避重连。
 fn connect_error_is_retryable(reason: &str) -> bool {
-    !(reason.contains("认证失败")
-        || reason.contains("认证未通过")
-        || reason.contains("主机密钥已变更")
-        || reason.contains("用户拒绝接受主机密钥")
-        || reason.contains("用户名为空")
-        || reason.contains("密码为空")
-        || reason.contains("主机地址为空")
-        || reason.contains("known_hosts 校验失败"))
+    use rterm_ssh::errors::{classify_message, SshErrorKind};
+
+    // 认证 / 主机密钥类错误重试也不会成功，直接停在失败态；
+    // 超时与网络抖动交给重连策略处理。
+    match classify_message(reason) {
+        SshErrorKind::AuthFailed | SshErrorKind::HostKeyChanged | SshErrorKind::HostKeyRejected => {
+            false
+        }
+        _ => {
+            !(reason.contains("用户名为空")
+                || reason.contains("密码为空")
+                || reason.contains("主机地址为空")
+                || reason.contains("known_hosts 校验失败"))
+        }
+    }
 }

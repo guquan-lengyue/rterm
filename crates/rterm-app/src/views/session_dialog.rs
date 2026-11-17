@@ -463,7 +463,7 @@ fn tcp_check(host: &str, port: u16) -> TestStatus {
 
     match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
         Ok(_) => TestStatus::Ok(format!("TCP OK — {addr}")),
-        Err(e) => TestStatus::Failed(format!("连接失败: {e}")),
+        Err(e) => TestStatus::Failed(rterm_ssh::errors::describe(&anyhow::Error::new(e))),
     }
 }
 

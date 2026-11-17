@@ -9,6 +9,7 @@
 //! 所有阻塞调用都必须由调用方放到后台线程执行。
 
 pub mod auth;
+pub mod errors;
 pub mod keepalive;
 pub mod known_hosts;
 pub mod pty;

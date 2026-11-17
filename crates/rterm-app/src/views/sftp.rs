@@ -303,7 +303,7 @@ impl SftpView {
                 let result = (|| -> Result<ConnectedSftp, String> {
                     let mut ssh = SshSession::new();
                     ssh.connect(&session)
-                        .map_err(|error| format!("{error:#}"))?;
+                        .map_err(|error| rterm_ssh::errors::describe(&error))?;
                     let raw = ssh
                         .session_clone()
                         .ok_or_else(|| "SSH 会话不可用".to_string())?;
