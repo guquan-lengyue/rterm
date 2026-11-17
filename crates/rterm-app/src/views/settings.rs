@@ -12,7 +12,7 @@
 use gpui::prelude::*;
 use gpui::{
     actions, div, px, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, Render, SharedString, Window,
+    MouseButton, MouseDownEvent, Render, ScrollWheelEvent, SharedString, Window,
 };
 
 use crate::event::{AppEvent, EventBusHost};
@@ -20,6 +20,7 @@ use crate::state::{lock_or_recover, AppState, CursorStyle, Settings};
 use crate::theme;
 use crate::ui::theme;
 
+use super::scroll_list::{scroll_list, ScrollMetrics};
 use super::text_input::TextInput;
 
 // Ctrl+, 快捷键动作
@@ -78,6 +79,28 @@ const SFTP_MODES: [(&str, &str); 4] = [
 
 const FONT_CHOICES: [&str; 4] = ["Cascadia Code", "Consolas", "JetBrains Mono", "Fira Code"];
 
+/// 字体列表行高 / 视口高度（9.13 自绘滚动容器）
+const FONT_ROW_H: f32 = 24.0;
+const FONT_LIST_VIEW_H: f32 = 120.0;
+
+/// 合并系统字体枚举结果与当前设置值（9.14）：
+/// - 枚举为空（平台不支持 / 调用失败）→ 回退到 4 个预设
+/// - 当前值不在列表里（字体被卸载）→ 插到最前，避免选中态丢失
+fn merge_font_choices(system: Vec<String>, current: &str) -> Vec<String> {
+    let mut fonts = if system.is_empty() {
+        FONT_CHOICES
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>()
+    } else {
+        system
+    };
+    if !current.is_empty() && !fonts.iter().any(|font| font == current) {
+        fonts.insert(0, current.to_string());
+    }
+    fonts
+}
+
 // ---------------------------------------------------------------------------
 // SettingsView
 // ---------------------------------------------------------------------------
@@ -104,6 +127,10 @@ pub struct SettingsView {
     data_dir_input: Entity<TextInput>,
 
     pub error: Option<String>,
+
+    /// 系统已装字体（打开设置时枚举一次，见 9.14）
+    font_choices: Vec<String>,
+    font_scroll: ScrollMetrics,
 }
 
 impl SettingsView {
@@ -113,6 +140,10 @@ impl SettingsView {
         let ti = |cx: &mut Context<Self>, content: String| -> Entity<TextInput> {
             cx.new(|_cx| TextInput::new(_cx).with_content(content))
         };
+
+        // 9.14：枚举系统字体；平台返回空时回退到 4 个预设
+        let font_choices =
+            merge_font_choices(cx.text_system().all_font_names(), &draft.default_font_family);
 
         Self {
             active_tab: SettingsTab::General,
@@ -133,6 +164,8 @@ impl SettingsView {
 
             draft,
             error: None,
+            font_choices,
+            font_scroll: ScrollMetrics::new(FONT_LIST_VIEW_H, FONT_ROW_H),
         }
     }
 
@@ -634,44 +667,86 @@ impl SettingsView {
         }
         form = form.child(theme_row);
 
-        form = form.child(Self::section_title("字体", cx));
-        let mut font_row = div().w_full().flex().flex_wrap().gap_1();
-        for font in FONT_CHOICES {
-            let selected = self.draft.default_font_family == font;
-            let id = format!("settings-font-{font}");
-            let bg = if selected {
-                t.row_selected_bg()
-            } else {
-                t.secondary_btn_bg()
-            };
-            let fg = if selected {
-                t.text_on_row_selected_bg()
-            } else {
-                t.text_on_secondary_btn()
-            };
-            font_row = font_row.child(
+        // 9.14：枚举系统已装字体，滚轮浏览（预设仅作枚举失败时的 fallback）
+        form = form.child(Self::section_title("字体（系统已装）", cx));
+        self.font_scroll.set_rows(self.font_choices.len());
+        let list_theme = t.clone();
+        let fonts = &self.font_choices;
+        let selected_font = self.draft.default_font_family.clone();
+        let list_cx: &Context<Self> = cx;
+        form = form
+            .child(
                 div()
-                    .h(px(26.))
-                    .px_3()
+                    .w_full()
+                    .p_1()
                     .rounded_md()
-                    .bg(bg)
-                    .text_color(fg)
-                    .text_size(px(11.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .id(id)
-                    .on_click(cx.listener(
-                        move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
-                            this.draft.default_font_family = font.to_string();
-                            cx.notify();
+                    .bg(t.card_header_bg())
+                    .border_1()
+                    .border_color(t.border_subtle())
+                    .child(scroll_list(
+                        "settings-font-list",
+                        self.font_scroll,
+                        t.border_subtle(),
+                        t.text_subtle(),
+                        cx.listener(|this: &mut Self, event: &ScrollWheelEvent, _w, cx| {
+                            if this.font_scroll.on_wheel(event) {
+                                cx.notify();
+                            }
+                        }),
+                        move |index| {
+                            let font = &fonts[index];
+                            let selected = selected_font == *font;
+                            let bg = if selected {
+                                list_theme.row_selected_bg()
+                            } else {
+                                list_theme.card_header_bg()
+                            };
+                            let fg = if selected {
+                                list_theme.text_on_row_selected_bg()
+                            } else {
+                                list_theme.text_on_card_bg()
+                            };
+                            let pick = font.clone();
+                            div()
+                                .w_full()
+                                .h_full()
+                                .rounded_md()
+                                .bg(bg)
+                                .text_color(fg)
+                                .text_size(px(11.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .id(format!("settings-font-{font}"))
+                                .on_click(list_cx.listener(
+                                    move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                                        this.draft.default_font_family = pick.clone();
+                                        cx.notify();
+                                    },
+                                ))
+                                .child(if selected {
+                                    format!("✓ {font}")
+                                } else {
+                                    font.clone()
+                                })
+                                .into_any_element()
                         },
-                    ))
-                    .child(font.to_string()),
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .mb_2()
+                    .text_size(px(10.))
+                    .text_color(t.text_subtle())
+                    .flex()
+                    .justify_center()
+                    .child(format!(
+                        "共 {} 个字体 · 滚轮浏览",
+                        self.font_choices.len()
+                    )),
             );
-        }
-        form = form.child(font_row);
 
         form = form
             .child(Self::field(
@@ -1111,5 +1186,36 @@ impl Render for SettingsView {
                     )
                     .child(footer),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_system_fonts_fall_back_to_presets() {
+        let fonts = merge_font_choices(Vec::new(), "Consolas");
+        assert_eq!(fonts.len(), 4);
+        assert_eq!(fonts[0], "Cascadia Code");
+    }
+
+    #[test]
+    fn missing_current_font_is_prepended() {
+        let fonts = merge_font_choices(
+            vec!["Arial".to_string(), "Consolas".to_string()],
+            "Uninstalled Mono",
+        );
+        assert_eq!(fonts[0], "Uninstalled Mono");
+        assert_eq!(fonts.len(), 3);
+    }
+
+    #[test]
+    fn existing_current_font_is_not_duplicated() {
+        let fonts = merge_font_choices(
+            vec!["Arial".to_string(), "Consolas".to_string()],
+            "Consolas",
+        );
+        assert_eq!(fonts, vec!["Arial".to_string(), "Consolas".to_string()]);
     }
 }
