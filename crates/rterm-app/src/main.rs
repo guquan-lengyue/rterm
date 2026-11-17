@@ -39,6 +39,18 @@ fn main() {
     let (store, startup_error, loaded_ok) = load_store();
     let settings = state::Settings::load();
 
+    // 1.1 每日备份：距上次备份超过 24h 才真正复制，保留最近 7 份。
+    if loaded_ok {
+        match rterm_session::backup::ensure_daily_backup(
+            &state::sessions_path(),
+            std::time::SystemTime::now(),
+        ) {
+            Ok(Some(path)) => log::info!("[backup] 已生成会话备份: {}", path.display()),
+            Ok(None) => {}
+            Err(error) => log::warn!("[backup] 生成会话备份失败: {error:#}"),
+        }
+    }
+
     // 用 Arc<Mutex<>> 包装，AppState 和退出保存共享同一份。
     // SessionEditDialog.save() 修改时写入 AppState.session_store，
     // 退出时 save_store() 从同一个 Arc 读出——两边永远一致。
