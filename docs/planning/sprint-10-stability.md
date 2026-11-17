@@ -1,6 +1,6 @@
 # Sprint 10 — 稳定性收尾
 
-> **状态**：待开始（S7.5 ✅、S8 ✅ 已完成；等 S9）
+> **状态**：待开始（S7.5 ✅、S8 ✅、S9 ✅ 已完成）
 > **前置**：[Sprint 6](./sprint-06-terminal-render.md) ✅ + [Sprint 7](./sprint-07-sftp.md) + [Sprint 7.5](./sprint-07.5-tech-debt.md) ✅ + [Sprint 8](./sprint-08-sync.md) ✅ + [Sprint 9](./sprint-09-monitor.md)（Perl ✅ 已完成）
 > **目标**：known_hosts 回归 + 错误映射 + 命令面板 + 全局快捷键 + 日志 + 备份 + 全量 smoke test
 >
@@ -38,6 +38,9 @@
 > - SFTP 顶部「已连接 · 远端路径」标签不随导航刷新 → 9.20
 > - SyncBridge 注入的 `cd` 命令仍会在终端回显 → 9.21
 > - pwd 兜底对自定义提示符（`read -p` 等）仍有误判可能，已用 `$ # % ❯` 白名单收敛 → 记录为已知限制，不新增任务
+>
+> **S9 遗留（本 Sprint 收口）**：
+> - 关闭窗口时 bezel-gpui Windows 后端在 HWND 销毁后清理 OLE/TSF，打出 4 行 `window not found` + `无效的窗口句柄 (0x80040102 / 0x80070578)` 日志噪音（不影响关闭与退出保存，纯 idle 窗口关闭即可复现，与 Sprint 9 代码无关）→ 9.22
 
 ---
 
@@ -68,6 +71,7 @@
 | 9.19 | 0.5h | `crates/rterm-ssh/src/pty.rs` | PTY 空闲唤醒：用 socket readiness / 可中断等待替代最长 50ms 轮询，恢复首键低延迟 | 空闲 1 分钟后按键回显 ≤ 当前活跃路径 + 10ms |
 | 9.20 | 0.25h | `crates/rterm-app/src/views/sftp.rs` | SFTP 顶部状态标签随 `SftpNavigated` 刷新远端路径（当前停留在打开时的 home） | 任意导航后标签与地址栏一致 |
 | 9.21 | 0.5h | `crates/rterm-app/src/views/terminal.rs` + `rterm-sync` | 评估注入命令回显抑制：标记内部命令，输入行不上屏（或短暂高亮/淡出），不影响真实用户输入 | 双向同步时不出现可见的 `cd '/path'` 行 |
+| 9.22 | 0.25h | `crates/rterm-app/src/main.rs`（或 vendored gpui 评估） | 关闭窗口的 teardown 日志噪音：`App::update_window_erased` 在 HWND 销毁后仍被调用（`window not found`），随后 OLE/TSF 清理报 `0x80040102` / `0x80070578`。先评估在退出路径提前 `deactivate IME / 关闭 a11y` 是否消除；否则降级为 `log` filter 静音（保持功能日志完整），必要时给 bezel-gpui 上游提 issue | 关闭窗口日志不再出现 `window not found` / `无效的窗口句柄`；会话仍正常落盘 |
 
 ### 9.12 全量 Smoke Test
 
