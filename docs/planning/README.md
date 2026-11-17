@@ -21,6 +21,7 @@
 | **S9** | 远程性能监控 | [sprint-09-monitor.md](./sprint-09-monitor.md) | ✅ 已完成（2026-11-17） | S5 + S6 ✅ + S7.5 ✅ |
 | **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | ✅ 代码任务完成（2026-11-17，待 9.12.1 手工 smoke → S11 11.1） | S6 ✅–S9 ✅ + S7.5 ✅ |
 | **S11** | v1.0 打磨 & 发布 | [sprint-11-release.md](./sprint-11-release.md) | 🚧 就绪（先跑 S10 9.12.1 手工 smoke） | S10 ✅ |
+| **S12** | 终端内嵌 SFTP 侧栏（v1.1） | [sprint-12-terminal-sftp-dock.md](./sprint-12-terminal-sftp-dock.md) | 📋 待开始（不阻塞 v1.0） | S8 ✅ + S10 ✅ + S11 |
 
 ---
 
@@ -44,16 +45,17 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
                                          │
                                          └──▶ S9 ✅ 远程监控
 
-                         S10 ✅ 稳定性收尾 ──▶ S11 🚧 v1.0 发布
+                         S10 ✅ 稳定性收尾 ──▶ S11 🚧 v1.0 发布 ──▶ S12 📋 内嵌 SFTP 侧栏（v1.1）
 ```
 
-**关键路径**：S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → **S7.5** → S8 → S9 → **S10** → S11
+**关键路径**：S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → **S7.5** → S8 → S9 → **S10** → S11 → S12
 
 **当前状态**：
 - S10 的 21 项代码任务全部完成，workspace 174 passed / 1 ignored，clippy 0 warning
 - S10 只差 9.12.1 GUI 手工 smoke（真实远端 / 大目录 / 长空闲 / 多类型 Tab），已并入 S11 11.1
 - S11 依次执行：全量回归 → Release 构建 → 安装包 → 文档（补 S9 CHANGELOG）→ 代码清理 → 压力测试 → 发布验收
 - S10 已知限制（命令面板仅 ASCII、vi 仅导航、回显抑制边界等）列在 S11 文档「S10 交接项」
+- S12 已立项（v1.1）：终端 Tab 右侧停靠 SFTP 侧栏并跟随终端 cwd，复用 S8 的 `TerminalCwdHint`，不阻塞 v1.0
 
 ---
 
@@ -90,6 +92,8 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 
 ## 变更记录
 
+- **2026-11-17** v4.4：新增 **S12 终端内嵌 SFTP 侧栏（v1.1）**——同一终端 Tab 右侧停靠 SFTP，
+  路径跟随终端 cwd（受同步模式门控、无回环）；不阻塞 S11 的 v1.0 发布
 - **2026-11-17** v4.3：S10 完成（21 项代码任务 + 回归；174 passed / 1 ignored，clippy 0 warning，fmt 通过）；S10 总结写入 CHANGELOG；S11 重排任务（11.1 先跑 9.12.1 手工 smoke，新增「S10 交接项」）；roadmap Phase 3/5/6 收口、Phase 7 进行中
 - **2026-11-17** v4.2：S9 远程监控完成（MonitorView / 采集 / Top / Kill；/proc awk 优化 CPU%）；S10 转为下一个
 - **2026-11-17** v4.1：S8 完成（双向路径同步 + 防回环 + Off 模式，真实 GUI E2E 通过；104 passed / 1 ignored，clippy 0 warning，fmt 通过）；S9 转为下一个

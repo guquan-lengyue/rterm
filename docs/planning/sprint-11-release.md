@@ -3,6 +3,7 @@
 > **状态**：就绪（S10 代码任务已完成；第一项先把 S10 9.12.1 GUI 手工 smoke 跑完）
 > **前置**：[Sprint 10](./sprint-10-stability.md) ✅（21 项代码任务全绿，手工 smoke 待补）
 > **目标**：全量回归（含 S10 手工 smoke）+ Release 构建 + 安装包 + README + CHANGELOG 定稿 + 压力测试
+> **后续**：[Sprint 12 — 终端内嵌 SFTP 侧栏](./sprint-12-terminal-sftp-dock.md)（v1.1，不阻塞本 Sprint 发布）
 >
 > **S10 基线**：`cargo test --workspace` **174 passed / 1 ignored**；`cargo clippy --workspace --all-targets` 0 warning；`cargo fmt --all` 通过；本地门禁脚本 [check.ps1](../../scripts/check.ps1)。
 >

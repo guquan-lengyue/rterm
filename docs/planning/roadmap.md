@@ -15,6 +15,7 @@
 | **P5 远程性能监控** | MonitorCollector + 折线图 + Top 进程 + 阈值告警 | ✅ 已完成（S9） | tokio 定时 + Canvas 折线图 |
 | **P6 稳定性收尾** | 主机密钥管理 + 重连策略 + 命令面板 + 快捷键 + 日志导出 + 自动备份 | ✅ 已完成（S10） | winreg / dirs |
 | **P7 打磨 & v1.0** | 全量回归 + Release 构建 + 安装包 + 文档 + 压力测试 | 🚧 进行中（S11） | — |
+| **P8 v1.1 增强** | 终端 Tab 内嵌 SFTP 侧栏 + 路径跟随 | 📋 待开始（S12） | S8 + S10 + S11 |
 
 **注**：预估时间相对粗略，按全职进度。P2（终端）是最具技术挑战的 Phase，也是整个 MVP 的核心。
 
@@ -274,6 +275,27 @@
 - [ ] 完整 README.md（用户版 + 开发者版）
 - [ ] CHANGELOG.md v1.0 发布说明（补齐 Sprint 9 条目）
 - [ ] 全量回归测试（基础连接 + 终端仿真 + SFTP 上传 + 路径同步 + 监控）
+
+---
+
+## Phase 8 — v1.1 增强（S12 终端内嵌 SFTP 侧栏）
+
+> 任务拆分与验收见 [sprint-12-terminal-sftp-dock.md](./sprint-12-terminal-sftp-dock.md)；不阻塞 v1.0 发布。
+
+### 前置条件
+- [x] S8 路径同步（`TerminalCwdHint` / SyncBridge 防回环）
+- [x] S10 SFTP 打磨（拖拽 / 虚拟化 / 后台读取）
+- [ ] S11 v1.0 发布基线
+
+### 任务清单
+
+- [ ] `SftpView` Dock 模式（隐藏工具条、自适应宽度、延迟连接）
+- [ ] `TerminalTabView` 组合视图：终端 + 右侧 SFTP 侧栏 + 可拖拽分隔条（280–720px）
+- [ ] 路径跟随：`TerminalCwdHint` → 侧栏 `navigate_to_remote`（按同步模式门控、`pending_sftp_nav` 防回环）
+- [ ] 开关入口：终端头部按钮 + `Ctrl+Shift+S`（`ToggleSftpDock` action）
+- [ ] 设置持久化：默认显示侧栏 + 侧栏宽度
+- [ ] 生命周期：关闭 Tab 同时释放 SFTP；侧栏错误不污染终端
+- [ ] 回归：多 Tab / 主题 / 高 DPI / 拖拽传输 / 暂停取消 / vi 模式；README + CHANGELOG 更新
 
 ---
 
