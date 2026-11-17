@@ -80,6 +80,41 @@ fn idle_poll_interval(idle_for: Duration) -> Duration {
     }
 }
 
+/// IO 线程唤醒句柄（9.19）。
+///
+/// 空闲时 IO 线程用 `park_timeout` 代替 `sleep`；UI 每次发送 `PtyCommand`
+/// 后调用 [`IoWaker::wake`]，线程立即被唤醒处理输入，不再等最长 50ms 的轮询间隔。
+#[derive(Clone, Debug, Default)]
+pub struct IoWaker {
+    thread: std::sync::Arc<std::sync::Mutex<Option<std::thread::Thread>>>,
+}
+
+impl IoWaker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 由 IO 线程启动时登记自己（之后 UI 的 `wake` 才能命中）。
+    fn install(&self) {
+        if let Ok(mut slot) = self.thread.lock() {
+            *slot = Some(std::thread::current());
+        }
+    }
+
+    /// UI 线程调用：唤醒正在 `park_timeout` 的 IO 线程。
+    /// 线程尚未启动 / 已退出时是无操作。
+    pub fn wake(&self) {
+        let thread = self
+            .thread
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned());
+        if let Some(thread) = thread {
+            thread.unpark();
+        }
+    }
+}
+
 /// 请求 PTY 并启动远程 shell；调用后 Session 进入 non-blocking 模式。
 pub fn open_pty(session: &ssh2::Session, cols: u32, rows: u32) -> Result<ssh2::Channel> {
     let mut channel = session.channel_session().context("创建 SSH channel 失败")?;
@@ -102,7 +137,9 @@ pub fn run_io(
     keepalive_secs: u32,
     commands: Receiver<PtyCommand>,
     mut output: Sender<PtyEvent>,
+    waker: IoWaker,
 ) {
+    waker.install();
     let mut keepalive = KeepAliveTimer::new(keepalive_secs);
     let mut pending_write: Vec<u8> = Vec::new();
     let mut pending_resize: Option<(u32, u32)> = None;
@@ -229,11 +266,63 @@ pub fn run_io(
             }
         }
 
-        // 6. 自适应等待：活跃 8ms；空闲约 1s 后逐步退避到 50ms
-        std::thread::sleep(idle_poll_interval(last_activity.elapsed()));
+        // 6. 可中断等待（9.19）：活跃 8ms 退避到空闲 50ms；
+        //    UI 发命令后 unpark 会立即打断等待，首键回显不再受轮询间隔影响。
+        std::thread::park_timeout(idle_poll_interval(last_activity.elapsed()));
     }
 }
 
 fn is_ssh_eagain(error: &ssh2::Error) -> bool {
     matches!(error.code(), ssh2::ErrorCode::Session(-37))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn wake_interrupts_parked_thread() {
+        let waker = IoWaker::new();
+        // 未 install 时 wake 是无操作，不应 panic
+        waker.wake();
+
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let cloned = waker.clone();
+        let handle = std::thread::spawn(move || {
+            cloned.install();
+            ready_tx.send(()).expect("发送就绪信号");
+            let started = Instant::now();
+            // 模拟空闲等待：正常情况下会睡满 5s
+            std::thread::park_timeout(Duration::from_secs(5));
+            started.elapsed()
+        });
+        ready_rx.recv().expect("等待 IO 线程就绪");
+        waker.wake();
+        let waited = handle.join().expect("IO 线程不应 panic");
+        assert!(
+            waited < Duration::from_secs(1),
+            "unpark 应立即结束空闲等待，实际 {waited:?}"
+        );
+    }
+
+    #[test]
+    fn idle_interval_backs_off() {
+        assert_eq!(
+            idle_poll_interval(Duration::from_millis(0)),
+            Duration::from_millis(8)
+        );
+        assert_eq!(
+            idle_poll_interval(Duration::from_millis(1500)),
+            Duration::from_millis(16)
+        );
+        assert_eq!(
+            idle_poll_interval(Duration::from_millis(3000)),
+            Duration::from_millis(32)
+        );
+        assert_eq!(
+            idle_poll_interval(Duration::from_secs(60)),
+            Duration::from_millis(50)
+        );
+    }
 }

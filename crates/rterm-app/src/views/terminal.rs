@@ -32,7 +32,7 @@ use gpui::{
 };
 use uuid::Uuid;
 
-use rterm_ssh::pty::{self, PtyCommand, PtyEvent};
+use rterm_ssh::pty::{self, IoWaker, PtyCommand, PtyEvent};
 use rterm_ssh::reconnect::ReconnectPolicy;
 use rterm_ssh::{HostKeyChoice, HostKeyDecision, HostKeyInfo, SshSession};
 use rterm_sync::{SyncBridge, SyncMode};
@@ -172,6 +172,8 @@ pub struct TerminalView {
     session_id: Option<Uuid>,
     tab_id: Uuid,
     input_tx: Option<Sender<PtyCommand>>,
+    /// PTY 线程唤醒句柄：发命令后 unpark，空闲轮询也能立即响应按键（9.19）
+    io_waker: IoWaker,
     /// 终端内部应答（DSR / DA 等 PtyWrite）通道，每次喂数据后 drain 写回 PTY
     response_rx: Option<Receiver<Vec<u8>>>,
     generation: u64,
@@ -275,6 +277,7 @@ impl TerminalView {
             session_id: None,
             tab_id: Uuid::new_v4(),
             input_tx: None,
+            io_waker: IoWaker::new(),
             response_rx: Some(response_rx),
             generation: 0,
             reconnect_attempt: 0,
@@ -513,6 +516,7 @@ impl TerminalView {
         self.host_key_prompt = None;
         if let Some(tx) = self.input_tx.take() {
             let _ = tx.send(PtyCommand::Close);
+            self.io_waker.wake();
         }
         self.status = TerminalStatus::Idle;
         self.selection = None;
@@ -546,9 +550,10 @@ impl TerminalView {
 
         let cols = self.cols;
         let rows = self.rows;
+        let io_waker = self.io_waker.clone();
         let spawn_result = std::thread::Builder::new()
             .name(format!("rterm-ssh-{generation}"))
-            .spawn(move || run_connection(config, cols, rows, output_tx, input_rx));
+            .spawn(move || run_connection(config, cols, rows, output_tx, input_rx, io_waker));
 
         if let Err(error) = spawn_result {
             self.fail(format!("创建 SSH 线程失败: {error}"), cx);
@@ -798,6 +803,7 @@ impl TerminalView {
                 cols: cols as u32,
                 rows: rows as u32,
             });
+            self.io_waker.wake();
         }
     }
 
@@ -832,6 +838,8 @@ impl TerminalView {
     fn send_bytes(&mut self, bytes: Vec<u8>) {
         if let Some(tx) = &self.input_tx {
             let _ = tx.send(PtyCommand::Write(bytes));
+            // 9.19：空闲轮询最长 50ms，unpark 让首键立即被 IO 线程处理
+            self.io_waker.wake();
         }
     }
 
@@ -1914,6 +1922,7 @@ fn run_connection(
     rows: u16,
     mut output: futures::channel::mpsc::Sender<PtyEvent>,
     commands: Receiver<PtyCommand>,
+    io_waker: IoWaker,
 ) {
     let mut ssh = SshSession::new();
 
@@ -1972,7 +1981,14 @@ fn run_connection(
     if !pty::send_event(&mut output, PtyEvent::Connected) {
         return;
     }
-    pty::run_io(channel, session, config.keepalive_secs, commands, output);
+    pty::run_io(
+        channel,
+        session,
+        config.keepalive_secs,
+        commands,
+        output,
+        io_waker,
+    );
 }
 
 /// 认证 / 配置 / 主机密钥错误重试没有意义，只有网络类错误才退避重连。
