@@ -8,6 +8,7 @@ pub mod command_palette;
 pub mod import_export;
 pub mod main_window;
 pub mod monitor;
+pub mod scroll_list;
 pub mod session_dialog;
 pub mod session_tree;
 pub mod settings;

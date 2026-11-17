@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use gpui::prelude::*;
 use gpui::{
     div, px, ClickEvent, Context, Entity, IntoElement, MouseButton, MouseDownEvent, Render,
-    SharedString, Window,
+    ScrollWheelEvent, SharedString, Window,
 };
 use uuid::Uuid;
 
@@ -19,7 +19,13 @@ use crate::event::{AppEvent, EventBusHost};
 use crate::state::{lock_or_recover, AppState};
 use crate::ui::theme;
 
+use super::scroll_list::{scroll_list, ScrollMetrics};
 use super::text_input::TextInput;
+
+/// 勾选会话 / 预览列表：定高行 + 固定视口（9.13 自绘滚动容器）
+const LIST_ROW_H: f32 = 24.0;
+const SELECT_LIST_VIEW_H: f32 = 120.0;
+const PREVIEW_LIST_VIEW_H: f32 = 144.0;
 
 // ---------------------------------------------------------------------------
 // 模式 / 选项
@@ -72,6 +78,10 @@ pub struct ImportExportDialog {
     policy: rterm_session::ConflictPolicy,
     preview: Option<Vec<rterm_session::ImportPreviewItem>>,
 
+    /// 勾选会话 / 预览列表的滚动状态（9.13）
+    select_scroll: ScrollMetrics,
+    preview_scroll: ScrollMetrics,
+
     /// (是否成功, 文本)
     pub message: Option<(bool, String)>,
 }
@@ -103,6 +113,9 @@ impl ImportExportDialog {
             import_pass: ti(cx, String::new(), true),
             policy: rterm_session::ConflictPolicy::Skip,
             preview: None,
+
+            select_scroll: ScrollMetrics::new(SELECT_LIST_VIEW_H, LIST_ROW_H),
+            preview_scroll: ScrollMetrics::new(PREVIEW_LIST_VIEW_H, LIST_ROW_H),
 
             message: None,
         }
@@ -636,58 +649,69 @@ impl ImportExportDialog {
                         .child("暂无会话"),
                 );
             } else {
-                let mut grid = div().w_full().flex().flex_wrap().gap_1();
-                for s in sessions.iter().take(24) {
-                    let checked = self.selected_ids.contains(&s.id);
-                    let id = format!("io-sel-{}", s.id);
-                    let bg = if checked {
-                        t.row_selected_bg()
-                    } else {
-                        t.card_header_bg()
-                    };
-                    let sid = s.id;
-                    grid = grid.child(
-                        div()
-                            .h(px(24.))
-                            .px_2()
-                            .rounded_md()
-                            .bg(bg)
-                            .text_color(t.text_on_card_bg())
-                            .text_size(px(10.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .id(id)
-                            .on_click(cx.listener(
-                                move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                                    if !this.selected_ids.remove(&sid) {
-                                        this.selected_ids.insert(sid);
-                                    }
+                // 9.13：自绘滚动容器，24+ 会话也能滚动勾选（定高行虚拟化）
+                self.select_scroll.set_rows(sessions.len());
+                let list_theme = t.clone();
+                let selected_ids = &self.selected_ids;
+                let list_cx: &Context<Self> = cx;
+                body = body.child(
+                    div()
+                        .w_full()
+                        .p_1()
+                        .rounded_md()
+                        .bg(t.card_header_bg())
+                        .border_1()
+                        .border_color(t.border_subtle())
+                        .child(scroll_list(
+                            "io-select-list",
+                            self.select_scroll,
+                            t.border_subtle(),
+                            t.text_subtle(),
+                            cx.listener(|this: &mut Self, event: &ScrollWheelEvent, _w, cx| {
+                                if this.select_scroll.on_wheel(event) {
                                     cx.notify();
-                                },
-                            ))
-                            .child(format!(
-                                "{} {}",
-                                if checked { "☑" } else { "☐" },
-                                s.display_label()
-                            )),
-                    );
-                }
-                if sessions.len() > 24 {
-                    grid = grid.child(
-                        div()
-                            .h(px(24.))
-                            .px_2()
-                            .text_size(px(10.))
-                            .text_color(t.text_subtle())
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(format!("…还有 {} 个未列出", sessions.len() - 24)),
-                    );
-                }
-                body = body.child(grid);
+                                }
+                            }),
+                            move |index| {
+                                let s = &sessions[index];
+                                let checked = selected_ids.contains(&s.id);
+                                let bg = if checked {
+                                    list_theme.row_selected_bg()
+                                } else {
+                                    list_theme.card_header_bg()
+                                };
+                                let fg = list_theme.text_on_card_bg();
+                                let sid = s.id;
+                                div()
+                                    .w_full()
+                                    .h_full()
+                                    .px_2()
+                                    .rounded_md()
+                                    .bg(bg)
+                                    .text_color(fg)
+                                    .text_size(px(10.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .id(format!("io-sel-{sid}"))
+                                    .on_click(list_cx.listener(
+                                        move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                                            if !this.selected_ids.remove(&sid) {
+                                                this.selected_ids.insert(sid);
+                                            }
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .child(format!(
+                                        "{} {}",
+                                        if checked { "☑" } else { "☐" },
+                                        s.display_label()
+                                    ))
+                                    .into_any_element()
+                            },
+                        )),
+                );
             }
         }
 
@@ -803,59 +827,71 @@ impl ImportExportDialog {
         };
         body = body.child(self.section(&preview_title, cx));
 
+        // 9.13：自绘滚动容器（12+ 条预览可滚动；空状态保留固定高度避免弹窗跳动）
+        self.preview_scroll
+            .set_rows(self.preview.as_ref().map_or(0, |items| items.len()));
         let mut list = div()
             .w_full()
-            .flex_1()
+            .h(px(PREVIEW_LIST_VIEW_H + 16.0))
             .p_2()
             .rounded_md()
             .bg(t.card_header_bg())
             .border_1()
             .border_color(t.border_subtle())
             .flex()
-            .flex_col()
-            .gap_1();
+            .flex_col();
 
         match &self.preview {
             Some(items) if !items.is_empty() => {
-                for item in items.iter().take(12) {
-                    let (dot, label, color) = match item.status {
-                        rterm_session::ImportPreviewStatus::Added => ("🟢", "新增", t.success()),
-                        rterm_session::ImportPreviewStatus::Updated => ("🟡", "更新", t.primary()),
-                        rterm_session::ImportPreviewStatus::Skipped => {
-                            ("⚪", "跳过", t.text_subtle())
+                let list_theme = t.clone();
+                list = list.child(scroll_list(
+                    "io-preview-list",
+                    self.preview_scroll,
+                    t.border_subtle(),
+                    t.text_subtle(),
+                    cx.listener(|this: &mut Self, event: &ScrollWheelEvent, _w, cx| {
+                        if this.preview_scroll.on_wheel(event) {
+                            cx.notify();
                         }
-                        rterm_session::ImportPreviewStatus::Renamed => ("🔵", "改名", t.primary()),
-                    };
-                    list = list.child(
+                    }),
+                    move |index| {
+                        let item = &items[index];
+                        let (dot, label, color) = match item.status {
+                            rterm_session::ImportPreviewStatus::Added => {
+                                ("🟢", "新增", list_theme.success())
+                            }
+                            rterm_session::ImportPreviewStatus::Updated => {
+                                ("🟡", "更新", list_theme.primary())
+                            }
+                            rterm_session::ImportPreviewStatus::Skipped => {
+                                ("⚪", "跳过", list_theme.text_subtle())
+                            }
+                            rterm_session::ImportPreviewStatus::Renamed => {
+                                ("🔵", "改名", list_theme.primary())
+                            }
+                        };
                         div()
                             .w_full()
+                            .h_full()
                             .text_size(px(11.))
                             .text_color(color)
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(format!("{dot} {label}  {}", item.name)),
-                    );
-                }
-                if items.len() > 12 {
-                    list = list.child(
-                        div()
-                            .w_full()
-                            .text_size(px(10.))
-                            .text_color(t.text_subtle())
-                            .flex()
-                            .justify_center()
-                            .child(format!("…还有 {} 条", items.len() - 12)),
-                    );
-                }
+                            .child(format!("{dot} {label}  {}", item.name))
+                            .into_any_element()
+                    },
+                ));
             }
             Some(_) => {
                 list = list.child(
                     div()
                         .w_full()
+                        .flex_1()
                         .text_size(px(11.))
                         .text_color(t.text_subtle())
                         .flex()
+                        .items_center()
                         .justify_center()
                         .child("文件里没有会话"),
                 );
@@ -864,9 +900,11 @@ impl ImportExportDialog {
                 list = list.child(
                     div()
                         .w_full()
+                        .flex_1()
                         .text_size(px(11.))
                         .text_color(t.text_subtle())
                         .flex()
+                        .items_center()
                         .justify_center()
                         .child("预览会列出每条会话将被新增 / 更新 / 跳过"),
                 );
