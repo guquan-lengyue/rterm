@@ -6,5 +6,5 @@
 pub mod engine;
 pub mod session_log;
 
-pub use engine::{SizeInfo, TerminalEngine, TerminalKey};
+pub use engine::{SizeInfo, TerminalEngine, TerminalKey, ViMove};
 pub use session_log::SessionLog;

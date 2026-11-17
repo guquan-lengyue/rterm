@@ -19,14 +19,15 @@ use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 // EventProxy / SizeInfo
 // ---------------------------------------------------------------------------
 
-/// 终端内部事件（标题变化 / 剪贴板请求等）。S5 只记录日志，
-/// S6 渲染 / S10 OSC 52 再接管。
+/// 终端内部事件（标题变化 / 剪贴板请求等）。
 ///
 /// `PtyWrite`（DSR / DA 等查询应答）需要通过 `responses` 写回 PTY；
+/// `ClipboardStore`（OSC 52 远程复制）推入共享队列，由 View 取出写入系统剪贴板。
 /// 其余事件仍只记录 debug 日志。含 `Sender` 后不再实现 `Copy`。
 #[derive(Clone, Debug, Default)]
 pub struct EventProxy {
     responses: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    clipboard: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
 }
 
 impl EventListener for EventProxy {
@@ -35,6 +36,11 @@ impl EventListener for EventProxy {
             Event::PtyWrite(text) => {
                 if let Some(tx) = &self.responses {
                     let _ = tx.send(text.into_bytes());
+                }
+            }
+            Event::ClipboardStore(_kind, text) => {
+                if let Some(queue) = &self.clipboard {
+                    queue.borrow_mut().push(text);
                 }
             }
             other => log::debug!("[terminal] event: {other:?}"),
@@ -102,6 +108,39 @@ pub enum TerminalKey {
     CtrlRight,
 }
 
+/// vi 模式的移动动作（只暴露 View 需要的子集）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViMove {
+    Up,
+    Down,
+    Left,
+    Right,
+    WordLeft,
+    WordRight,
+    Home,
+    End,
+    Top,
+    Bottom,
+}
+
+impl From<ViMove> for alacritty_terminal::vi_mode::ViMotion {
+    fn from(value: ViMove) -> Self {
+        use alacritty_terminal::vi_mode::ViMotion;
+        match value {
+            ViMove::Up => ViMotion::Up,
+            ViMove::Down => ViMotion::Down,
+            ViMove::Left => ViMotion::Left,
+            ViMove::Right => ViMotion::Right,
+            ViMove::WordLeft => ViMotion::SemanticLeft,
+            ViMove::WordRight => ViMotion::SemanticRight,
+            ViMove::Home => ViMotion::First,
+            ViMove::End => ViMotion::Last,
+            ViMove::Top => ViMotion::High,
+            ViMove::Bottom => ViMotion::Low,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TerminalEngine
 // ---------------------------------------------------------------------------
@@ -112,23 +151,13 @@ pub struct TerminalEngine {
     cols: usize,
     rows: usize,
     scrollback: usize,
+    /// OSC 52 远程复制请求（由 EventProxy 推入，View 取出写系统剪贴板）。
+    clipboard_writes: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
 }
 
 impl TerminalEngine {
     pub fn new(cols: usize, rows: usize, scrollback: usize) -> Self {
-        let size = SizeInfo::new(cols, rows);
-        let config = Config {
-            scrolling_history: scrollback,
-            ..Default::default()
-        };
-        let term = Term::new(config, &size, EventProxy::default());
-        Self {
-            term,
-            parser: Processor::new(),
-            cols: size.cols,
-            rows: size.rows,
-            scrollback,
-        }
+        Self::build(cols, rows, scrollback, None)
     }
 
     /// 带应答通道的构造：终端要写回 PTY 的字节（DSR / DA 等）通过
@@ -139,16 +168,29 @@ impl TerminalEngine {
         scrollback: usize,
         responses: std::sync::mpsc::Sender<Vec<u8>>,
     ) -> Self {
+        Self::build(cols, rows, scrollback, Some(responses))
+    }
+
+    fn build(
+        cols: usize,
+        rows: usize,
+        scrollback: usize,
+        responses: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    ) -> Self {
         let size = SizeInfo::new(cols, rows);
         let config = Config {
             scrolling_history: scrollback,
+            // OSC 52 只允许 copy（远程 → 本地），不允许远程读取本地剪贴板。
+            osc52: alacritty_terminal::term::Osc52::OnlyCopy,
             ..Default::default()
         };
+        let clipboard_writes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let term = Term::new(
             config,
             &size,
             EventProxy {
-                responses: Some(responses),
+                responses,
+                clipboard: Some(clipboard_writes.clone()),
             },
         );
         Self {
@@ -157,7 +199,41 @@ impl TerminalEngine {
             cols: size.cols,
             rows: size.rows,
             scrollback,
+            clipboard_writes,
         }
+    }
+
+    /// 取出并清空 OSC 52 的剪贴板写入请求。
+    pub fn take_clipboard_writes(&mut self) -> Vec<String> {
+        std::mem::take(&mut *self.clipboard_writes.borrow_mut())
+    }
+
+    /// 是否处于 vi 模式。
+    pub fn vi_mode(&self) -> bool {
+        self.term.mode().contains(TermMode::VI)
+    }
+
+    /// 进入 / 退出 vi 模式（退出时历史滚动由 alacritty 归零）。
+    pub fn toggle_vi_mode(&mut self) {
+        self.term.toggle_vi_mode();
+    }
+
+    /// vi 光标在视口内的 (row, col)；非 vi 模式返回 None。
+    pub fn vi_cursor(&self) -> Option<(usize, usize)> {
+        if !self.vi_mode() {
+            return None;
+        }
+        let point = self.term.vi_mode_cursor.point;
+        let row = point.line.0 + self.term.grid().display_offset() as i32;
+        if row < 0 || row as usize >= self.rows {
+            return None;
+        }
+        Some((row as usize, point.column.0))
+    }
+
+    /// vi 模式移动光标（超出视口时 alacritty 会自动滚动历史）。
+    pub fn vi_move(&mut self, motion: ViMove) {
+        self.term.vi_motion(motion.into());
     }
 
     /// 喂 PTY 输出字节。
@@ -418,6 +494,38 @@ mod tests {
         let engine = TerminalEngine::new(80, 24, 10_000);
         assert_eq!(engine.cols(), 80);
         assert_eq!(engine.rows(), 24);
+    }
+
+    #[test]
+    fn osc52_copy_is_forwarded() {
+        let mut engine = TerminalEngine::new(80, 24, 1_000);
+        // base64("hello") = aGVsbG8=
+        engine.input_bytes(b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(engine.take_clipboard_writes(), vec!["hello".to_string()]);
+        // 取走后再取应为空
+        assert!(engine.take_clipboard_writes().is_empty());
+    }
+
+    #[test]
+    fn vi_mode_toggles_and_moves() {
+        let mut engine = TerminalEngine::new(20, 4, 100);
+        for index in 0..10 {
+            engine.input_bytes(format!("line {index}\r\n").as_bytes());
+        }
+        assert!(!engine.vi_mode());
+        assert!(engine.vi_cursor().is_none());
+
+        engine.toggle_vi_mode();
+        assert!(engine.vi_mode());
+        let start = engine.vi_cursor().expect("vi 光标存在");
+
+        engine.vi_move(ViMove::Top);
+        let top = engine.vi_cursor().expect("顶部仍有光标");
+        assert!(top.0 <= start.0, "Top 不应让屏幕行变大");
+
+        engine.toggle_vi_mode();
+        assert!(!engine.vi_mode());
+        assert!(engine.vi_cursor().is_none());
     }
 
     #[test]

@@ -36,7 +36,7 @@ use rterm_ssh::pty::{self, PtyCommand, PtyEvent};
 use rterm_ssh::reconnect::ReconnectPolicy;
 use rterm_ssh::{HostKeyChoice, HostKeyDecision, HostKeyInfo, SshSession};
 use rterm_sync::{SyncBridge, SyncMode};
-use rterm_terminal::{TerminalEngine, TerminalKey};
+use rterm_terminal::{TerminalEngine, TerminalKey, ViMove};
 
 use crate::event::{AppEvent, EventBusHost};
 use crate::state::{lock_or_recover, AppState, CursorStyle};
@@ -113,6 +113,8 @@ struct Snapshot {
     rows: usize,
     cells: Vec<SnapshotCell>,
     cursor: Option<(usize, usize)>,
+    /// vi 模式光标（视口内 row/col），非 vi 模式为 None。
+    vi_cursor: Option<(usize, usize)>,
     cursor_style: CursorStyle,
     palette: TerminalPalette,
     cell_w: f32,
@@ -352,6 +354,27 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Ctrl+Shift+Space：进入 / 退出 vi 导航模式（仅移动光标，不转发按键）。
+    pub fn toggle_vi_mode(&mut self, cx: &mut Context<Self>) {
+        self.engine.toggle_vi_mode();
+        let active = self.engine.vi_mode();
+        self.selection = None;
+        self.selecting = false;
+        self.emit(
+            cx,
+            AppEvent::StatusBarMessage {
+                text: if active {
+                    "vi 模式：hjkl/方向键移动 · w/b 分词 · 0/$ 行首尾 · g/G 顶部/底部 · Esc 退出"
+                        .into()
+                } else {
+                    "已退出 vi 模式".into()
+                },
+                duration_ms: 5000,
+            },
+        );
+        cx.notify();
+    }
+
     /// 日志文件名：`<会话名>-<时间戳>-<tab8>.log`，非字母数字替换为 `_`。
     fn log_file_path(&self) -> std::path::PathBuf {
         let label = self
@@ -585,6 +608,10 @@ impl TerminalView {
             PtyEvent::Data(bytes) => {
                 self.write_session_log(&bytes);
                 self.engine.input_bytes(&bytes);
+                // OSC 52：远程复制的文本写入本地剪贴板。
+                for text in self.engine.take_clipboard_writes() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
                 // DSR / DA 等查询会通过 Event::PtyWrite 产生应答，写回 PTY
                 self.drain_engine_responses();
 
@@ -860,6 +887,10 @@ impl TerminalView {
                     self.change_font_size(0.0, cx);
                     return;
                 }
+                "space" if modifiers.shift => {
+                    self.toggle_vi_mode(cx);
+                    return;
+                }
                 // 这些组合交给 MainWindow 的全局 keybinding
                 "t" | "w" | "tab" | "," => return,
                 _ => {}
@@ -867,6 +898,34 @@ impl TerminalView {
         }
 
         if self.status != TerminalStatus::Connected {
+            return;
+        }
+
+        // vi 模式：hjkl / 方向键 / w b 0 $ g G 只移动 vi 光标，Esc 退出；
+        // 其余按键一律吞掉，避免误发给远端。
+        if self.engine.vi_mode() {
+            if keystroke.key == "escape" {
+                self.toggle_vi_mode(cx);
+                return;
+            }
+            let shift = modifiers.shift;
+            let motion = match (keystroke.key.as_str(), shift) {
+                ("h" | "left", false) => Some(ViMove::Left),
+                ("l" | "right", false) => Some(ViMove::Right),
+                ("j" | "down", false) => Some(ViMove::Down),
+                ("k" | "up", false) => Some(ViMove::Up),
+                ("w", false) => Some(ViMove::WordRight),
+                ("b", false) => Some(ViMove::WordLeft),
+                ("0" | "home", false) => Some(ViMove::Home),
+                ("$", _) => Some(ViMove::End),
+                ("g", false) => Some(ViMove::Top),
+                ("g", true) => Some(ViMove::Bottom),
+                _ => None,
+            };
+            if let Some(motion) = motion {
+                self.engine.vi_move(motion);
+                cx.notify();
+            }
             return;
         }
 
@@ -1202,6 +1261,7 @@ impl TerminalView {
             rows,
             cells,
             cursor,
+            vi_cursor: self.engine.vi_cursor(),
             cursor_style: self.cursor_style.clone(),
             palette: self.palette,
             cell_w: self.cell_w,
@@ -1433,7 +1493,20 @@ fn paint_snapshot(
         }
     }
 
-    // 3. 光标（方块 / 下划线 / 竖线）
+    // 3. vi 模式光标（半透明方块，先画、随后真实光标可覆盖）
+    if let Some((row, col)) = snapshot.vi_cursor {
+        let origin = point(
+            bounds.left() + px(col as f32 * cell_w),
+            bounds.top() + px(row as f32 * line_h),
+        );
+        let color = <Hsla>::from(palette.cursor).opacity(0.45);
+        window.paint_quad(fill(
+            Bounds::new(origin, size(px(cell_w), px(line_h))),
+            color,
+        ));
+    }
+
+    // 4. 光标（方块 / 下划线 / 竖线）
     if let Some((row, col)) = snapshot.cursor {
         let origin = point(
             bounds.left() + px(col as f32 * cell_w),
