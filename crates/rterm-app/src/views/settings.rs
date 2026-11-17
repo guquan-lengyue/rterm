@@ -293,6 +293,15 @@ impl SettingsView {
         }
 
         let settings = self.draft.clone();
+        // data_dir 切换：先把旧目录的 sessions.json 复制到新目录；
+        // 失败则中止保存（设置未落盘 = 回滚），避免重启后看似丢会话。
+        let previous = cx.global::<AppState>().settings.clone();
+        if let Err(error) = crate::state::migrate_data_dir(&previous, &settings) {
+            self.error = Some(format!("迁移会话文件失败: {error:#}"));
+            cx.notify();
+            return;
+        }
+
         if let Err(e) = settings.save() {
             self.error = Some(format!("保存失败: {e:#}"));
             cx.notify();

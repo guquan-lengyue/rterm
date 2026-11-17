@@ -112,14 +112,45 @@ pub fn settings_path() -> std::path::PathBuf {
 ///
 /// 会话 / 导出等数据文件都放在该目录下。
 pub fn data_dir_path() -> std::path::PathBuf {
-    match Settings::load().data_dir {
+    data_dir_for(&Settings::load())
+}
+
+/// 给定设置下的数据目录。
+pub fn data_dir_for(settings: &Settings) -> std::path::PathBuf {
+    match settings.data_dir.as_deref() {
         Some(dir) if !dir.trim().is_empty() => std::path::PathBuf::from(dir.trim()),
         _ => {
-            let mut p = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-            p.push("rterm");
-            p
+            let mut path = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+            path.push("rterm");
+            path
         }
     }
+}
+
+/// `data_dir` 变更时迁移 `sessions.json`（9.16b）。
+///
+/// 复制而非移动：旧目录保持不变，失败只需放弃保存设置即可回滚。
+pub fn migrate_data_dir(old: &Settings, new: &Settings) -> anyhow::Result<()> {
+    let old_dir = data_dir_for(old);
+    let new_dir = data_dir_for(new);
+    if old_dir == new_dir {
+        return Ok(());
+    }
+    let source = old_dir.join("sessions.json");
+    let target = new_dir.join("sessions.json");
+    if !source.exists() || target.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&new_dir)
+        .map_err(|error| anyhow::anyhow!("创建新数据目录失败: {error}"))?;
+    std::fs::copy(&source, &target)
+        .map_err(|error| anyhow::anyhow!("复制会话文件失败: {error}"))?;
+    log::info!(
+        "[settings] data_dir 迁移: {} -> {}",
+        source.display(),
+        target.display()
+    );
+    Ok(())
 }
 
 /// `<data_dir>\sessions.json`。
@@ -280,5 +311,41 @@ mod tests {
 
         let guard = lock_or_recover(&mutex);
         assert_eq!(*guard, 7);
+    }
+
+    #[test]
+    fn migrate_data_dir_copies_sessions_file() {
+        let base = std::env::temp_dir().join(format!(
+            "rterm-migrate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let old_dir = base.join("old");
+        let new_dir = base.join("new");
+        std::fs::create_dir_all(&old_dir).expect("建旧目录");
+        std::fs::write(old_dir.join("sessions.json"), "{\"sessions\":[]}").expect("写旧会话");
+
+        let mut old_settings = Settings::default();
+        old_settings.data_dir = Some(old_dir.to_string_lossy().into_owned());
+        let mut new_settings = Settings::default();
+        new_settings.data_dir = Some(new_dir.to_string_lossy().into_owned());
+
+        migrate_data_dir(&old_settings, &new_settings).expect("迁移成功");
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("sessions.json")).expect("读新会话"),
+            "{\"sessions\":[]}"
+        );
+        assert!(
+            old_dir.join("sessions.json").exists(),
+            "复制而非移动，旧文件保留"
+        );
+
+        // 目录未变化时不做任何事
+        migrate_data_dir(&new_settings, &new_settings).expect("同目录跳过");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
