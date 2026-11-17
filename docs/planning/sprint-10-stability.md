@@ -1,12 +1,14 @@
 # Sprint 10 — 稳定性收尾
 
-> **状态**：进行中（S7.5 ✅、S8 ✅、S9 ✅ 已完成）
+> **状态**：代码任务全部完成（S7.5 ✅、S8 ✅、S9 ✅），待 9.12.1 GUI 手工 smoke
 >
-> **进度（2026-11-17）**：已完成 9.1b / 9.1c / 9.2 / 9.3 / 9.4 / 9.5 / 9.8 /
-> 9.9 / 9.16 / 9.16b / 9.20 / 9.22（workspace 测试 146+ passed）。
-> 待办：9.6 OSC 52、9.7 vi 模式、9.11 诊断包、9.13 自绘滚动、
-> 9.14 系统字体、9.17 / 9.18 / 9.19 / 9.21，
-> 以及 9.1 / 9.10 / 9.15 回归与 9.12.1 全量 smoke test。
+> **进度（2026-11-17）**：9.1b / 9.1c / 9.2 / 9.3 / 9.4 / 9.5 / 9.6 / 9.7 / 9.8 /
+> 9.9 / 9.11 / 9.13 / 9.14 / 9.16 / 9.16b / 9.17 / 9.18 / 9.19 / 9.20 / 9.21 / 9.22 全部完成。
+> 回归 9.1 / 9.10 / 9.15 已按代码路径复核：主机密钥三选一 Modal、CRUD 即时落盘、
+> 删除二次确认卡片均在线。
+> **门禁**：`cargo fmt --all` / `cargo clippy --workspace --all-targets`（0 warning）/
+> `cargo test --workspace` → **174 passed / 1 ignored**（live_ssh 需真实主机）。
+> 剩 9.12.1：GUI 手工 smoke（需连接真实远端 + 大目录 + 长空闲场景）。
 > **前置**：[Sprint 6](./sprint-06-terminal-render.md) ✅ + [Sprint 7](./sprint-07-sftp.md) + [Sprint 7.5](./sprint-07.5-tech-debt.md) ✅ + [Sprint 8](./sprint-08-sync.md) ✅ + [Sprint 9](./sprint-09-monitor.md)（Perl ✅ 已完成）
 > **目标**：known_hosts 回归 + 错误映射 + 命令面板 + 全局快捷键 + 日志 + 备份 + 全量 smoke test
 >
@@ -85,4 +87,11 @@
 |---|------|------|
 | 9.12.1 | 1h | 逐个重跑：Sprint 3 会话管理端到端 + Sprint 4 设置持久化/导入导出 + Sprint 5 SSH+终端核心 + Sprint 6 终端渲染（含 vim/htop、Shift+PageUp、选择复制、切主题、字号缩放、高 DPI）+ Sprint 7 SFTP + Sprint 8 路径同步 + Sprint 9 监控；多类型 Tab 共存回归 |
 
-**✅ 全部 Smoke Test 通过 → 进入 Sprint 11 Release 打磨**
+**9.12.1 自动化部分（已通过）**：workspace 174 项单测 / 集成测试全绿，覆盖会话存储与
+导入导出、openssh 解析、known_hosts（含 hashed）、SSH 错误映射、终端引擎（OSC 52 / vi /
+选词 / 回显抑制 / 滚动）、监控解析、SFTP 队列（暂停 / 取消）、滚动与虚拟化几何、
+备份轮转、data_dir 迁移。
+
+**9.12.1 手工部分（待执行）**：真实远端连接下的终端 / SFTP / 监控多 Tab 共存、主题切换、
+高 DPI 鼠标、拖拽传输、暂停继续取消 E2E、1000 项目录滚动、空闲 1 分钟首键回显、
+双向路径同步无 `cd` 回显。
