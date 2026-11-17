@@ -14,8 +14,8 @@ use futures::StreamExt;
 use gpui::prelude::*;
 use gpui::{
     div, px, transparent_black, AnyElement, ClickEvent, Context, Entity, FocusHandle, Focusable,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Render, ScrollWheelEvent, SharedString,
-    Window,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
+    ScrollWheelEvent, SharedString, Window,
 };
 use uuid::Uuid;
 
@@ -27,7 +27,8 @@ use rterm_sftp::{
 use rterm_ssh::SshSession;
 
 use super::{
-    CONTENT_BORDER_W, MENU_ITEM_H, MENU_PADDING_Y, SFTP_MENU_W, SIDEBAR_W, TAB_BAR_H, TOOLBAR_H,
+    CONTENT_BORDER_W, MENU_ITEM_H, MENU_PADDING_Y, SFTP_MENU_W, SIDEBAR_W, STATUS_BAR_H, TAB_BAR_H,
+    TOOLBAR_H,
 };
 use crate::event::{AppEvent, EventBusHost};
 use crate::state::{lock_or_recover, AppState};
@@ -127,6 +128,22 @@ struct RemoteNavResult {
     result: Result<Vec<FileEntry>, String>,
 }
 
+/// 后台本地目录读取结果（9.18：慢盘 / 网络盘不再卡 UI 线程）。
+struct LocalNavResult {
+    generation: u64,
+    path: String,
+    result: Result<Vec<FileEntry>, String>,
+}
+
+/// Pane 间拖拽状态（9.18）：从某行按下，移动超过阈值才算拖拽。
+struct DragState {
+    side: PaneSide,
+    index: usize,
+    start_x: f32,
+    start_y: f32,
+    active: bool,
+}
+
 /// 等待用户确认“目标已存在，是否覆盖”的传输（S7.5.3.10）。
 struct PendingTransferConfirm {
     direction: TransferDirection,
@@ -185,6 +202,12 @@ pub struct SftpView {
     generation: u64,
     /// 远端导航代际：只应用最新一次 listdir 的结果。
     remote_nav_generation: u64,
+    /// 本地导航代际：慢盘读目录放到后台线程后，只应用最新结果。
+    local_nav_generation: u64,
+    /// 拖拽中的行（None = 没有拖拽）。
+    drag: Option<DragState>,
+    /// 文件列表可视区高度（每帧 render 时按窗口大小更新，用于虚拟化）。
+    rows_view_h: f32,
 }
 
 impl SftpView {
@@ -240,6 +263,9 @@ impl SftpView {
             last_click: None,
             generation: 0,
             remote_nav_generation: 0,
+            local_nav_generation: 0,
+            drag: None,
+            rows_view_h: ROW_H * 12.0,
         }
     }
 
@@ -504,23 +530,55 @@ impl SftpView {
             })
             .detach();
         } else {
+            // 9.18：本地 listdir 也放后台线程（慢盘 / 网络盘不阻塞 UI）
             let path = normalize_local(&raw_path, &self.local.path);
-            match list_local(&path) {
-                Ok(mut rows) => {
-                    sort_entries(&mut rows, self.sort_key, self.sort_ascending);
-                    self.local.rows = rows;
-                    self.local.path = path.clone();
-                    self.local.selected = None;
-                    self.local.scroll = 0;
-                    self.local.error = None;
-                    self.set_address(PaneSide::Local, &path, cx);
-                }
-                Err(error) => {
-                    self.local.error = Some(error);
-                }
+            self.local_nav_generation = self.local_nav_generation.wrapping_add(1);
+            let nav_generation = self.local_nav_generation;
+            let (tx, mut rx) = unbounded::<LocalNavResult>();
+            let spawned = std::thread::Builder::new()
+                .name("rterm-sftp-local-nav".into())
+                .spawn(move || {
+                    let result = list_local(&path);
+                    let _ = tx.unbounded_send(LocalNavResult {
+                        generation: nav_generation,
+                        path,
+                        result,
+                    });
+                });
+            if let Err(error) = spawned {
+                self.local.error = Some(format!("无法启动本地目录读取线程: {error}"));
+                self.menu = None;
+                cx.notify();
+                return;
             }
+            cx.spawn(async move |this, cx| {
+                if let Some(nav) = rx.next().await {
+                    let _ = this.update(cx, |this, cx| this.apply_local_nav(nav, cx));
+                }
+            })
+            .detach();
         }
         self.menu = None;
+        cx.notify();
+    }
+
+    /// 应用后台本地 listdir 结果；过期导航直接丢弃。
+    fn apply_local_nav(&mut self, nav: LocalNavResult, cx: &mut Context<Self>) {
+        if nav.generation != self.local_nav_generation {
+            return;
+        }
+        match nav.result {
+            Ok(mut rows) => {
+                sort_entries(&mut rows, self.sort_key, self.sort_ascending);
+                self.local.rows = rows;
+                self.local.path = nav.path.clone();
+                self.local.selected = None;
+                self.local.scroll = 0;
+                self.local.error = None;
+                self.set_address(PaneSide::Local, &nav.path, cx);
+            }
+            Err(error) => self.local.error = Some(error),
+        }
         cx.notify();
     }
 
@@ -642,10 +700,92 @@ impl SftpView {
         if lines == 0 {
             return;
         }
+        let visible = visible_row_count(self.rows_view_h);
         let pane = self.pane_mut(side);
-        let next = (pane.scroll as i32 - lines).max(0) as usize;
-        pane.scroll = next.min(pane.rows.len().saturating_sub(1));
+        let max = max_scroll_offset(pane.rows.len(), visible);
+        pane.scroll = (pane.scroll as i32 - lines).clamp(0, max as i32) as usize;
         cx.notify();
+    }
+
+    // -----------------------------------------------------------------------
+    // Pane 间拖拽（9.18）
+    // -----------------------------------------------------------------------
+
+    /// 在行上按下左键：记录拖拽起点，移动超过阈值后才算拖拽。
+    fn begin_drag(
+        &mut self,
+        side: PaneSide,
+        index: usize,
+        event: &MouseDownEvent,
+        _cx: &mut Context<Self>,
+    ) {
+        self.drag = Some(DragState {
+            side,
+            index,
+            start_x: f32::from(event.position.x),
+            start_y: f32::from(event.position.y),
+            active: false,
+        });
+    }
+
+    fn on_drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(drag) = &mut self.drag else {
+            return;
+        };
+        if drag.active {
+            return;
+        }
+        let dx = f32::from(event.position.x) - drag.start_x;
+        let dy = f32::from(event.position.y) - drag.start_y;
+        if dx * dx + dy * dy <= 16.0 {
+            return;
+        }
+        drag.active = true;
+        let (side, index) = (drag.side, drag.index);
+        let name = self
+            .pane(side)
+            .rows
+            .get(index)
+            .map(|entry| entry.name.clone())
+            .unwrap_or_else(|| "项目".to_string());
+        self.set_status(format!("拖动 {name}：松开到另一侧面板开始传输"), cx);
+    }
+
+    /// 松开左键：拖拽跨越两侧面板时触发上传 / 下载。
+    fn finish_drag(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        if !drag.active {
+            return;
+        }
+        let x = f32::from(event.position.x) - SIDEBAR_W - CONTENT_BORDER_W;
+        let target = if x < pane_width(window) {
+            PaneSide::Local
+        } else {
+            PaneSide::Remote
+        };
+        if target == drag.side {
+            self.set_status("请拖到另一侧面板完成传输".into(), cx);
+            return;
+        }
+        let Some(entry) = self.pane(drag.side).rows.get(drag.index).cloned() else {
+            return;
+        };
+        if entry.is_dir {
+            self.set_status("暂不支持拖拽目录（请双击进入后拖拽文件）".into(), cx);
+            return;
+        }
+        match drag.side {
+            PaneSide::Local => {
+                let remote_dir = self.remote.path.clone();
+                self.request_upload(&entry, &remote_dir, cx);
+            }
+            PaneSide::Remote => {
+                let local_dir = PathBuf::from(&self.local.path);
+                self.request_download(&entry, &local_dir, cx);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1412,10 +1552,41 @@ impl Render for SftpView {
                     .child("⟳ 刷新"),
             );
 
+        // 9.18：虚拟化所需可视区高度（只渲染屏幕内的行，1000 项目录不卡）
+        let transfers_h = self.transfers.len().min(MAX_VISIBLE_TRANSFERS) as f32 * TRANSFER_ROW_H;
+        let error_h = if self.local.error.is_some() || self.remote.error.is_some() {
+            24.0
+        } else {
+            0.0
+        };
+        let viewport_h = f32::from(window.viewport_size().height);
+        self.rows_view_h = (viewport_h
+            - TOOLBAR_H
+            - TAB_BAR_H
+            - STATUS_BAR_H
+            - 32.0
+            - transfers_h
+            - PANE_HEADER_H
+            - 26.0
+            - BREADCRUMB_H
+            - COLUMN_HEADER_H
+            - error_h
+            - 2.0)
+            .max(ROW_H);
+
         let body = div()
             .w_full()
             .flex_1()
             .flex()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _w, cx| {
+                this.on_drag_move(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    this.finish_drag(event, window, cx);
+                }),
+            )
             .child(self.render_pane(PaneSide::Local, pane_width(window), name_width(window), cx))
             .child(self.render_pane(PaneSide::Remote, pane_width(window), name_width(window), cx));
 
@@ -1502,11 +1673,15 @@ impl SftpView {
             .child(self.render_sort_button("权限", SortKey::Mode, 80.0, side, cx))
             .child(self.render_sort_button("修改时间", SortKey::Modified, 110.0, side, cx));
 
+        // 9.18：虚拟化 —— 只渲染可视区内的行，并把 scroll 收进合法范围
+        let visible = visible_row_count(self.rows_view_h);
+        let start = pane.scroll.min(max_scroll_offset(pane.rows.len(), visible));
         let rows: Vec<AnyElement> = pane
             .rows
             .iter()
             .enumerate()
-            .skip(pane.scroll)
+            .skip(start)
+            .take(visible)
             .map(|(index, entry)| self.render_row(side, index, entry, name_w, cx))
             .collect();
 
@@ -1647,6 +1822,15 @@ impl SftpView {
                     .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _w, cx| {
                         this.on_pane_scroll(side, event, cx);
                     }))
+                    // 空白区右键菜单（9.18）：新建文件夹 / 刷新
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _w, cx| {
+                            let x = f32::from(event.position.x) - SIDEBAR_W - CONTENT_BORDER_W;
+                            let y = f32::from(event.position.y) - TOOLBAR_H - TAB_BAR_H;
+                            this.open_menu(side, None, x.max(0.), y.max(0.), cx);
+                        }),
+                    )
                     .children(rows),
             )
             .children(error)
@@ -1777,9 +1961,17 @@ impl SftpView {
             .on_click(cx.listener(move |this, _ev: &ClickEvent, _w, cx| {
                 this.click_row(side, index, cx);
             }))
+            // 9.18：左键按下记录拖拽起点，拖到另一侧面板即上传 / 下载
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _w, cx| {
+                    this.begin_drag(side, index, event, cx);
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
+                    cx.stop_propagation();
                     let x = f32::from(ev.position.x) - SIDEBAR_W - CONTENT_BORDER_W;
                     let y = f32::from(ev.position.y) - TOOLBAR_H - TAB_BAR_H;
                     this.open_menu(side, Some(index), x.max(0.), y.max(0.), cx);
@@ -2222,6 +2414,16 @@ fn shared_id(prefix: &str, side: PaneSide) -> String {
     format!("{prefix}-{}", side_key(side))
 }
 
+/// 可视区内能完整显示的行数（至少 1 行，避免除零 / 空列表）。
+fn visible_row_count(view_h: f32) -> usize {
+    ((view_h / ROW_H).floor() as usize).max(1)
+}
+
+/// 列表最大滚动起点：最后一行恰好贴底。
+fn max_scroll_offset(row_count: usize, visible: usize) -> usize {
+    row_count.saturating_sub(visible)
+}
+
 fn menu_items(menu: &MenuState) -> Vec<(String, bool, MenuAction)> {
     if let Some(index) = menu.row {
         let mut items: Vec<(String, bool, MenuAction)> = Vec::new();
@@ -2247,9 +2449,25 @@ fn menu_items(menu: &MenuState) -> Vec<(String, bool, MenuAction)> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_remote;
+    use super::{max_scroll_offset, normalize_remote, visible_row_count, ROW_H};
 
     const HOME: Option<&str> = Some("/home/alice");
+
+    #[test]
+    fn virtualization_counts_visible_rows() {
+        assert_eq!(visible_row_count(ROW_H * 10.0), 10);
+        assert_eq!(visible_row_count(ROW_H * 10.5), 10);
+        // 高度异常时也至少渲染一行
+        assert_eq!(visible_row_count(0.0), 1);
+        assert_eq!(visible_row_count(-5.0), 1);
+    }
+
+    #[test]
+    fn scroll_offset_stops_at_last_page() {
+        assert_eq!(max_scroll_offset(1000, 30), 970);
+        assert_eq!(max_scroll_offset(10, 30), 0);
+        assert_eq!(max_scroll_offset(0, 30), 0);
+    }
 
     #[test]
     fn tilde_expands_to_home() {
