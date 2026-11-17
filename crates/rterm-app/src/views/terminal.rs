@@ -848,6 +848,8 @@ impl TerminalView {
         if !matches!(self.status, TerminalStatus::Connected) {
             return;
         }
+        // 9.21：远端 shell 会回显这条命令，先登记让 engine 从输出里吞掉
+        self.engine.suppress_echo(command.as_bytes().to_vec());
         let mut bytes = command.as_bytes().to_vec();
         bytes.push(b'\r');
         self.send_bytes(bytes);

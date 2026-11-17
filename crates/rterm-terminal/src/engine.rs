@@ -153,9 +153,40 @@ pub struct TerminalEngine {
     scrollback: usize,
     /// OSC 52 远程复制请求（由 EventProxy 推入，View 取出写系统剪贴板）。
     clipboard_writes: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    /// 注入命令的回显抑制状态（9.21），None = 不做过滤。
+    pending_echo: Option<EchoSuppression>,
+    /// 上一次抑制被新注入打断时暂存的字节，下一次喂数据时先放行。
+    deferred_output: Vec<u8>,
 }
 
+/// 等待从 PTY 输出里吞掉的一段回显字节。
+struct EchoSuppression {
+    expected: Vec<u8>,
+    buffered: Vec<u8>,
+}
+
+/// 抑制窗口上限：超过后放弃匹配（避免异常输出被无限缓冲）。
+const ECHO_BUFFER_LIMIT: usize = 512;
+
 impl TerminalEngine {
+    /// 注入命令前登记要在输出里吞掉的回显（不含结尾回车）。
+    ///
+    /// 远端 shell 会把 `cd '/path'` 原样回显，这里在下一次输出到达时把这
+    /// 段字节从流中删掉，界面上就不会出现注入命令的输入行。
+    pub fn suppress_echo(&mut self, echo: Vec<u8>) {
+        if echo.is_empty() {
+            return;
+        }
+        // 上一条注入还没等到回显就来了新注入：旧缓冲原样放行，避免丢输出。
+        if let Some(previous) = self.pending_echo.take() {
+            self.deferred_output.extend_from_slice(&previous.buffered);
+        }
+        self.pending_echo = Some(EchoSuppression {
+            expected: echo,
+            buffered: Vec::new(),
+        });
+    }
+
     pub fn new(cols: usize, rows: usize, scrollback: usize) -> Self {
         Self::build(cols, rows, scrollback, None)
     }
@@ -200,6 +231,8 @@ impl TerminalEngine {
             rows: size.rows,
             scrollback,
             clipboard_writes,
+            pending_echo: None,
+            deferred_output: Vec::new(),
         }
     }
 
@@ -237,8 +270,33 @@ impl TerminalEngine {
     }
 
     /// 喂 PTY 输出字节。
+    ///
+    /// 有待抑制的注入回显时先做过滤（9.21）：匹配到的字节直接丢弃，
+    /// 其余字节照常进入解析器；等不到回显时最多缓冲 512 字节后放弃。
     pub fn input_bytes(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+        let mut incoming = std::mem::take(&mut self.deferred_output);
+        incoming.extend_from_slice(bytes);
+        if self.pending_echo.is_none() {
+            self.parser.advance(&mut self.term, &incoming);
+            return;
+        }
+
+        let mut outgoing: Option<Vec<u8>> = None;
+        {
+            let suppression = self.pending_echo.as_mut().expect("pending_echo 已判空");
+            suppression.buffered.extend_from_slice(&incoming);
+            if let Some(position) = find_subslice(&suppression.buffered, &suppression.expected) {
+                let mut output = std::mem::take(&mut suppression.buffered);
+                output.drain(position..position + suppression.expected.len());
+                outgoing = Some(output);
+            } else if suppression.buffered.len() > suppression.expected.len() + ECHO_BUFFER_LIMIT {
+                outgoing = Some(std::mem::take(&mut suppression.buffered));
+            }
+        }
+        if let Some(output) = outgoing {
+            self.pending_echo = None;
+            self.parser.advance(&mut self.term, &output);
+        }
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -546,6 +604,16 @@ fn line_bounds(chars: &[char]) -> Option<(usize, usize)> {
     Some((0, last))
 }
 
+/// 在 `haystack` 中查找 `needle` 第一次出现的下标；空 needle 返回 None。
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -638,6 +706,36 @@ mod tests {
         // 超出上限时由 alacritty 夹到最大历史
         engine.set_display_offset(usize::MAX);
         assert_eq!(engine.display_offset(), history);
+    }
+
+    #[test]
+    fn find_subslice_reports_position() {
+        assert_eq!(find_subslice(b"abcde", b"cd"), Some(2));
+        assert_eq!(find_subslice(b"abcde", b"zz"), None);
+        assert_eq!(find_subslice(b"ab", b"abc"), None);
+        assert_eq!(find_subslice(b"abc", b""), None);
+    }
+
+    #[test]
+    fn echoed_injected_command_is_swallowed_across_chunks() {
+        let mut engine = TerminalEngine::new(40, 5, 100);
+        engine.suppress_echo(b"cd '/tmp'".to_vec());
+        // 回显被拆成两个 PTY 读块：先缓冲，等拼齐再吞掉
+        engine.input_bytes(b"cd '/t");
+        assert_eq!(engine.visible_lines()[0], "");
+        engine.input_bytes(b"mp'\r\n$ ");
+        let lines = engine.visible_lines();
+        assert_eq!(lines[0], "", "注入命令的回显不应出现在第一行");
+        assert_eq!(lines[1], "$", "回车与提示符照常显示");
+    }
+
+    #[test]
+    fn echo_suppression_gives_up_on_unrelated_output() {
+        let mut engine = TerminalEngine::new(80, 5, 100);
+        engine.suppress_echo(b"cd '/tmp'".to_vec());
+        let noise = vec![b'x'; ECHO_BUFFER_LIMIT + 32];
+        engine.input_bytes(&noise);
+        assert_eq!(engine.visible_lines()[0].len(), 80, "超限后原样放行输出");
     }
 
     #[test]
