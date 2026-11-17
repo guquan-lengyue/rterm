@@ -48,13 +48,18 @@ use super::{CONTEXT_MENU_ITEM_H, CONTEXT_MENU_W, MENU_PADDING_Y, SIDEBAR_W, TOOL
 // 标签页快捷键（main.rs 里 App::on_action 转发到 MainWindow）
 // ---------------------------------------------------------------------------
 
-actions!(rterm_tabs, [NewTab, NextTab, CloseTab]);
+actions!(
+    rterm_tabs,
+    [NewTab, NextTab, CloseTab, NewSession, ToggleFullscreen]
+);
 
-pub fn key_bindings() -> [KeyBinding; 3] {
+pub fn key_bindings() -> [KeyBinding; 5] {
     [
         KeyBinding::new("ctrl-t", NewTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-w", CloseTab, None),
+        KeyBinding::new("ctrl-shift-n", NewSession, None),
+        KeyBinding::new("f11", ToggleFullscreen, None),
     ]
 }
 
@@ -567,6 +572,14 @@ impl MainWindow {
             let tab_id = tab.id;
             self.close_tab(tab_id, cx);
         }
+    }
+
+    /// Ctrl+Shift+N：打开「新建会话」对话框。
+    pub fn new_session_shortcut(&mut self, cx: &mut Context<Self>) {
+        if self.dialogs_open(cx) {
+            return;
+        }
+        self.open_edit_dialog(None, cx);
     }
 
     // -----------------------------------------------------------------------

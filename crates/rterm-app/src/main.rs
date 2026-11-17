@@ -144,6 +144,32 @@ fn main() {
                 }
             });
         });
+
+        // Ctrl+Shift+N → 新建会话
+        app.on_action(move |_: &views::main_window::NewSession, app: &mut App| {
+            app.defer(move |app| {
+                let handle = WindowHandle::<MainWindow>::new(window_id);
+                if let Err(e) =
+                    handle.update(app, |main, _window, cx| main.new_session_shortcut(cx))
+                {
+                    log::error!("[shortcut] 新建会话失败: {e:#}");
+                }
+            });
+        });
+
+        // F11 → 切换全屏
+        app.on_action(
+            move |_: &views::main_window::ToggleFullscreen, app: &mut App| {
+                app.defer(move |app| {
+                    let handle = WindowHandle::<MainWindow>::new(window_id);
+                    if let Err(e) =
+                        handle.update(app, |_main, window, _cx| window.toggle_fullscreen())
+                    {
+                        log::error!("[shortcut] 切换全屏失败: {e:#}");
+                    }
+                });
+            },
+        );
     });
 
     // 3. 退出保存 —— 从共享 Arc 读，一定是最新状态
