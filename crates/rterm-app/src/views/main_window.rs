@@ -42,7 +42,7 @@ use super::settings::SettingsView;
 use super::sftp::SftpView;
 use super::status_bar::StatusBar;
 use super::tab_bar::TabBar;
-use super::terminal::TerminalView;
+use super::terminal_tab::TerminalTabView;
 use super::{CONTEXT_MENU_ITEM_H, CONTEXT_MENU_W, MENU_PADDING_Y, SIDEBAR_W, TOOLBAR_H};
 
 // ---------------------------------------------------------------------------
@@ -114,7 +114,8 @@ enum ContextMenuAction {
 /// 标签页内容（S7 起支持多类型）。
 #[derive(Clone)]
 pub enum TabContentView {
-    Terminal(Entity<TerminalView>),
+    /// 终端 Tab：TerminalTabView 内部再组合可选的 SFTP 侧栏（S12）
+    Terminal(Entity<TerminalTabView>),
     Sftp(Entity<SftpView>),
     Monitor(Entity<MonitorView>),
 }
@@ -122,7 +123,7 @@ pub enum TabContentView {
 impl TabContentView {
     fn focus_handle(&self, cx: &mut Context<MainWindow>) -> FocusHandle {
         match self {
-            Self::Terminal(view) => view.read(cx).focus_handle(),
+            Self::Terminal(view) => view.read(cx).focus_handle(cx),
             Self::Sftp(view) => view.read(cx).focus_handle(),
             Self::Monitor(view) => view.read(cx).focus_handle(),
         }
@@ -131,7 +132,7 @@ impl TabContentView {
     fn close(&self, cx: &mut Context<MainWindow>) {
         match self {
             Self::Terminal(view) => {
-                view.update(cx, |view, cx| view.disconnect(cx));
+                view.update(cx, |view, cx| view.close(cx));
             }
             Self::Sftp(view) => {
                 view.update(cx, |view, cx| view.shutdown(cx));
@@ -145,7 +146,7 @@ impl TabContentView {
     /// Tab 内部是否有需要独占键盘的弹窗（S7.5.3.9：屏蔽全局快捷键）。
     fn blocks_global_shortcuts(&self, cx: &mut Context<MainWindow>) -> bool {
         match self {
-            Self::Terminal(view) => view.read(cx).has_host_key_prompt(),
+            Self::Terminal(view) => view.read(cx).blocks_global_shortcuts(cx),
             Self::Sftp(view) => view.read(cx).has_modal_dialog(),
             Self::Monitor(view) => view.read(cx).has_modal_dialog(),
         }
@@ -309,7 +310,9 @@ impl MainWindow {
                             })
                         })
                         .and_then(|tab| match &tab.content {
-                            TabContentView::Terminal(view) => Some((tab.id, view.clone())),
+                            TabContentView::Terminal(view) => {
+                                Some((tab.id, view.read(cx).terminal()))
+                            }
                             _ => None,
                         });
 
@@ -365,17 +368,18 @@ impl MainWindow {
                 .unwrap_or_else(|| "终端".to_string())
         };
 
-        let view = cx.new(TerminalView::new);
-        view.update(cx, |view, cx| view.connect(session_id, cx));
-        let id = view.read(cx).tab_id();
-        self.sync_bridges.insert(id, view.read(cx).sync_bridge());
+        let tab = cx.new(|cx| TerminalTabView::new(cx, session_id, false));
+        let terminal = tab.read(cx).terminal();
+        let id = terminal.read(cx).tab_id();
+        self.sync_bridges
+            .insert(id, terminal.read(cx).sync_bridge());
 
         self.tabs.push(TabEntry {
             id,
             session_id,
             title,
             kind: TabKind::Terminal,
-            content: TabContentView::Terminal(view),
+            content: TabContentView::Terminal(tab),
         });
         self.active_tab = self.tabs.len() - 1;
         self.focus_pending = true;
@@ -616,7 +620,7 @@ impl MainWindow {
             .tabs
             .get(self.active_tab)
             .and_then(|tab| match &tab.content {
-                TabContentView::Terminal(view) => Some(view.clone()),
+                TabContentView::Terminal(view) => Some(view.read(cx).terminal()),
                 _ => None,
             });
         match terminal {

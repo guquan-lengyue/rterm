@@ -16,6 +16,7 @@ pub mod sftp;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod terminal;
+pub mod terminal_tab;
 pub mod text_input;
 
 // ---------------------------------------------------------------------------

@@ -115,6 +115,15 @@ enum SftpStatus {
     Failed,
 }
 
+/// SFTP 视图展示模式（S12 12.1）：独立 Tab 或终端右侧 Dock。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SftpDisplayMode {
+    /// 独立 SFTP Tab：显示顶部工具条（标题 / 状态 / 新建文件夹 / 刷新）。
+    Tab,
+    /// 终端右侧 Dock：隐藏工具条，由 TerminalTabView 提供开关与分隔条。
+    Dock,
+}
+
 /// 后台连接结果：SSH + SFTP 子系统 + 远端 home 目录一次性完成。
 struct ConnectedSftp {
     service: SftpService,
@@ -178,6 +187,7 @@ struct ConfirmCard {
 pub struct SftpView {
     focus_handle: FocusHandle,
     tab_id: Uuid,
+    display_mode: SftpDisplayMode,
     session_id: Option<Uuid>,
     session: Option<SessionConfig>,
     status: SftpStatus,
@@ -208,10 +218,17 @@ pub struct SftpView {
     drag: Option<DragState>,
     /// 文件列表可视区高度（每帧 render 时按窗口大小更新，用于虚拟化）。
     rows_view_h: f32,
+    /// Dock 模式下的实际宽度（由 TerminalTabView 设置，用于单栏布局计算）。
+    dock_width: Option<f32>,
 }
 
 impl SftpView {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::new_with_mode(cx, SftpDisplayMode::Tab)
+    }
+
+    /// 指定展示模式构造（S12 12.1）；Dock 模式隐藏顶部工具条。
+    pub fn new_with_mode(cx: &mut Context<Self>, display_mode: SftpDisplayMode) -> Self {
         let local_home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| "C:\\".to_string());
@@ -229,6 +246,7 @@ impl SftpView {
         Self {
             focus_handle: cx.focus_handle(),
             tab_id: Uuid::new_v4(),
+            display_mode,
             session_id: None,
             session: None,
             status: SftpStatus::Connecting,
@@ -266,6 +284,16 @@ impl SftpView {
             local_nav_generation: 0,
             drag: None,
             rows_view_h: ROW_H * 12.0,
+            dock_width: None,
+        }
+    }
+
+    /// Dock 模式：由 TerminalTabView 告知实际宽度（影响文件名列 / 地址栏宽度）。
+    pub fn set_dock_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = width.max(200.0);
+        if self.dock_width != Some(width) {
+            self.dock_width = Some(width);
+            cx.notify();
         }
     }
 
@@ -760,7 +788,8 @@ impl SftpView {
             return;
         }
         let x = f32::from(event.position.x) - SIDEBAR_W - CONTENT_BORDER_W;
-        let target = if x < pane_width(window) {
+        let split = (f32::from(window.viewport_size().width) - SIDEBAR_W - CONTENT_BORDER_W) / 2.0;
+        let target = if x < split {
             PaneSide::Local
         } else {
             PaneSide::Remote
@@ -1489,68 +1518,76 @@ impl Render for SftpView {
                 this.handle_key(event, window, cx);
             }));
 
-        // 顶部工具栏
+        // 顶部工具栏（Dock 模式由 TerminalTabView 提供开关，不重复占高度）
         let status_color = match self.status {
             SftpStatus::Connected => t.success(),
             SftpStatus::Failed => t.danger(),
             SftpStatus::Connecting => t.text_subtle(),
         };
-        let header = div()
-            .w_full()
-            .h(px(32.))
-            .bg(t.toolbar_bg())
-            .border_b_1()
-            .border_color(t.border_subtle())
-            .flex()
-            .items_center()
-            .px_3()
-            .gap_3()
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(t.text_on_toolbar_bg())
-                    .child("📁 SFTP 文件管理"),
-            )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(status_color)
-                    .child(self.status_text.clone()),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .h(px(22.))
-                    .px_2()
-                    .rounded_md()
-                    .bg(t.secondary_btn_bg())
-                    .text_size(px(11.))
-                    .text_color(t.text_on_secondary_btn())
-                    .cursor_pointer()
-                    .id("sftp-mkdir")
-                    .hover(|s| s.bg(t.secondary_btn_hover()))
-                    .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
-                        let side = this.active_side;
-                        this.open_dialog(DialogKind::Mkdir(side), "新建文件夹", "新建文件夹", cx);
-                    }))
-                    .child("＋ 文件夹"),
-            )
-            .child(
-                div()
-                    .h(px(22.))
-                    .px_2()
-                    .rounded_md()
-                    .bg(t.secondary_btn_bg())
-                    .text_size(px(11.))
-                    .text_color(t.text_on_secondary_btn())
-                    .cursor_pointer()
-                    .id("sftp-refresh-all")
-                    .hover(|s| s.bg(t.secondary_btn_hover()))
-                    .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
-                        this.refresh_both(cx);
-                    }))
-                    .child("⟳ 刷新"),
-            );
+        let header: Option<AnyElement> = (self.display_mode == SftpDisplayMode::Tab).then(|| {
+            div()
+                .w_full()
+                .h(px(32.))
+                .bg(t.toolbar_bg())
+                .border_b_1()
+                .border_color(t.border_subtle())
+                .flex()
+                .items_center()
+                .px_3()
+                .gap_3()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(t.text_on_toolbar_bg())
+                        .child("📁 SFTP 文件管理"),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(status_color)
+                        .child(self.status_text.clone()),
+                )
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .h(px(22.))
+                        .px_2()
+                        .rounded_md()
+                        .bg(t.secondary_btn_bg())
+                        .text_size(px(11.))
+                        .text_color(t.text_on_secondary_btn())
+                        .cursor_pointer()
+                        .id("sftp-mkdir")
+                        .hover(|s| s.bg(t.secondary_btn_hover()))
+                        .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
+                            let side = this.active_side;
+                            this.open_dialog(
+                                DialogKind::Mkdir(side),
+                                "新建文件夹",
+                                "新建文件夹",
+                                cx,
+                            );
+                        }))
+                        .child("＋ 文件夹"),
+                )
+                .child(
+                    div()
+                        .h(px(22.))
+                        .px_2()
+                        .rounded_md()
+                        .bg(t.secondary_btn_bg())
+                        .text_size(px(11.))
+                        .text_color(t.text_on_secondary_btn())
+                        .cursor_pointer()
+                        .id("sftp-refresh-all")
+                        .hover(|s| s.bg(t.secondary_btn_hover()))
+                        .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
+                            this.refresh_both(cx);
+                        }))
+                        .child("⟳ 刷新"),
+                )
+                .into_any_element()
+        });
 
         // 9.18：虚拟化所需可视区高度（只渲染屏幕内的行，1000 项目录不卡）
         let transfers_h = self.transfers.len().min(MAX_VISIBLE_TRANSFERS) as f32 * TRANSFER_ROW_H;
@@ -1574,7 +1611,18 @@ impl Render for SftpView {
             - 2.0)
             .max(ROW_H);
 
-        let body = div()
+        // S12 12.1：Dock 模式只显示远端栏（宽度由 TerminalTabView 提供）；Tab 模式保持双栏
+        let available = self.dock_width.unwrap_or_else(|| {
+            f32::from(window.viewport_size().width) - SIDEBAR_W - CONTENT_BORDER_W
+        });
+        let pane_w = if self.display_mode == SftpDisplayMode::Dock {
+            available
+        } else {
+            (available / 2.0).max(160.0)
+        };
+        let name_w = (pane_w - 16.0 - 20.0 - 70.0 - 80.0 - 110.0 - 8.0).max(60.0);
+
+        let mut body = div()
             .w_full()
             .flex_1()
             .flex()
@@ -1586,14 +1634,20 @@ impl Render for SftpView {
                 cx.listener(|this, event: &MouseUpEvent, window, cx| {
                     this.finish_drag(event, window, cx);
                 }),
-            )
-            .child(self.render_pane(PaneSide::Local, pane_width(window), name_width(window), cx))
-            .child(self.render_pane(PaneSide::Remote, pane_width(window), name_width(window), cx));
+            );
+        if self.display_mode == SftpDisplayMode::Dock {
+            body = body.child(self.render_pane(PaneSide::Remote, pane_w, name_w, cx));
+        } else {
+            body = body
+                .child(self.render_pane(PaneSide::Local, pane_w, name_w, cx))
+                .child(self.render_pane(PaneSide::Remote, pane_w, name_w, cx));
+        }
 
-        let mut content = root
-            .child(header)
-            .child(body)
-            .child(self.render_transfers(cx));
+        let mut content = root;
+        if let Some(header) = header {
+            content = content.child(header);
+        }
+        content = content.child(body).child(self.render_transfers(cx));
 
         if let Some(menu) = &self.menu {
             content = content.child(self.render_menu(menu, window, cx));
@@ -2398,16 +2452,6 @@ fn side_key(side: PaneSide) -> &'static str {
         PaneSide::Local => "local",
         PaneSide::Remote => "remote",
     }
-}
-
-/// 每个 pane 的宽度是内容区的一半。
-fn pane_width(window: &Window) -> f32 {
-    let viewport = window.viewport_size();
-    (f32::from(viewport.width) - SIDEBAR_W - CONTENT_BORDER_W) / 2.0
-}
-
-fn name_width(window: &Window) -> f32 {
-    (pane_width(window) - 16.0 - 20.0 - 70.0 - 80.0 - 110.0 - 8.0).max(60.0)
 }
 
 fn shared_id(prefix: &str, side: PaneSide) -> String {
