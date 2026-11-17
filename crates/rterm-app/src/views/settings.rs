@@ -1169,7 +1169,10 @@ impl Render for SettingsView {
             .child(
                 div()
                     .w(px(760.))
-                    .h(px(560.))
+                    // 终端外观页在 12.7 新增 SFTP 侧栏分组后需要更高一档。
+                    // 高度不足时内容会把 footer 挤到卡片外（命中区域仍在卡片内，
+                    // 表现为「保存」点不到），故这里给足高度并允许内容区收缩。
+                    .h(px(680.))
                     .bg(t.card_bg())
                     .border_1()
                     .border_color(t.border_medium())
@@ -1194,17 +1197,24 @@ impl Render for SettingsView {
                             .child("⚙ 设置"),
                     )
                     .child(
-                        div().w_full().flex_1().flex().child(tabs).child(
-                            div()
-                                .flex_1()
-                                .h_full()
-                                .px_4()
-                                .py_3()
-                                .flex()
-                                .flex_col()
-                                .overflow_hidden()
-                                .child(content),
-                        ),
+                        div()
+                            .w_full()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .flex()
+                            .child(tabs)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .h_full()
+                                    .px_4()
+                                    .py_3()
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    .child(content),
+                            ),
                     )
                     .child(footer),
             )

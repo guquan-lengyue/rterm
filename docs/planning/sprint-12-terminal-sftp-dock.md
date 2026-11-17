@@ -16,7 +16,12 @@
 > - 12.5 ✅ `MainWindow` 全面切换到 `TabContentView::Terminal(Entity<TerminalTabView>)`（focus / 关闭 / 快捷键阻塞转发）
 > - 12.6 ✅ 入口：终端头部开关按钮 + `Ctrl+Shift+S`（`ToggleSftpDock` action，终端不再把该组合转发远端）
 > - 12.7 ✅ 持久化：设置 → 终端外观「SFTP 侧栏」默认显隐；分隔条拖拽结束保存宽度，新 Tab 沿用
-> - 待办：12.8 多 Tab / 主题 / 高 DPI / 拖拽传输 / vi 回归 + README 更新
+> - 12.8 ✅ 实机 UI 验证（2026-11-17，真实 Ubuntu 主机）：
+>   侧栏布局 / 分隔条拖拽（460→620px 已落盘）/ `cd /tmp`、`cd /var/log` 跟随 /
+>   隐藏后重开回到最近路径 / `Ctrl+Shift+S` 开合且不向远端发 Ctrl+S / 新建 Tab 按设置自动带侧栏 /
+>   老 Tab 不受新设置影响 / 双向模式无 `cd` 回环注入。
+>   期间修复：设置弹窗高度不足把 footer 挤出卡片导致「保存」不可点击（卡片 680 + 内容区 `min_h(0)`）。
+> - 待办：README 用户文档补充侧栏说明（可选，随 v1.1）
 
 ---
 
