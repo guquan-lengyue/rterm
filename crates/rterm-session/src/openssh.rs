@@ -12,10 +12,11 @@
 //! ```
 //!
 //! 支持的关键字（MVP）：Host / HostName / Port / User / IdentityFile /
-//! ServerAliveInterval / ProxyJump / Include（顶层，递归 1 层）。
+//! ServerAliveInterval / ProxyJump / Include（递归 2 层）。
 //!
-//! 注意：`Match` 条件语法不在当前 Sprint 实现范围内 —— 遇到 Match 行会
-//! 结束当前 Host 块，并忽略其后的非 Host 行。
+//! `Match` 支持可静态判定的子集：`all` / `host <glob>` / `user <glob>`
+//! （含 `!` 否定项）；条件成立的关键字会并入上一个 Host 块，否则忽略。
+//! `exec` / `localnetwork` 等运行期条件按"不生效"处理。
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -33,16 +34,19 @@ pub fn parse_openssh_config(path: &Path) -> Result<Vec<Session>> {
 
 /// 从字符串解析（测试时用内联样例）。
 pub fn parse_openssh_str(raw: &str, source_path: &Path, home: &Path) -> Result<Vec<Session>> {
-    parse_openssh_inner(raw, source_path, home, true)
+    parse_openssh_inner(raw, source_path, home, 0)
 }
 
-/// `allow_include = false` 时不再解析 Include，保证只递归 1 层。
+/// Include 最多递归层数（主文件之外再嵌套 2 层，同时天然防止循环引用）。
+const MAX_INCLUDE_DEPTH: u8 = 2;
+
 fn parse_openssh_inner(
     raw: &str,
     source_path: &Path,
     home: &Path,
-    allow_include: bool,
+    depth: u8,
 ) -> Result<Vec<Session>> {
+    let allow_include = depth < MAX_INCLUDE_DEPTH;
     let (includes, blocks) = split_into_host_blocks(raw);
     let mut sessions = Vec::new();
 
@@ -58,7 +62,7 @@ fn parse_openssh_inner(
                     continue;
                 }
             };
-            match parse_openssh_inner(&inc_raw, &inc_path, home, false) {
+            match parse_openssh_inner(&inc_raw, &inc_path, home, depth + 1) {
                 Ok(mut incs) => sessions.append(&mut incs),
                 Err(e) => log::warn!("解析 Include 文件失败 {}: {e:#}", inc_path.display()),
             }
@@ -72,15 +76,19 @@ fn parse_openssh_inner(
             kv.entry(k).or_insert(v);
         }
 
-        // Host 块内的 Include（兼容旧行为，同样只递归 1 层）
+        // Host 块内的 Include（与顶层共用同一套递归深度限制）
         if allow_include {
             if let Some(include) = kv.remove("include") {
                 let inc_path = resolve_include_path(&include, source_path, home);
                 match std::fs::read_to_string(&inc_path) {
-                    Ok(inc_raw) => match parse_openssh_inner(&inc_raw, &inc_path, home, false) {
-                        Ok(mut incs) => sessions.append(&mut incs),
-                        Err(e) => log::warn!("解析 Include 文件失败 {}: {e:#}", inc_path.display()),
-                    },
+                    Ok(inc_raw) => {
+                        match parse_openssh_inner(&inc_raw, &inc_path, home, depth + 1) {
+                            Ok(mut incs) => sessions.append(&mut incs),
+                            Err(e) => {
+                                log::warn!("解析 Include 文件失败 {}: {e:#}", inc_path.display())
+                            }
+                        }
+                    }
                     Err(e) => log::warn!("读取 Include 文件失败 {}: {e}", inc_path.display()),
                 }
             }
@@ -195,11 +203,20 @@ fn split_into_host_blocks(raw: &str) -> (Vec<String>, Vec<HostBlock>) {
                 current = Some((value.to_string(), Vec::new()));
             }
             "match" => {
-                // Match 条件语法暂不支持：结束当前 Host 块并忽略后续非 Host 行
-                if let Some(prev) = current.take() {
-                    blocks.push(prev);
+                // `Match` 是上一个 Host 块的条件补充：条件成立时把后续关键字
+                // 并入当前块（Host 自身的关键字 first-wins 仍优先）。
+                let applies = current
+                    .as_ref()
+                    .map(|(patterns, list)| match_block_applies(value, patterns, list))
+                    .unwrap_or(false);
+                if applies {
+                    in_match = false;
+                } else {
+                    if let Some(prev) = current.take() {
+                        blocks.push(prev);
+                    }
+                    in_match = true;
                 }
-                in_match = true;
             }
             _ => {
                 if in_match {
@@ -223,6 +240,126 @@ fn split_into_host_blocks(raw: &str) -> (Vec<String>, Vec<HostBlock>) {
     }
 
     (includes, blocks)
+}
+
+/// 判断 `Match` 块是否对当前 Host 生效。
+///
+/// 只实现导入时能静态判定的子集：
+/// - `Match all`
+/// - `Match host <逗号分隔 glob>`（对 Host 的模式串或已出现的 HostName 匹配）
+/// - `Match user <逗号分隔 glob>`（对已出现的 User 匹配）
+///
+/// `exec` / `localnetwork` / `originalhost` / `canonical` / `final` 等条件
+/// 依赖运行环境，按"不生效"处理，避免把受限配置强加给用户。
+fn match_block_applies(
+    condition: &str,
+    host_patterns: &str,
+    keywords: &[(String, String)],
+) -> bool {
+    let mut tokens = condition.split_whitespace();
+    let Some(kind) = tokens.next() else {
+        return false;
+    };
+    if kind.eq_ignore_ascii_case("all") {
+        return tokens.next().is_none();
+    }
+
+    // 模式列表允许用逗号或空格分隔（如 `Match host db* !db2`）。
+    // 但若后续出现其它条件关键字，说明是 `Match host a user b` 这类与运算，
+    // 不在支持范围。
+    const OTHER_CRITERIA: [&str; 8] = [
+        "user",
+        "exec",
+        "originalhost",
+        "localuser",
+        "localnetwork",
+        "canonical",
+        "final",
+        "forcetty",
+    ];
+    let rest: Vec<&str> = tokens.collect();
+    if rest.is_empty()
+        || rest.iter().any(|token| {
+            OTHER_CRITERIA
+                .iter()
+                .any(|criterion| token.eq_ignore_ascii_case(criterion))
+        })
+    {
+        return false;
+    }
+    let patterns = rest.join(",");
+
+    match kind.to_ascii_lowercase().as_str() {
+        "host" => {
+            // 候选：Host 自身的模式串 + 已出现的 HostName。
+            let mut candidates: Vec<&str> = host_patterns.split_whitespace().collect();
+            for (key, value) in keywords {
+                if key == "hostname" {
+                    candidates.push(value);
+                }
+            }
+            glob_list_matches_any(&patterns, &candidates)
+        }
+        "user" => {
+            let candidates: Vec<&str> = keywords
+                .iter()
+                .filter(|(key, _)| key == "user")
+                .map(|(_, value)| value.as_str())
+                .collect();
+            glob_list_matches_any(&patterns, &candidates)
+        }
+        _ => false,
+    }
+}
+
+/// 逗号分隔的 glob 列表匹配；`!` 前缀表示否定项，命中任意候选即整体不匹配。
+fn glob_list_matches_any(patterns: &str, values: &[&str]) -> bool {
+    let mut matched = false;
+    for pattern in patterns.split(',') {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        if let Some(negative) = pattern.strip_prefix('!') {
+            if values.iter().any(|value| glob_match(negative, value)) {
+                return false;
+            }
+        } else if values.iter().any(|value| glob_match(pattern, value)) {
+            matched = true;
+        }
+    }
+    matched
+}
+
+/// 简单 glob：`*` 匹配任意长度、`?` 匹配单字符，大小写不敏感。
+fn glob_match(pattern: &str, text: &str) -> bool {
+    glob_match_bytes(
+        pattern.to_ascii_lowercase().as_bytes(),
+        text.to_ascii_lowercase().as_bytes(),
+    )
+}
+
+fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
+    match pattern.split_first() {
+        None => text.is_empty(),
+        Some((b'*', rest)) => {
+            let mut index = 0;
+            loop {
+                if glob_match_bytes(rest, &text[index..]) {
+                    return true;
+                }
+                if index >= text.len() {
+                    return false;
+                }
+                index += 1;
+            }
+        }
+        Some((b'?', rest)) => !text.is_empty() && glob_match_bytes(rest, &text[1..]),
+        Some((expected, rest)) => match text.split_first() {
+            Some((actual, tail)) => expected == actual && glob_match_bytes(rest, tail),
+            None => false,
+        },
+    }
 }
 
 /// 解析 `ProxyJump` 的 `[user@]host[:port]` 片段，缺省端口 22。

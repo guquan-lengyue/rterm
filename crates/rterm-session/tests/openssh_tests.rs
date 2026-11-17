@@ -169,6 +169,118 @@ Host plain
 }
 
 #[test]
+fn match_host_block_applies_when_condition_holds() {
+    let raw = "\
+Host web
+    HostName web.example
+    User deploy
+Match host web
+    Port 2200
+
+Host ops
+    HostName ops.example
+    User ops
+Match user ops
+    Port 2201
+";
+    let sessions = parse_openssh_str(raw, Path::new("test.conf"), Path::new(".")).unwrap();
+
+    let web = sessions.iter().find(|s| s.name == "web").unwrap();
+    assert_eq!(web.port, 2200, "Match host web 应给 web 补 Port");
+    assert_eq!(web.username, "deploy", "Host 自身关键字优先");
+
+    let ops = sessions.iter().find(|s| s.name == "ops").unwrap();
+    assert_eq!(ops.port, 2201, "Match user ops 应命中已出现的 User");
+}
+
+#[test]
+fn match_glob_and_negation() {
+    let raw = "\
+Host db1
+    HostName db1.example
+Match host db* !db2
+    User dbadmin
+
+Host db2
+    HostName db2.example
+Match host db* !db2
+    User wrong
+";
+    let sessions = parse_openssh_str(raw, Path::new("test.conf"), Path::new(".")).unwrap();
+
+    let db1 = sessions.iter().find(|s| s.name == "db1").unwrap();
+    assert_eq!(db1.username, "dbadmin", "db* 命中且未被 !db2 否定");
+    let db2 = sessions.iter().find(|s| s.name == "db2").unwrap();
+    assert!(db2.username.is_empty(), "!db2 否定项应让 db2 不命中");
+}
+
+#[test]
+fn match_all_and_unsupported_conditions() {
+    let raw = "\
+Host everything
+    HostName e.example
+Match all
+    Port 2222
+
+Host exec-host
+    HostName x.example
+Match exec \"test 1\"
+    Port 9999
+";
+    let sessions = parse_openssh_str(raw, Path::new("test.conf"), Path::new(".")).unwrap();
+
+    let all = sessions.iter().find(|s| s.name == "everything").unwrap();
+    assert_eq!(all.port, 2222, "Match all 应生效");
+    let exec = sessions.iter().find(|s| s.name == "exec-host").unwrap();
+    assert_eq!(exec.port, 22, "exec 条件无法静态判定，按不生效处理");
+}
+
+#[test]
+fn include_recurses_two_levels_and_stops() {
+    let base = std::env::temp_dir().join(format!(
+        "rterm-openssh-rec-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&base).expect("创建临时目录");
+    // main -> a.conf -> b.conf -> c.conf；只允许两层。
+    std::fs::write(
+        base.join("a.conf"),
+        "Include b.conf\nHost host-a\n    HostName 10.0.0.1\n",
+    )
+    .expect("写 a.conf");
+    std::fs::write(
+        base.join("b.conf"),
+        "Include c.conf\nHost host-b\n    HostName 10.0.0.2\n",
+    )
+    .expect("写 b.conf");
+    std::fs::write(base.join("c.conf"), "Host host-c\n    HostName 10.0.0.3\n").expect("写 c.conf");
+    let main = base.join("config");
+    std::fs::write(
+        &main,
+        "Include a.conf\nHost host-main\n    HostName 10.0.0.9\n",
+    )
+    .expect("写主配置");
+
+    let sessions = parse_openssh_config(&main).expect("parse");
+    assert!(sessions.iter().any(|s| s.name == "host-main"));
+    assert!(sessions.iter().any(|s| s.name == "host-a"));
+    assert!(
+        sessions.iter().any(|s| s.name == "host-b"),
+        "第二层 Include 应解析"
+    );
+    assert!(
+        !sessions.iter().any(|s| s.name == "host-c"),
+        "第三层 Include 超出深度限制，应停止"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
 fn match_ends_host_block_and_is_ignored() {
     let raw = "\
 Host keep
