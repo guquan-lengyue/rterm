@@ -195,6 +195,11 @@ impl TextInput {
     }
 
     /// 鼠标左键：按点击位置（字符 x 坐标）定位光标。
+    ///
+    /// 处理要点：
+    /// - GPUI 的 `index_for_x` 超出文本时返回 None → 光标放到末尾
+    /// - 点击字符右半部分时 → 光标前进到下一个字符边界
+    /// - 保证 index 总是落在合法 UTF-8 字符边界上
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -213,11 +218,46 @@ impl TextInput {
         let Some(local) = bounds.localize(&event.position) else {
             return;
         };
-        let Some(index) = line.index_for_x(local.x) else {
-            return;
+
+        let content_len = self.content.len();
+
+        // 1) 拿候选索引；index_for_x 返回超出范围（None）→ 直接放末尾
+        let hit = match line.index_for_x(local.x) {
+            Some(idx) => clamp_index(&self.content, idx),
+            None => {
+                self.selected_range = content_len..content_len;
+                self.marked_range = None;
+                cx.notify();
+                return;
+            }
         };
-        let index = clamp_index(&self.content, index);
-        self.selected_range = index..index;
+
+        // 2) 如果 hit 已经是末尾（空文本 / 末尾字符被点中右半），直接设
+        if hit >= content_len {
+            self.selected_range = content_len..content_len;
+            self.marked_range = None;
+            cx.notify();
+            return;
+        }
+
+        // 3) 取当前边界和下一个边界的 x 坐标；
+        //    若点击 x > 中点 → 前进到下一个边界
+        let cur_x = f32::from(line.x_for_index(hit));
+        let next_boundary = self.next_boundary(hit);
+        let final_idx = if next_boundary <= content_len {
+            let next_x = f32::from(line.x_for_index(next_boundary));
+            let click_x = f32::from(local.x);
+            let mid = (cur_x + next_x) / 2.0;
+            if click_x > mid {
+                next_boundary.min(content_len)
+            } else {
+                hit
+            }
+        } else {
+            hit
+        };
+
+        self.selected_range = final_idx..final_idx;
         self.marked_range = None;
         cx.notify();
     }
