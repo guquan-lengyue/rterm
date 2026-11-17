@@ -488,6 +488,9 @@ impl Render for SessionEditDialog {
             .child(
                 div()
                     .w(px(520.))
+                    // 固定高度：基础 Tab 有 5 个字段，若不限高，内容会溢到 footer，
+                    // 覆盖“取消/保存”按钮的点击区域（S7.5 手工回归发现）。
+                    .h(px(470.))
                     .bg(t.card_bg())
                     .border_1()
                     .border_color(t.border_medium())
@@ -499,6 +502,7 @@ impl Render for SessionEditDialog {
                         div()
                             .w_full()
                             .h(px(44.))
+                            .flex_shrink_0()
                             .px_4()
                             .flex()
                             .items_center()
@@ -514,6 +518,7 @@ impl Render for SessionEditDialog {
                         div()
                             .w_full()
                             .h(px(36.))
+                            .flex_shrink_0()
                             .flex()
                             .border_b_1()
                             .border_color(t.border_subtle())
@@ -521,12 +526,20 @@ impl Render for SessionEditDialog {
                             .child(self.render_tab_header(DialogTab::Auth, cx))
                             .child(self.render_tab_header(DialogTab::Advanced, cx)),
                     )
-                    .child(self.render_tab_content(cx))
+                    .child(
+                        // 内容区固定占用剩余高度并裁剪，避免字段溢出盖住 footer 按钮。
+                        div()
+                            .w_full()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(self.render_tab_content(cx)),
+                    )
                     .child(
                         // 底部按钮栏：左侧 测试连接 + 状态，右侧 取消/保存
                         div()
                             .w_full()
                             .h(px(52.))
+                            .flex_shrink_0()
                             .px_4()
                             .flex()
                             .items_center()

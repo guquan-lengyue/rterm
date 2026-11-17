@@ -1,8 +1,10 @@
 # Sprint 9 — 远程性能监控
 
-> **状态**：待开始（S6 ✅ + S7 核心已完成；可与 S8 并行）
-> **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH exec 能力；Perl ✅ 已完成）+ [Sprint 4](./sprint-04-settings-io.md)（监控间隔与阈值已持久化）
+> **状态**：待开始（S7.5 ✅ 已完成；可与 S8 并行）
+> **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH exec 能力；Perl ✅ 已完成）+ [Sprint 4](./sprint-04-settings-io.md)（监控间隔与阈值已持久化）+ [Sprint 7.5](./sprint-07.5-tech-debt.md)（线程/事件门禁 ✅）
 > **目标**：MonitorCollector + tokio interval 采集 + gpui Canvas 折线图 + Top 进程 + Kill
+>
+> **S7.5 交接**：`MonitorSample` / `MonitorAlert` 事件仍保留（S9 消费）；`TabKind::Monitor` 仍预留；`StatusBarMessage` 已可复用为采集错误提示。S7.5 的线程模型（独立 worker + channel + `cx.spawn`）可直接参考。
 >
 > **S5 已就绪的接入点**：
 > - `SshSession::session_clone()` 可在采集线程建立独立 channel 执行 `exec`

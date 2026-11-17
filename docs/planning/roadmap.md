@@ -240,7 +240,7 @@
 
 ### 任务清单
 
-- [ ] 主机密钥 known_hosts 持久化（`~/.ssh/known_hosts` 兼容格式）
+- [x] 主机密钥 known_hosts 持久化（兼容格式 + 原子写 + 三选一确认；hashed/Windows 原子替换边界见 S10 9.1b/9.1c）
 - [ ] 连接失败错误码映射（auth / timeout / host_key_changed / network）→ 面向用户的文案
 - [ ] 命令面板 Ctrl+P（gpui 自带 keybinding 框架）
 - [ ] 全局快捷键全部生效（Ctrl+, 设置 / Ctrl+Shift+N 新会话 / F11 全屏 / Ctrl+T 新标签 / Ctrl+W 关标签）
@@ -249,7 +249,7 @@
 - [ ] 会话日志文件写入（per-tab 可开 / 关）
 - [ ] OSC 52 远程剪贴板支持
 - [ ] vi 模式（alacritty_terminal 自带）
-- [ ] OpenSSH config 导入完善（Include / Match 语法）
+- [ ] OpenSSH config 导入完善（S7.5 已修顶层 Include / 多模式 Host / ProxyJump / Match 跳过；剩余 Include 递归 2 层 + Match 条件 → S10 9.8）
 - [ ] `.ppk` / PuTTY reg 文件导入（可选）
 
 ---
@@ -286,10 +286,11 @@
 
 - [x] 会话：增删改查 + 持久化 + DPAPI 加密 + 导入导出 + OpenSSH config
 - [x] 终端：xterm-256color + 主题 + 滚动缓冲 + 复制粘贴 + 快捷键
-- [x] SFTP：双栏浏览 + 拖拽 + 批量传输 + 进度
-- [x] 路径同步：PS1 + pwd 兜底 + 双向 + ignore 防回环
-- [x] 监控：CPU / MEM / NET / DISK / Load + 折线图 + Kill
-- [x] 稳定性：重连 + known_hosts + 命令面板 + 自动备份 + 日志
-- [x] Windows MSI 安装包 + README + CHANGELOG
+- [ ] SFTP：双栏浏览 + 批量传输 + 进度已就绪；拖拽/暂停取消 E2E/大目录虚拟化待 S10
+- [ ] 路径同步：PS1 + pwd 兜底 + 双向 + ignore 防回环（S8）
+- [ ] 监控：CPU / MEM / NET / DISK / Load + 折线图 + Kill（S9）
+- [ ] 稳定性：重连 + known_hosts 已完成；命令面板/自动备份/日志/诊断包待 S10
+- [x] 工程门禁：`cargo fmt --check` / `cargo clippy --all-targets` 0 warning / `cargo test --workspace`
+- [ ] Windows MSI 安装包 + 用户版 README + CHANGELOG 定稿（S11）
 
 **全部满足 → 发布 v1.0.0**

@@ -1,8 +1,10 @@
 # Sprint 11 — v1.0 打磨 & 发布
 
-> **状态**：待开始（前置 S10）
+> **状态**：待开始（前置 S10；S7.5 门禁已绿）
 > **前置**：[Sprint 10](./sprint-10-stability.md) 全量 Smoke Test 通过（Perl ✅ 已完成）
 > **目标**：Release 构建 + 安装包 + README + CHANGELOG + 完整回归 + 压力测试
+>
+> **S7.5 基线**：`cargo test --workspace` 92 passed / 1 ignored；`cargo clippy --workspace --all-targets` 0 warning；`cargo fmt --all -- --check` 通过；本地门禁脚本 [check.ps1](../../scripts/check.ps1)。
 
 ---
 
@@ -29,7 +31,7 @@
 
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
-| 10.5 | 0.5h | 全仓 | 未用 crate 移除 / TODO 整理 / public API 统一命名 / doc comment 补全 | `cargo clippy` 无 warning |
+| 10.5 | 0.5h | 全仓 | 未用 crate / 死代码已在 S7.5 清理；本任务做最终核对：TODO 整理 / public API 命名 / doc comment 补全 | 保持 `cargo clippy` 0 warning |
 
 ### 10.5 完整回归测试
 
@@ -41,7 +43,7 @@
 
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
-| 10.7 | 0.5h | — | 10 并发 tab + 20 并发传输 + 监控 15min | 无内存泄漏 / 无 panic |
+| 10.7 | 0.5h | — | 10 并发 Tab + 20 并发传输 + 监控 15min；反复开关 SFTP/Terminal Tab，检查线程数回落 | 无内存/线程泄漏 / 无 panic |
 
 ### 10.7 Release 验收
 

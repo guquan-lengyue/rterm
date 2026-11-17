@@ -18,8 +18,8 @@
 | **S7** | SFTP 文件管理 | [sprint-07-sftp.md](./sprint-07-sftp.md) | 🚧 核心完成（2026-11-16） | S5 + S6 ✅ |
 | **S7.5** | 技术债清偿（S8 前插入） | [sprint-07.5-tech-debt.md](./sprint-07.5-tech-debt.md) | ✅ 已完成（2026-11-16） | S7 🚧 |
 | **S8** | 路径同步 | [sprint-08-sync.md](./sprint-08-sync.md) | ⏳ **下一个**（S7.5 已完成） | S6 ✅ + S7 🚧 + S7.5 ✅ |
-| **S9** | 远程性能监控 | [sprint-09-monitor.md](./sprint-09-monitor.md) | 待开始（可与 S8 并行） | S5 + S6 ✅ |
-| **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | 待开始（等 S7.5–S9） | S6 ✅–S9 |
+| **S9** | 远程性能监控 | [sprint-09-monitor.md](./sprint-09-monitor.md) | 待开始（可与 S8 并行） | S5 + S6 ✅ + S7.5 ✅ |
+| **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | 待开始（等 S8–S9） | S6 ✅–S9 + S7.5 ✅ |
 | **S11** | v1.0 打磨 & 发布 | [sprint-11-release.md](./sprint-11-release.md) | 待开始（等 S10） | S10 |
 
 ---
@@ -54,7 +54,7 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 - S9 可立即开始（与 S8 并行）
 - S7.5 已完成，S8 的强制前置已满足；SFTP 导航已异步化且保留 `SftpNavigated` 语义
 - S8 依赖 S6 ✅ + S7 ✅（SftpNavigated 已就绪）+ S7.5 ✅
-- S10 等 S7.5 收尾 / S8 / S9 都好
+- S10 等 S8 / S9 完成后再开始
 
 ---
 
@@ -72,7 +72,7 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 4. **发现阻塞**：暂停、记录、向用户报告，不要硬绕
 5. **MVP 范围神圣不可侵犯**：不做 X11 / 多用户 / AI 助手 / 云同步（见 `product/overview.md` 1.2）
 6. **EventBus 是唯一跨 View 通道**：View 之间永不直接调用，只 `cx.subscribe`
-7. **不阻塞主线程**：ssh2 IO、SFTP 传输、监控采集 必须 `spawn_blocking`
+7. **不阻塞主线程**：ssh2 IO、SFTP 传输、监控采集必须放在独立后台线程/任务，通过 channel 回 UI
 
 ---
 

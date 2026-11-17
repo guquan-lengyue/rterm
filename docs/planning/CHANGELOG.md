@@ -27,7 +27,7 @@
 | `cargo test --workspace` | ✅ 92 passed / 0 failed / 1 ignored |
 | `cargo clippy --workspace --all-targets` | ✅ 0 warning / 0 error |
 | `cargo fmt --all -- --check` | ✅ 通过 |
-| 手工回归 | ⏳ 见 sprint-07.5-tech-debt.md 回归清单（真实 GUI/SSH 环境） |
+| 手工回归 | ⚠️ 部分完成：单实例、设置/状态栏、表单校验、SSH/终端/滚动、关闭 Tab、主机密钥三选一已通过；“变更”分支/CRUD 强杀/损坏文件/SFTP 受环境限制待补测；发现并修复会话对话框 footer 被覆盖 |
 
 ### 已知限制（转 S10）
 

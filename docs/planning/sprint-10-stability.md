@@ -1,6 +1,6 @@
 # Sprint 10 — 稳定性收尾
 
-> **状态**：待开始（S6 ✅ 已完成；前置 S7–S9 + S7.5）
+> **状态**：待开始（S7.5 ✅ 已完成；前置 S8 + S9）
 > **前置**：[Sprint 6](./sprint-06-terminal-render.md) ✅ + [Sprint 7](./sprint-07-sftp.md) + [Sprint 7.5](./sprint-07.5-tech-debt.md) + [Sprint 8](./sprint-08-sync.md) + [Sprint 9](./sprint-09-monitor.md) 全部（Perl ✅ 已完成）
 > **目标**：known_hosts 回归 + 错误映射 + 命令面板 + 全局快捷键 + 日志 + 备份 + 全量 smoke test
 >
@@ -22,10 +22,17 @@
 > - 删除/覆盖二次确认 → 9.15 回归
 > - `data_dir` 接线 → 9.16 回归
 >
+> **S7.5 遗留（本 Sprint 收口）**：
+> - hashed known_hosts 的旧指纹展示与变更替换 → 9.1b
+> - Windows known_hosts 真正的原子替换（ReplaceFileW / 备份回滚）→ 9.1c
+> - 修改 data_dir 后旧 sessions.json 迁移 → 9.16b
+> - 长空闲 PTY 首键回显最坏 50ms → 9.19
+>
 > **S7 遗留（本 Sprint 收口）**：
 > - 拖拽上传/下载、暂停/继续/取消 GUI E2E、空白区右键菜单 → 9.18
 > - mkdir / rename / delete / chmod 逐项 E2E → 9.12.1
 > - 文件列表虚拟化（大目录）→ 9.18
+> - SFTP 本地文件系统操作仍在 UI 线程（远端已后台化）→ 9.18 评估
 
 ---
 
@@ -34,6 +41,8 @@
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
 | 9.1 | 0.25h | `crates/rterm-ssh/src/known_hosts.rs` + `views/main_window.rs` | 已由 S7.5 7.5.4.1 交付首次连接三选一 Modal 与变更告警；本任务只回归 + 补错误文案边界 | 首次连接弹窗；拒绝后不写 known_hosts |
+| 9.1b | 0.5h | `crates/rterm-ssh/src/known_hosts.rs` | hashed known_hosts（`\|1\|`）兼容：解析 salt/hash 匹配 host，展示旧指纹；AcceptAndSave 时删除匹配的 hashed 行，避免重复提示 | hashed known_hosts 变更后接受一次即可继续连接 |
+| 9.1c | 0.5h | `crates/rterm-ssh/src/known_hosts.rs` | Windows 原子替换：优先 `ReplaceFileW`（或写临时文件 + 备份 + 失败回滚），消除“删旧再 rename”窗口 | 模拟 rename 失败时原 known_hosts 不丢 |
 | 9.2 | 0.5h | `crates/rterm-ssh/src/errors.rs` | ssh2 error_code → 用户友好文案 map（auth_failed, timeout, host_key_changed, network_error）| 错误弹窗显示中文 |
 | 9.3 | 1h | `crates/rterm-app/src/views/command_palette.rs` | Ctrl+P 命令面板：fuzzy-find 会话 + 设置入口 + 操作；↑/↓ 导航 Enter 执行 | 能搜 "db" 找到 db-prod |
 | 9.4 | 0.5h | `crates/rterm-app/src/main.rs` | 全局快捷键：Ctrl+, 设置 / Ctrl+Shift+N 新会话 / F11 全屏 | 6 个快捷键生效 |
@@ -48,8 +57,10 @@
 | 9.14 | 0.25h | `crates/rterm-app/src/views/settings.rs` | 字体选择改为枚举系统字体（DirectWrite / gpui 字体列表），保留现有 4 个预设作为 fallback | 能选到系统已装字体 |
 | 9.15 | 0.15h | `crates/rterm-app/src/views/main_window.rs` + `session_tree.rs` | 已由 S7.5 7.5.3.10 交付删除二次确认；本任务只回归：删除后 emit SessionDeleted 并刷新树 | 点删除 → 确认 → 才真删 |
 | 9.16 | 0.15h | `crates/rterm-app/src/main.rs` + `state.rs` | `data_dir` 已由 S7.5 7.5.3.3 接线；本任务只补 `terminal_log_dir` 供 9.5 使用，并回归自定义数据目录 | 改数据目录 → 重启后新路径生效 |
+| 9.16b | 0.5h | `crates/rterm-app/src/state.rs` + `views/settings.rs` | data_dir 迁移：设置保存时若目录变化，提示并复制/移动 sessions.json（失败回滚），避免切换后看似丢会话 | 改 data_dir → 旧会话仍可见；失败保持原目录 |
 | 9.17 | 0.5h | `crates/rterm-app/src/views/terminal.rs` | 终端交互打磨（S6 遗留）：方块光标改用反色/半透明提升对比度；滚动条支持鼠标拖拽；双击选中单词 / 三击选中整行 | 光标在任意配色下可辨认；滚动条可拖；双击选词 |
-| 9.18 | 1h | `crates/rterm-app/src/views/sftp.rs` | SFTP 交互补全（S7 遗留）：Pane 间拖拽上传/下载；暂停/继续/取消 GUI E2E；空白区右键菜单；列表虚拟化（大目录不卡） | 拖拽可传输；暂停后进度停止；1000 项目录滚动流畅 |
+| 9.18 | 1h | `crates/rterm-app/src/views/sftp.rs` | SFTP 交互补全（S7 遗留）：Pane 间拖拽上传/下载；暂停/继续/取消 GUI E2E；空白区右键菜单；列表虚拟化（大目录不卡）；评估本地 fs 操作后台化 | 拖拽可传输；暂停后进度停止；1000 项目录滚动流畅 |
+| 9.19 | 0.5h | `crates/rterm-ssh/src/pty.rs` | PTY 空闲唤醒：用 socket readiness / 可中断等待替代最长 50ms 轮询，恢复首键低延迟 | 空闲 1 分钟后按键回显 ≤ 当前活跃路径 + 10ms |
 
 ### 9.12 全量 Smoke Test
 

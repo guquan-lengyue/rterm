@@ -5,12 +5,14 @@
 > **目标**：SyncBridge + PS1 正则 + ignore 防回环
 > **定位**：rterm 独有杀手功能
 >
-> **S7.5 交接约束**：
-> - S7.5 会把 SFTP 导航改为后台异步执行，但必须保留 `SftpNavigated` 在“列表加载成功后 emit”的语义与顺序；S8 不感知线程模型变化
-> - S7.5 会修复 `StatusBarMessage` 消费、关闭 Tab 状态点、设置接线；S8 可直接复用这些修复，不重复实现
+> **S7.5 完成后的现状（已交接）**：
+> - SFTP 导航已改为后台异步执行，但 `SftpNavigated` 仍在“列表加载成功后 emit”，语义与顺序不变；S8 不感知线程模型
+> - `StatusBarMessage` 消费、关闭 Tab 状态点、设置默认值/data_dir 接线、删除/覆盖确认均已落地，S8 直接复用
+> - **`AppEvent::TerminalData` 已在 S7.5 P3 作为死事件移除**（原实现只 emit、无订阅方）。S8 不要再新增全局高频 PTY 事件，直接在 `TerminalView::handle_pty_event` 内消费原始 bytes
 >
-> **S5 已就绪的接入点**：
-> - `TerminalData { tab_id, session_id, bytes }` 已在每个 PTY chunk 实时 emit → SyncBridge 可直接订阅，无需改 TerminalView 的连接层
+> **已就绪的接入点**：
+> - `TerminalView::handle_pty_event` 持有每个 PTY chunk 的 `bytes` → SyncBridge 直接在此调用，无需 EventBus 中转
+> - `AppEvent::TerminalCwdHint` 保留，可用于 SyncBridge → 状态栏/其他 View 的轻量广播
 > - **S6 已交付多 Tab 映射**：`MainWindow.tabs: Vec<TabEntry { id, session_id, title, kind, content }>`，S8 按 tab 隔离 SyncBridge 状态
 > - **S7 已交付 SFTP 导航**：`SftpView` 每次成功导航（双击目录 / 面包屑 / 地址栏 / 刷新）都会 emit `SftpNavigated { tab_id, session_id, path }`；刷新也会触发，SyncBridge 需对比 `last_sftp` 去重，避免自激
 > - **S7 已交付 Tab 内容枚举**：`TabContentView::{Terminal, Sftp}`；S8 通过 `MainWindow.tabs` 找到同 `session_id` 的终端 Tab
@@ -38,7 +40,7 @@
 
 | # | 粒度 | 文件 | 要写的 | 验收 |
 |---|------|------|--------|------|
-| 7.2.1 | 0.5h | `crates/rterm-app/src/views/terminal.rs` + `main_window.rs` | `TerminalView::handle_pty_event` 喂完 PTY 字节 → `sync_bridge.on_terminal_output(bytes)` → 若 Some(cwd) → emit `TerminalCwdHint` / `SftpNavigated`；SyncBridge 按 `tab_id` 隔离（映射来自 `MainWindow.tabs`） | 终端 cd /var/log → SFTP 自动跳 |
+| 7.2.1 | 0.5h | `crates/rterm-app/src/views/terminal.rs` + `main_window.rs` | 在 `TerminalView::handle_pty_event` 内、`engine.input_bytes(bytes)` 之后直接调用 `sync_bridge.on_terminal_output(bytes)`（不经过 EventBus）；若 Some(cwd) → emit `TerminalCwdHint` / `SftpNavigated`；SyncBridge 按 `tab_id` 隔离（映射来自 `MainWindow.tabs`） | 终端 cd /var/log → SFTP 自动跳 |
 | 7.2.2 | 0.5h | `crates/rterm-app/src/views/main_window.rs` + SFTP View | SFTP 用户导航已在 `SftpView::navigate` 内 emit `SftpNavigated`；SyncBridge 处理后返回注入命令 → 找到同 `session_id` 的 `TabContentView::Terminal`，调用新增的 `TerminalView::inject_command`（内部 `PtyCommand::Write`） | SFTP 导航 → 终端自动 cd |
 
 ### 7.3 验收
