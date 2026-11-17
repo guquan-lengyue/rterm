@@ -14,6 +14,8 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
     Engine as _,
 };
+use hmac::{Hmac, Mac};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use ssh2::{CheckResult, HashType, HostKeyType, KnownHostFileKind};
 
@@ -216,17 +218,7 @@ fn write_host_key(path: &Path, host: &str, port: u16, key_type: &str, key: &[u8]
             .with_context(|| format!("创建 .ssh 目录失败: {}", parent.display()))?;
     }
 
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("known_hosts");
-    let sequence = TMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp_path = dir.join(format!(
-        "{file_name}.rterm-tmp-{}-{}",
-        std::process::id(),
-        sequence
-    ));
+    let temp_path = sibling_path(path, "rterm-tmp");
 
     let write_result = (|| -> Result<()> {
         let mut file = std::fs::OpenOptions::new()
@@ -240,19 +232,7 @@ fn write_host_key(path: &Path, host: &str, port: u16, key_type: &str, key: &[u8]
             .with_context(|| format!("同步临时文件失败: {}", temp_path.display()))?;
         drop(file);
 
-        match std::fs::rename(&temp_path, path) {
-            Ok(()) => Ok(()),
-            Err(_) if cfg!(windows) && path.exists() => {
-                // Windows 上 rename 不能覆盖已存在文件；持锁期间先删除再重试。
-                std::fs::remove_file(path)
-                    .with_context(|| format!("删除旧 known_hosts 失败: {}", path.display()))?;
-                std::fs::rename(&temp_path, path)
-                    .with_context(|| format!("替换 known_hosts 失败: {}", path.display()))
-            }
-            Err(error) => {
-                Err(error).with_context(|| format!("替换 known_hosts 失败: {}", path.display()))
-            }
-        }
+        replace_file(&temp_path, path)
     })();
 
     if write_result.is_err() {
@@ -261,7 +241,54 @@ fn write_host_key(path: &Path, host: &str, port: u16, key_type: &str, key: &[u8]
     write_result
 }
 
-/// 判断一行 known_hosts 是否属于 `entry`（兼容逗号分隔的 host 列表）。
+/// 与 `path` 同目录的唯一兄弟文件名（临时文件 / 备份）。
+fn sibling_path(path: &Path, tag: &str) -> PathBuf {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("known_hosts");
+    let sequence = TMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!(
+        "{file_name}.{tag}-{}-{}",
+        std::process::id(),
+        sequence
+    ))
+}
+
+/// 用 `temp` 替换 `target`。
+///
+/// 首选一次 `rename`（Rust 在 Windows 上使用
+/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`，通常可直接覆盖）。
+/// 若因文件被占用 / 权限失败且目标存在，则走「备份 → 替换 → 失败回滚」，
+/// 保证任何时刻原内容都不会丢失（不再有"先删旧文件"的空窗）。
+fn replace_file(temp: &Path, target: &Path) -> Result<()> {
+    match std::fs::rename(temp, target) {
+        Ok(()) => return Ok(()),
+        Err(error) if !target.exists() => {
+            return Err(error).with_context(|| format!("替换文件失败: {}", target.display()));
+        }
+        Err(_) => {}
+    }
+
+    let backup = sibling_path(target, "rterm-bak");
+    std::fs::rename(target, &backup)
+        .with_context(|| format!("备份原文件失败: {}", target.display()))?;
+    match std::fs::rename(temp, target) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&backup);
+            Ok(())
+        }
+        Err(error) => {
+            // 回滚：把备份放回原位，避免目标文件凭空消失。
+            let _ = std::fs::rename(&backup, target);
+            Err(error).with_context(|| format!("替换文件失败: {}", target.display()))
+        }
+    }
+}
+
+/// 判断一行 known_hosts 是否属于 `entry`
+/// （兼容逗号分隔的 host 列表与 `|1|` hashed host）。
 fn line_matches_entry(line: &str, entry: &str) -> bool {
     let trimmed = line.trim_start();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -270,13 +297,50 @@ fn line_matches_entry(line: &str, entry: &str) -> bool {
     let Some(hosts) = trimmed.split_whitespace().next() else {
         return false;
     };
-    hosts
-        .split(',')
-        .any(|candidate| candidate.eq_ignore_ascii_case(entry))
+    host_field_matches(hosts, entry)
+}
+
+/// host 字段（可能是逗号分隔列表）中任一项匹配 `entry` 即视为命中。
+fn host_field_matches(field: &str, entry: &str) -> bool {
+    field.split(',').any(|candidate| {
+        candidate.eq_ignore_ascii_case(entry) || hashed_host_matches(candidate, entry)
+    })
+}
+
+/// OpenSSH hashed hostname：`|1|BASE64(salt)|BASE64(HMAC-SHA1(salt, hostname))`。
+///
+/// 哈希是对 hostname 字节串做的，因此必须按原始字符串比对（不区分大小写
+/// 的放宽只对明文行有效）；部分客户端写入前会转小写，这里两种都试。
+fn hashed_host_matches(hashed: &str, entry: &str) -> bool {
+    let Some(rest) = hashed.strip_prefix("|1|") else {
+        return false;
+    };
+    let mut parts = rest.split('|');
+    let (Some(salt), Some(expected)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    let (Some(salt), Some(expected)) = (decode_base64(salt), decode_base64(expected)) else {
+        return false;
+    };
+
+    if verify_hmac_sha1(&salt, entry.as_bytes(), &expected) {
+        return true;
+    }
+    let lowercase = entry.to_ascii_lowercase();
+    lowercase != entry && verify_hmac_sha1(&salt, lowercase.as_bytes(), &expected)
+}
+
+fn verify_hmac_sha1(key: &[u8], message: &[u8], expected: &[u8]) -> bool {
+    let Ok(mut mac) = Hmac::<Sha1>::new_from_slice(key) else {
+        return false;
+    };
+    mac.update(message);
+    // verify_slice 是常量时间比较，避免指纹探测。
+    mac.verify_slice(expected).is_ok()
 }
 
 /// 从 known_hosts 解析该 host 已保存的 key blob 并计算 SHA256 指纹。
-/// hashed host（`|1|...`）或格式异常时返回 None。
+/// 支持 hashed host（`|1|...`）；格式异常的行跳过。
 pub fn stored_fingerprint(path: &Path, host: &str, port: u16) -> Option<String> {
     let entry = entry_host(host, port);
     let content = std::fs::read_to_string(path).ok()?;
@@ -293,17 +357,16 @@ pub fn stored_fingerprint(path: &Path, host: &str, port: u16) -> Option<String> 
         if hosts.starts_with('@') {
             continue;
         }
-        if !hosts
-            .split(',')
-            .any(|candidate| candidate.eq_ignore_ascii_case(&entry))
-        {
+        if !host_field_matches(hosts, &entry) {
             continue;
         }
         let _key_type = parts.next();
         let Some(encoded) = parts.next() else {
             continue;
         };
-        let blob = decode_base64(encoded)?;
+        let Some(blob) = decode_base64(encoded) else {
+            continue;
+        };
         return Some(sha256_fingerprint(&blob));
     }
     None
@@ -412,6 +475,104 @@ mod tests {
         assert_eq!(second, expected);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 构造 OpenSSH hashed host 行（与 ssh-keygen -H 输出格式一致）。
+    fn hashed_entry(salt: &[u8], host: &str) -> String {
+        let mut mac = Hmac::<Sha1>::new_from_slice(salt).expect("HMAC key");
+        mac.update(host.as_bytes());
+        let digest = mac.finalize().into_bytes();
+        format!(
+            "|1|{}|{}",
+            STANDARD_NO_PAD.encode(salt),
+            STANDARD_NO_PAD.encode(digest)
+        )
+    }
+
+    #[test]
+    fn hashed_host_lines_are_matched() {
+        let salt = b"0123456789abcdefghij";
+        let hashed = hashed_entry(salt, "hashed.example.com");
+
+        assert!(line_matches_entry(
+            &format!("{hashed} ssh-ed25519 AAAA"),
+            "hashed.example.com"
+        ));
+        assert!(!line_matches_entry(
+            &format!("{hashed} ssh-ed25519 AAAA"),
+            "other.example.com"
+        ));
+        // 带端口的入口同样是普通字符串哈希
+        let hashed_port = hashed_entry(salt, "[hashed.example.com]:2222");
+        assert!(line_matches_entry(
+            &format!("{hashed_port} ssh-ed25519 AAAA"),
+            "[hashed.example.com]:2222"
+        ));
+        // 非 |1| 前缀 / 结构损坏不 panic
+        assert!(!line_matches_entry("|1|bad ssh-ed25519 AAAA", "h"));
+        assert!(!line_matches_entry("|2|x|y ssh-ed25519 AAAA", "h"));
+    }
+
+    #[test]
+    fn hashed_stored_fingerprint_is_resolved() {
+        let path = temp_path("hashed-fp");
+        let blob = b"hashed-blob";
+        let hashed = hashed_entry(b"salt-salt-salt-salt-", "hashed-fp.example.com");
+        std::fs::write(
+            &path,
+            format!("{hashed} ssh-ed25519 {}\n", STANDARD_NO_PAD.encode(blob)),
+        )
+        .expect("准备 hashed known_hosts");
+
+        let fingerprint = stored_fingerprint(&path, "hashed-fp.example.com", 22).expect("解析指纹");
+        assert_eq!(fingerprint, sha256_fingerprint(blob));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn accepting_key_replaces_hashed_line() {
+        let path = temp_path("hashed-replace");
+        let hashed = hashed_entry(b"another-salt-abcdefgh", "hash-replace.example.com");
+        std::fs::write(
+            &path,
+            format!("{hashed} ssh-ed25519 b2xk\nother.example.com ssh-ed25519 b3RoZXI=\n"),
+        )
+        .expect("准备 known_hosts");
+
+        write_host_key(&path, "hash-replace.example.com", 22, "ssh-ed25519", b"new")
+            .expect("写入新密钥");
+
+        let content = std::fs::read_to_string(&path).expect("读取 known_hosts");
+        assert!(
+            !content.contains("|1|"),
+            "hashed 旧行应被删除，避免重复提示"
+        );
+        assert_eq!(
+            content
+                .lines()
+                .filter(|line| line.starts_with("hash-replace.example.com "))
+                .count(),
+            1
+        );
+        assert!(content.contains("other.example.com"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn replace_file_overwrites_target() {
+        let target = temp_path("replace-file");
+        std::fs::write(&target, b"old").expect("写旧文件");
+        let temp = sibling_path(&target, "rterm-tmp");
+        std::fs::write(&temp, b"new").expect("写临时文件");
+
+        replace_file(&temp, &target).expect("替换成功");
+
+        assert_eq!(std::fs::read(&target).expect("读目标"), b"new");
+        assert!(!temp.exists(), "临时文件应已被 rename 消耗");
+
+        let _ = std::fs::remove_file(&target);
     }
 
     #[test]
