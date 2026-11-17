@@ -5,15 +5,19 @@
 //! - SFTP 浏览 / 传输由 `SftpView`（Dock 模式）负责
 //! - 本视图只做布局（可拖拽分隔条）、显隐与生命周期编排
 //!
-//! 路径跟随（12.4）后续接入：订阅 `TerminalCwdHint` 后调用 `SftpView::navigate_to_remote`。
+//! 路径跟随（12.4）：订阅 `TerminalCwdHint`，按同步模式门控后驱动
+//! `SftpView::navigate_to_remote`，并用 `expect_sftp_navigation` 防回环。
 
 use gpui::prelude::*;
 use gpui::{
     div, px, AnyElement, ClickEvent, Context, CursorStyle, Entity, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, Window,
 };
+use rterm_sync::SyncMode;
 use uuid::Uuid;
 
+use crate::event::{AppEvent, EventBusHost};
+use crate::state::{lock_or_recover, AppState};
 use crate::ui::theme;
 
 use super::sftp::{SftpDisplayMode, SftpView};
@@ -35,6 +39,8 @@ pub struct TerminalTabView {
     resize_start_x: f32,
     resize_start_width: f32,
     session_id: Uuid,
+    /// 终端最近一次 cwd：侧栏打开 / 重开时立即定位（12.4）。
+    last_cwd: Option<String>,
 }
 
 impl TerminalTabView {
@@ -42,6 +48,22 @@ impl TerminalTabView {
     pub fn new(cx: &mut Context<Self>, session_id: Uuid, dock_visible: bool) -> Self {
         let terminal = cx.new(TerminalView::new);
         terminal.update(cx, |view, cx| view.connect(session_id, cx));
+
+        // 12.4：终端 cwd 跟随 + 侧栏连接完成后的补跳
+        let host = cx.global::<AppState>().event_bus_host.clone();
+        cx.subscribe(
+            &host,
+            |this: &mut Self, _host, event: &AppEvent, cx| match event {
+                AppEvent::TerminalCwdHint { tab_id, cwd, .. } => {
+                    this.on_terminal_cwd(*tab_id, cwd, cx);
+                }
+                AppEvent::SftpOpened { tab_id, .. } => {
+                    this.on_dock_opened(*tab_id, cx);
+                }
+                _ => {}
+            },
+        )
+        .detach();
 
         let mut this = Self {
             terminal,
@@ -52,6 +74,7 @@ impl TerminalTabView {
             resize_start_x: 0.0,
             resize_start_width: 0.0,
             session_id,
+            last_cwd: None,
         };
         if dock_visible {
             this.show_dock(cx);
@@ -99,6 +122,7 @@ impl TerminalTabView {
 
     fn show_dock(&mut self, cx: &mut Context<Self>) {
         self.dock_visible = true;
+        let existed = self.dock.is_some();
         if self.dock.is_none() {
             let width = self.dock_width;
             let session_id = self.session_id;
@@ -109,7 +133,61 @@ impl TerminalTabView {
             });
             self.dock = Some(dock);
         }
+        // 已有连接（重复打开侧栏）：立即定位到终端当前 cwd
+        if existed && terminal_to_sftp_enabled(cx) {
+            if let Some(cwd) = self.last_cwd.clone() {
+                self.navigate_dock(&cwd, cx);
+            }
+        }
         cx.notify();
+    }
+
+    // -----------------------------------------------------------------------
+    // 12.4 路径跟随
+    // -----------------------------------------------------------------------
+
+    /// 终端 cwd 变化：先记录，侧栏可见且模式允许时驱动 SFTP 导航。
+    fn on_terminal_cwd(&mut self, tab_id: Uuid, cwd: &str, cx: &mut Context<Self>) {
+        if tab_id != self.terminal.read(cx).tab_id() || cwd.is_empty() {
+            return;
+        }
+        self.last_cwd = Some(cwd.to_string());
+        if !self.dock_visible || self.dock.is_none() || !terminal_to_sftp_enabled(cx) {
+            return;
+        }
+        self.navigate_dock(cwd, cx);
+    }
+
+    /// 侧栏 SFTP 连接完成：登记远端 home（防初始化导航反向 cd），再补跳终端 cwd。
+    fn on_dock_opened(&mut self, tab_id: Uuid, cx: &mut Context<Self>) {
+        let Some(dock) = self.dock.clone() else {
+            return;
+        };
+        if dock.read(cx).tab_id() != tab_id {
+            return;
+        }
+        if let Some(home) = dock.read(cx).remote_home() {
+            let bridge = self.terminal.read(cx).sync_bridge();
+            let mut bridge = lock_or_recover(&bridge);
+            bridge.set_remote_home(home.clone());
+            bridge.mark_sftp_synced(std::path::Path::new(&home));
+        }
+        if !terminal_to_sftp_enabled(cx) {
+            return;
+        }
+        if let Some(cwd) = self.last_cwd.clone() {
+            self.navigate_dock(&cwd, cx);
+        }
+    }
+
+    /// 驱动侧栏导航；先登记期望事件，避免 SftpNavigated 反向注入 `cd` 形成回环。
+    fn navigate_dock(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(dock) = self.dock.clone() else {
+            return;
+        };
+        let bridge = self.terminal.read(cx).sync_bridge();
+        lock_or_recover(&bridge).expect_sftp_navigation(1);
+        dock.update(cx, |view, cx| view.navigate_to_remote(path, cx));
     }
 
     fn on_divider_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
@@ -164,6 +242,14 @@ impl TerminalTabView {
             )
             .into_any_element()
     }
+}
+
+/// 同步模式是否允许「终端 → SFTP」方向（off / sftp_to_term 不跟随）。
+fn terminal_to_sftp_enabled(cx: &mut Context<TerminalTabView>) -> bool {
+    matches!(
+        SyncMode::from_setting(&cx.global::<AppState>().settings.sftp_sync_mode),
+        SyncMode::TerminalToSftp | SyncMode::Bidirectional
+    )
 }
 
 impl Render for TerminalTabView {
