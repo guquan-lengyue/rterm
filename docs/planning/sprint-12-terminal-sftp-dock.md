@@ -1,6 +1,6 @@
 # Sprint 12 — 终端内嵌 SFTP 侧栏（v1.1）
 
-> **状态**：🚧 进行中（12.1 / 12.3 / 12.4 已落地，可试用路径跟随）
+> **状态**：🚧 进行中（12.1–12.7 已落地，待 12.8 回归）
 > **前置**：[Sprint 8](./sprint-08-sync.md) ✅（SyncBridge / `TerminalCwdHint`）+
 > [Sprint 10](./sprint-10-stability.md) ✅（SftpView 拖拽 / 虚拟化 / 后台读取）+
 > [Sprint 11](./sprint-11-release.md) 基线
@@ -9,12 +9,14 @@
 >
 > **进度（2026-11-17）**
 > - 12.1 ✅ `SftpDisplayMode::{Tab, Dock}`；Dock 隐藏顶部工具条、只显示远端栏、宽度由父容器驱动
-> - 12.2 ✅ 基本形态：侧栏首次显示才创建并连接（未做错误隔离的额外打磨）
-> - 12.3 ✅ `TerminalTabView` 组合视图 + 6px 可拖拽分隔条（280–720）+ 右上角临时开关
+> - 12.2 ✅ 侧栏首次显示才创建并连接
+> - 12.3 ✅ `TerminalTabView` 组合视图 + 6px 可拖拽分隔条（280–720）+ 右上角开关
 > - 12.4 ✅ 路径跟随：`TerminalCwdHint` 按 tab_id 过滤 + 同步模式门控 + `expect_sftp_navigation` 防回环；
 >   侧栏连接完成后补跳最近 cwd，重新打开侧栏立即定位
-> - 12.5 部分提前：`MainWindow` 已切到 `TabContentView::Terminal(Entity<TerminalTabView>)`
-> - 待办：12.6 正式入口（头部按钮 + Ctrl+Shift+S）、12.7 持久化、12.8 回归
+> - 12.5 ✅ `MainWindow` 全面切换到 `TabContentView::Terminal(Entity<TerminalTabView>)`（focus / 关闭 / 快捷键阻塞转发）
+> - 12.6 ✅ 入口：终端头部开关按钮 + `Ctrl+Shift+S`（`ToggleSftpDock` action，终端不再把该组合转发远端）
+> - 12.7 ✅ 持久化：设置 → 终端外观「SFTP 侧栏」默认显隐；分隔条拖拽结束保存宽度，新 Tab 沿用
+> - 待办：12.8 多 Tab / 主题 / 高 DPI / 拖拽传输 / vi 回归 + README 更新
 
 ---
 

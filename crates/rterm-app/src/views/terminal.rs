@@ -906,6 +906,8 @@ impl TerminalView {
                 }
                 // 这些组合交给 MainWindow 的全局 keybinding
                 "t" | "w" | "tab" | "," => return,
+                // Ctrl+Shift+S：SFTP 侧栏开关（12.6），不发给远端
+                "s" if modifiers.shift => return,
                 _ => {}
             }
         }

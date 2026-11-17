@@ -142,8 +142,10 @@ impl SettingsView {
         };
 
         // 9.14：枚举系统字体；平台返回空时回退到 4 个预设
-        let font_choices =
-            merge_font_choices(cx.text_system().all_font_names(), &draft.default_font_family);
+        let font_choices = merge_font_choices(
+            cx.text_system().all_font_names(),
+            &draft.default_font_family,
+        );
 
         Self {
             active_tab: SettingsTab::General,
@@ -742,10 +744,7 @@ impl SettingsView {
                     .text_color(t.text_subtle())
                     .flex()
                     .justify_center()
-                    .child(format!(
-                        "共 {} 个字体 · 滚轮浏览",
-                        self.font_choices.len()
-                    )),
+                    .child(format!("共 {} 个字体 · 滚轮浏览", self.font_choices.len())),
             );
 
         form = form
@@ -804,7 +803,30 @@ impl SettingsView {
                 "滚动缓冲行数",
                 self.scrollback_input.clone(),
                 cx,
-            ));
+            ))
+            // S12 12.7：终端右侧 SFTP 侧栏默认显隐（宽度在拖拽分隔条时自动记忆）
+            .child(Self::section_title("SFTP 侧栏", cx))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .gap_1()
+                    .mb_2()
+                    .child(self.radio(
+                        "settings-dock-show".into(),
+                        "打开终端时显示",
+                        self.draft.terminal_sftp_dock,
+                        cx,
+                        |this, _cx| this.draft.terminal_sftp_dock = true,
+                    ))
+                    .child(self.radio(
+                        "settings-dock-hide".into(),
+                        "默认隐藏",
+                        !self.draft.terminal_sftp_dock,
+                        cx,
+                        |this, _cx| this.draft.terminal_sftp_dock = false,
+                    )),
+            );
 
         // ---- 右侧预览 ----
         let preview = self.render_preview();

@@ -58,6 +58,7 @@ actions!(
         NewSession,
         ToggleFullscreen,
         ToggleSessionLog,
+        ToggleSftpDock,
         OpenPalette,
         PaletteUp,
         PaletteDown,
@@ -66,7 +67,7 @@ actions!(
     ]
 );
 
-pub fn key_bindings() -> [KeyBinding; 11] {
+pub fn key_bindings() -> [KeyBinding; 12] {
     [
         KeyBinding::new("ctrl-t", NewTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
@@ -74,6 +75,7 @@ pub fn key_bindings() -> [KeyBinding; 11] {
         KeyBinding::new("ctrl-shift-n", NewSession, None),
         KeyBinding::new("f11", ToggleFullscreen, None),
         KeyBinding::new("ctrl-shift-l", ToggleSessionLog, None),
+        KeyBinding::new("ctrl-shift-s", ToggleSftpDock, None),
         KeyBinding::new("ctrl-p", OpenPalette, None),
         KeyBinding::new("up", PaletteUp, Some("CommandPalette")),
         KeyBinding::new("down", PaletteDown, Some("CommandPalette")),
@@ -368,7 +370,7 @@ impl MainWindow {
                 .unwrap_or_else(|| "终端".to_string())
         };
 
-        let tab = cx.new(|cx| TerminalTabView::new(cx, session_id, false));
+        let tab = cx.new(|cx| TerminalTabView::new(cx, session_id));
         let terminal = tab.read(cx).terminal();
         let id = terminal.read(cx).tab_id();
         self.sync_bridges
@@ -628,6 +630,26 @@ impl MainWindow {
                 view.update(cx, |view, cx| view.toggle_session_log(cx));
             }
             None => self.set_status("当前标签不是终端，无法开启会话日志", cx),
+        }
+    }
+
+    /// Ctrl+Shift+S：开关当前终端 Tab 的 SFTP 侧栏（S12 12.6）。
+    pub fn toggle_sftp_dock_shortcut(&mut self, cx: &mut Context<Self>) {
+        if self.dialogs_open(cx) {
+            return;
+        }
+        let terminal_tab = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| match &tab.content {
+                TabContentView::Terminal(view) => Some(view.clone()),
+                _ => None,
+            });
+        match terminal_tab {
+            Some(view) => {
+                view.update(cx, |view, cx| view.toggle_dock(cx));
+            }
+            None => self.set_status("当前标签不是终端，无法切换 SFTP 侧栏", cx),
         }
     }
 

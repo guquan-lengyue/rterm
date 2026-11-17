@@ -23,10 +23,9 @@ use crate::ui::theme;
 use super::sftp::{SftpDisplayMode, SftpView};
 use super::terminal::TerminalView;
 
-/// 侧栏宽度范围与默认值（12.7 会把默认值 / 当前宽度写入设置）
+/// 侧栏宽度范围（12.7 默认值与当前宽度写入设置）
 const DOCK_MIN_W: f32 = 280.0;
 const DOCK_MAX_W: f32 = 720.0;
-const DOCK_DEFAULT_W: f32 = 380.0;
 const DIVIDER_W: f32 = 6.0;
 
 pub struct TerminalTabView {
@@ -44,8 +43,17 @@ pub struct TerminalTabView {
 }
 
 impl TerminalTabView {
-    /// `dock_visible = true` 时立即创建并连接 SFTP 侧栏（12.2 会改成首次显示再连接）。
-    pub fn new(cx: &mut Context<Self>, session_id: Uuid, dock_visible: bool) -> Self {
+    /// 侧栏显隐与宽度来自全局设置（12.7）；`terminal_sftp_dock = true` 时立即创建并连接。
+    pub fn new(cx: &mut Context<Self>, session_id: Uuid) -> Self {
+        let (dock_visible, dock_width) = {
+            let settings = &cx.global::<AppState>().settings;
+            (
+                settings.terminal_sftp_dock,
+                settings
+                    .terminal_sftp_dock_width
+                    .clamp(DOCK_MIN_W, DOCK_MAX_W),
+            )
+        };
         let terminal = cx.new(TerminalView::new);
         terminal.update(cx, |view, cx| view.connect(session_id, cx));
 
@@ -69,7 +77,7 @@ impl TerminalTabView {
             terminal,
             dock: None,
             dock_visible: false,
-            dock_width: DOCK_DEFAULT_W,
+            dock_width,
             resizing: false,
             resize_start_x: 0.0,
             resize_start_width: 0.0,
@@ -216,6 +224,15 @@ impl TerminalTabView {
     fn on_mouse_up(&mut self, cx: &mut Context<Self>) {
         if self.resizing {
             self.resizing = false;
+            // 12.7：拖拽结束后记住宽度（新建终端 Tab 沿用）
+            let width = self.dock_width;
+            {
+                let state = cx.global_mut::<AppState>();
+                state.settings.terminal_sftp_dock_width = width;
+                if let Err(error) = state.settings.save() {
+                    log::warn!("[terminal-tab] 保存 SFTP 侧栏宽度失败: {error:#}");
+                }
+            }
             cx.notify();
         }
     }

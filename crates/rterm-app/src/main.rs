@@ -186,6 +186,20 @@ fn main() {
             },
         );
 
+        // Ctrl+Shift+S → 开关终端右侧 SFTP 侧栏（S12）
+        app.on_action(
+            move |_: &views::main_window::ToggleSftpDock, app: &mut App| {
+                app.defer(move |app| {
+                    let handle = WindowHandle::<MainWindow>::new(window_id);
+                    if let Err(e) =
+                        handle.update(app, |main, _window, cx| main.toggle_sftp_dock_shortcut(cx))
+                    {
+                        log::error!("[shortcut] 切换 SFTP 侧栏失败: {e:#}");
+                    }
+                });
+            },
+        );
+
         // Ctrl+P → 命令面板
         app.on_action(move |_: &views::main_window::OpenPalette, app: &mut App| {
             app.defer(move |app| {

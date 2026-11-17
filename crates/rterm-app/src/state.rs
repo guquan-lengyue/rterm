@@ -48,6 +48,10 @@ pub struct Settings {
 
     // SFTP
     pub sftp_sync_mode: String, // "off", "term_to_sftp", "sftp_to_term", "bidirectional"
+    /// 终端 Tab 右侧默认显示 SFTP 侧栏（S12 12.7）
+    pub terminal_sftp_dock: bool,
+    /// SFTP 侧栏宽度（S12 12.7，280–720）
+    pub terminal_sftp_dock_width: f32,
 
     // 监控
     pub monitor_interval_secs: u32,
@@ -81,6 +85,8 @@ impl Default for Settings {
             terminal_cursor_style: CursorStyle::Block,
 
             sftp_sync_mode: "bidirectional".into(),
+            terminal_sftp_dock: false,
+            terminal_sftp_dock_width: 380.0,
 
             monitor_interval_secs: 2,
             monitor_cpu_threshold: 90.0,
