@@ -7,7 +7,9 @@
 //! 主程序退出时 crypto_bridge 统一 DPAPI 加密。
 
 use gpui::prelude::*;
-use gpui::{div, px, Entity, IntoElement, Render, Window};
+use gpui::{
+    div, FocusHandle, Focusable, px, Entity, IntoElement, Render, Window,
+};
 use uuid::Uuid;
 
 use crate::event::{AppEvent, EventBusHost};
@@ -70,6 +72,8 @@ const PASSWORD_SENTINEL: &str = "********";
 pub struct SessionEditDialog {
     pub editing_id: Option<Uuid>,
     pub active_tab: DialogTab,
+
+    focus_handle: FocusHandle,
 
     // Basic
     pub name_input: Entity<TextInput>,
@@ -190,6 +194,7 @@ impl SessionEditDialog {
         Self {
             editing_id,
             active_tab: DialogTab::Basic,
+            focus_handle: cx.focus_handle(),
             name_input: Self::make_ti(cx, &name, "会话名称", false),
             host_input: Self::make_ti(cx, &host, "主机地址", false),
             port_input: Self::make_ti(cx, &port, "22", false),
@@ -464,6 +469,12 @@ fn tcp_check(host: &str, port: u16) -> TestStatus {
     }
 }
 
+impl Focusable for SessionEditDialog {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
@@ -485,6 +496,7 @@ impl Render for SessionEditDialog {
             .flex()
             .items_center()
             .justify_center()
+            .track_focus(&self.focus_handle)
             .child(
                 div()
                     .w(px(520.))

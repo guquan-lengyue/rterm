@@ -11,8 +11,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    actions, div, px, Context, Entity, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
-    Render, SharedString, Window,
+    actions, div, px, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
+    MouseButton, MouseDownEvent, Render, SharedString, Window,
 };
 
 use crate::event::{AppEvent, EventBusHost};
@@ -86,6 +86,8 @@ pub struct SettingsView {
     pub active_tab: SettingsTab,
     draft: Settings,
 
+    focus_handle: FocusHandle,
+
     port_input: Entity<TextInput>,
     username_input: Entity<TextInput>,
     keepalive_input: Entity<TextInput>,
@@ -114,6 +116,7 @@ impl SettingsView {
 
         Self {
             active_tab: SettingsTab::General,
+            focus_handle: cx.focus_handle(),
             port_input: ti(cx, draft.default_port.to_string()),
             username_input: ti(cx, draft.default_username.clone().unwrap_or_default()),
             keepalive_input: ti(cx, draft.keepalive_secs.to_string()),
@@ -970,6 +973,12 @@ impl SettingsView {
     }
 }
 
+impl Focusable for SettingsView {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
@@ -1043,6 +1052,7 @@ impl Render for SettingsView {
             .flex()
             .items_center()
             .justify_center()
+            .track_focus(&self.focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, _ev: &MouseDownEvent, _w, cx| {
