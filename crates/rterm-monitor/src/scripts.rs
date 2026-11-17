@@ -3,10 +3,22 @@
 //! 标记格式 `@@RT_<SECTION>@@`，解析器按标记切段，避免逐项 exec 带来
 //! 的往返开销；脚本本身只用 POSIX sh + 常见 coreutils / BSD 工具。
 
-/// Linux：/proc + df + ps。
+/// Linux：/proc + df。
+///
+/// 进程列表不用 `ps`：ps 内部同样遍历 `/proc`，但会额外做 uid→name 解析、
+/// 且 `%cpu` 是"进程生命周期平均"而非瞬时值。这里用单个 awk 进程直读
+/// `/proc/<pid>/stat` 与 `/proc/<pid>/status`：
+/// - 只有一次 fork（awk 自身），不会为每个进程 fork 一个 `cat`
+/// - utime/stime 与 `/proc/stat` 同源同刻度，可做精确的 tick 增量
+/// - uid→用户名在 awk 里用 `/etc/passwd` 预加载映射，不额外调用
+///
+/// 输出列（TAB 分隔）：`pid user utime stime rss_kb comm`
+///
+/// 末尾的 `/dev/null` 是兜底：若 glob 一个都没匹配上，awk 会退化为读 stdin
+/// 并阻塞到通道关闭；给一个恒存在的空文件可避免这种挂起。
 pub const LINUX_SCRIPT: &str = r#"
 echo @@RT_STAT@@
-head -n 1 /proc/stat
+grep '^cpu' /proc/stat
 echo @@RT_MEM@@
 cat /proc/meminfo
 echo @@RT_DISK@@
@@ -16,7 +28,35 @@ cat /proc/net/dev
 echo @@RT_LOAD@@
 cat /proc/loadavg
 echo @@RT_PS@@
-ps -eo pid=,user=,%cpu=,%mem=,comm= --sort=-%cpu 2>/dev/null | head -n 20
+awk '
+BEGIN {
+  while ((getline line < "/etc/passwd") > 0) {
+    n = split(line, f, ":")
+    if (n >= 3) users[f[3]] = f[1]
+  }
+  close("/etc/passwd")
+}
+{
+  pid = $1
+  s = $0
+  open_paren = index(s, "(")
+  if (open_paren == 0) next
+  pos = open_paren
+  while ((i = index(substr(s, pos + 1), ")")) > 0) pos += i
+  comm = substr(s, open_paren + 1, pos - open_paren - 1)
+  split(substr(s, pos + 1), a, " ")
+  if (a[1] == "Z") next
+  uid = "-"; rss = 0
+  while ((getline uline < ("/proc/" pid "/status")) > 0) {
+    if (uline ~ /^Uid:/) { split(uline, uf); uid = uf[2] }
+    else if (uline ~ /^VmRSS:/) { split(uline, vf); rss = vf[2] }
+    if (uid != "-" && rss != 0) break
+  }
+  close("/proc/" pid "/status")
+  user = (uid in users) ? users[uid] : uid
+  printf "%s\t%s\t%s\t%s\t%s\t%s\n", pid, user, a[12], a[13], rss, comm
+}
+' /proc/[0-9]*/stat /dev/null 2>/dev/null
 "#;
 
 /// macOS：sysctl + vm_stat + netstat + ps。

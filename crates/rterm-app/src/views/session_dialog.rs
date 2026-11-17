@@ -7,9 +7,7 @@
 //! 主程序退出时 crypto_bridge 统一 DPAPI 加密。
 
 use gpui::prelude::*;
-use gpui::{
-    div, FocusHandle, Focusable, px, Entity, IntoElement, Render, Window,
-};
+use gpui::{div, px, Entity, FocusHandle, Focusable, IntoElement, Render, Window};
 use uuid::Uuid;
 
 use crate::event::{AppEvent, EventBusHost};

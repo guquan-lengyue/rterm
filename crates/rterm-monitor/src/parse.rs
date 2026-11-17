@@ -2,7 +2,7 @@
 //!
 //! 解析器只依赖纯文本，便于在 Windows 开发机上用固定样本做单元测试。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
@@ -10,11 +10,13 @@ use anyhow::{bail, Context, Result};
 use crate::scripts::MARKER_PREFIX;
 use crate::types::{MonitorTick, ResourceSample, TopProcess};
 
-/// 跨采样保留的增量计数（CPU 时间片 / 网卡字节数）。
+/// 跨采样保留的增量计数（CPU 时间片 / 网卡字节数 / 进程 tick）。
 #[derive(Debug, Default)]
 pub struct ParseState {
     prev_cpu: Option<(u64, u64)>,
     prev_net: Option<(u64, u64)>,
+    /// pid → (utime + stime) 时间片，用于进程级 CPU% 增量。
+    prev_proc_ticks: HashMap<u32, u64>,
 }
 
 impl ParseState {
@@ -32,17 +34,20 @@ pub fn parse_linux(
 ) -> Result<MonitorTick> {
     let sections = split_sections(output);
 
-    let stat = sections
-        .get("STAT")
-        .and_then(|lines| lines.first())
+    // STAT 段：首行是聚合 `cpu`，其后每行一个 `cpuN` → 计数即逻辑核数。
+    let stat_lines = sections.get("STAT").map(Vec::as_slice).unwrap_or(&[]);
+    let stat = stat_lines
+        .first()
         .copied()
         .context("采集输出缺少 /proc/stat")?;
+    let ncpu = stat_lines.len().saturating_sub(1).max(1) as f32;
     let (busy, total) = parse_cpu_stat(stat);
-    let cpu_pct = cpu_delta_pct(state, busy, total);
+    let (cpu_pct, total_delta) = cpu_delta_pct(state, busy, total);
 
     let mem_lines = sections.get("MEM").map(Vec::as_slice).unwrap_or(&[]);
     let mem_pct = memory_pct(mem_lines).context("解析 /proc/meminfo 失败")?;
     let swap_pct = swap_pct(mem_lines);
+    let mem_total_kb = meminfo_kb(mem_lines, "MemTotal:").unwrap_or(0.0);
 
     let disk_pct = sections
         .get("DISK")
@@ -64,7 +69,7 @@ pub fn parse_linux(
 
     let top = sections
         .get("PS")
-        .map(|lines| parse_top_processes(lines))
+        .map(|lines| parse_linux_processes(state, lines, total_delta, ncpu, mem_total_kb))
         .unwrap_or_default();
 
     Ok(MonitorTick {
@@ -192,18 +197,25 @@ fn parse_cpu_stat(line: &str) -> (u64, u64) {
     (total.saturating_sub(idle_total), total)
 }
 
-fn cpu_delta_pct(state: &mut ParseState, busy: u64, total: u64) -> f32 {
-    let pct = match state.prev_cpu {
+/// 返回 (整机 CPU 使用率, 本帧 total 时间片增量)。
+///
+/// `total_delta` 供进程级 CPU% 复用：进程 utime/stime 与 `/proc/stat`
+/// 同源同刻度，用同一个 tick 增量做分母可避免墙钟漂移。
+fn cpu_delta_pct(state: &mut ParseState, busy: u64, total: u64) -> (f32, Option<u64>) {
+    let result = match state.prev_cpu {
         Some((prev_busy, prev_total)) if total > prev_total => {
             let busy_delta = busy.saturating_sub(prev_busy);
             let total_delta = total - prev_total;
-            (busy_delta as f32 / total_delta as f32 * 100.0).clamp(0.0, 100.0)
+            (
+                (busy_delta as f32 / total_delta as f32 * 100.0).clamp(0.0, 100.0),
+                Some(total_delta),
+            )
         }
         // 首帧没有增量基线，先给 0，下一帧即可得到真实值。
-        _ => 0.0,
+        _ => (0.0, None),
     };
     state.prev_cpu = Some((busy, total));
-    pct
+    result
 }
 
 fn net_rates(state: &mut ParseState, rx: u64, tx: u64, elapsed: Duration) -> (f32, f32) {
@@ -290,6 +302,89 @@ fn parse_linux_net(lines: &[&str]) -> (u64, u64) {
     (rx, tx)
 }
 
+/// 单帧保留的 Top 进程数量。
+const TOP_N: usize = 20;
+
+/// 解析 Linux `/proc` 进程行：`pid \t user \t utime \t stime \t rss_kb \t comm`。
+///
+/// CPU% 用 tick 增量计算，与 `top` 语义一致（单核跑满 = 100%，多线程可超过 100%）：
+///
+/// ```text
+/// proc% = Δproc_ticks / Δtotal_ticks × ncpu × 100
+/// ```
+///
+/// 首帧没有基线 → 全部为 0；进程消失后 `prev_proc_ticks` 自然淘汰。
+fn parse_linux_processes(
+    state: &mut ParseState,
+    lines: &[&str],
+    total_delta: Option<u64>,
+    ncpu: f32,
+    mem_total_kb: f32,
+) -> Vec<TopProcess> {
+    let mut next_ticks = HashMap::with_capacity(lines.len());
+    let mut rows = Vec::with_capacity(lines.len());
+
+    for line in lines {
+        let mut parts = line.split('\t');
+        let (Some(pid), Some(user)) = (
+            parts.next().and_then(|v| v.parse::<u32>().ok()),
+            parts.next(),
+        ) else {
+            continue;
+        };
+        let (Some(utime), Some(stime), Some(rss_kb)) = (
+            parts.next().and_then(|v| v.parse::<u64>().ok()),
+            parts.next().and_then(|v| v.parse::<u64>().ok()),
+            parts.next().and_then(|v| v.parse::<f32>().ok()),
+        ) else {
+            continue;
+        };
+        let Some(command) = parts.next().filter(|c| !c.is_empty()) else {
+            continue;
+        };
+
+        let ticks = utime.saturating_add(stime);
+        let cpu_pct = match (total_delta, state.prev_proc_ticks.get(&pid)) {
+            (Some(delta), Some(previous)) if delta > 0 => {
+                let used = ticks.saturating_sub(*previous) as f32;
+                (used / delta as f32 * ncpu * 100.0).clamp(0.0, ncpu * 100.0)
+            }
+            _ => 0.0,
+        };
+        next_ticks.insert(pid, ticks);
+
+        let mem_pct = if mem_total_kb > 0.0 {
+            (rss_kb / mem_total_kb * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+
+        rows.push(TopProcess {
+            pid,
+            user: user.to_string(),
+            cpu_pct,
+            mem_pct,
+            command: command.to_string(),
+        });
+    }
+
+    state.prev_proc_ticks = next_ticks;
+
+    rows.sort_by(|a, b| {
+        b.cpu_pct
+            .partial_cmp(&a.cpu_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.mem_pct
+                    .partial_cmp(&a.mem_pct)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    rows.truncate(TOP_N);
+    rows
+}
+
+/// 解析 macOS `ps -Ao pid=,user=,%cpu=,%mem=,comm=` 输出。
 fn parse_top_processes(lines: &[&str]) -> Vec<TopProcess> {
     lines
         .iter()
@@ -421,11 +516,21 @@ fn parse_size_mb(raw: &str) -> Option<f32> {
 mod tests {
     use super::*;
 
-    fn linux_fixture(cpu_line: &str, net_rx: u64) -> String {
+    /// `/proc/stat` 聚合行 + 一条 `cpu0`（ncpu = 1）。
+    fn linux_fixture(cpu_line: &str, net_rx: u64, ps: &str) -> String {
         format!(
-            "@@RT_STAT@@\n{cpu_line}\n@@RT_MEM@@\nMemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 200 kB\nSwapFree: 50 kB\n@@RT_DISK@@\n/dev/sda1 1000 600 400 60% /\n@@RT_NET@@\nInter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 999999 0 0 0 0 0 0 0 999999 0 0 0 0 0 0 0\n  eth0: {net_rx} 10 0 0 0 0 0 0 2048 0 0 0 0 0 0 0\n@@RT_LOAD@@\n1.50 0.75 0.50 1/100 12345\n@@RT_PS@@\n  120 root 12.5 3.0 nginx: worker process\n  121 ubuntu 5.0 1.0 bash\n"
+            "@@RT_STAT@@\n{cpu_line}\ncpu0 {cpu_line_rest}\n@@RT_MEM@@\nMemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 200 kB\nSwapFree: 50 kB\n@@RT_DISK@@\n/dev/sda1 1000 600 400 60% /\n@@RT_NET@@\nInter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 999999 0 0 0 0 0 0 0 999999 0 0 0 0 0 0 0\n  eth0: {net_rx} 10 0 0 0 0 0 0 2048 0 0 0 0 0 0 0\n@@RT_LOAD@@\n1.50 0.75 0.50 1/100 12345\n@@RT_PS@@\n{ps}",
+            cpu_line_rest = cpu_line.trim_start_matches("cpu"),
         )
     }
+
+    /// 首帧进程：pid 120 已用 150 ticks，pid 121 已用 15 ticks。
+    const PS_FIRST: &str =
+        "120\troot\t100\t50\t600\tnginx: worker process\n121\tubuntu\t10\t5\t300\tbash\n";
+
+    /// 次帧进程：120 → 300 ticks（Δ150），121 → 45 ticks（Δ30），新增 122。
+    const PS_SECOND: &str =
+        "120\troot\t200\t100\t600\tnginx: worker process\n121\tubuntu\t30\t15\t300\tbash\n122\troot\t0\t0\t100\tnewproc\n";
 
     fn approx(actual: f32, expected: f32) {
         assert!(
@@ -440,7 +545,7 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         let first = parse_linux(
             &mut state,
-            &linux_fixture("cpu 100 0 100 800 0 0 0 0", 1024),
+            &linux_fixture("cpu 100 0 100 800 0 0 0 0", 1024, PS_FIRST),
             Duration::from_secs(2),
             now,
         )
@@ -455,11 +560,13 @@ mod tests {
         assert_eq!(first.top.len(), 2);
         assert_eq!(first.top[0].command, "nginx: worker process");
         assert_eq!(first.top[0].pid, 120);
+        assert_eq!(first.top[0].cpu_pct, 0.0, "首帧没有进程 tick 基线");
+        approx(first.top[0].mem_pct, 60.0);
 
         // 第二帧：CPU busy 增量 200 / total 增量 400 → 50%；网卡 +2048 B/2s → 1 KiB/s
         let second = parse_linux(
             &mut state,
-            &linux_fixture("cpu 200 0 200 1000 0 0 0 0", 3072),
+            &linux_fixture("cpu 200 0 200 1000 0 0 0 0", 3072, PS_SECOND),
             Duration::from_secs(2),
             now,
         )
@@ -467,6 +574,65 @@ mod tests {
         assert_eq!(second.sample.cpu_pct, 50.0);
         assert_eq!(second.sample.net_rx_kbps, 1.0);
         assert_eq!(second.sample.net_tx_kbps, 0.0);
+        // Δproc 150 / Δtotal 400 × ncpu 1 × 100 = 37.5%
+        assert_eq!(second.top.len(), 3);
+        assert_eq!(second.top[0].pid, 120);
+        approx(second.top[0].cpu_pct, 37.5);
+        // Δproc 30 / Δtotal 400 × 100 = 7.5%
+        assert_eq!(second.top[1].pid, 121);
+        approx(second.top[1].cpu_pct, 7.5);
+        // 新进程没有基线 → 0%
+        assert_eq!(second.top[2].pid, 122);
+        assert_eq!(second.top[2].cpu_pct, 0.0);
+        approx(second.top[2].mem_pct, 10.0);
+    }
+
+    #[test]
+    fn linux_process_ticks_prune_dead_pids() {
+        let mut state = ParseState::new();
+        let now = SystemTime::UNIX_EPOCH;
+        parse_linux(
+            &mut state,
+            &linux_fixture("cpu 100 0 100 800 0 0 0 0", 0, PS_FIRST),
+            Duration::from_secs(1),
+            now,
+        )
+        .unwrap();
+        // 次帧只剩 pid 120：121 已退出，基线不应残留
+        let tick = parse_linux(
+            &mut state,
+            &linux_fixture(
+                "cpu 150 0 150 900 0 0 0 0",
+                0,
+                "120\troot\t200\t100\t600\tnginx: worker process\n",
+            ),
+            Duration::from_secs(1),
+            now,
+        )
+        .unwrap();
+        assert_eq!(tick.top.len(), 1);
+        // Δtotal = 200，Δproc = 150 → 75%
+        approx(tick.top[0].cpu_pct, 75.0);
+        assert_eq!(state.prev_proc_ticks.len(), 1, "已退出进程的基线被淘汰");
+    }
+
+    #[test]
+    fn linux_process_rows_skip_malformed() {
+        let mut rows_state = ParseState::new();
+        let rows = parse_linux_processes(
+            &mut rows_state,
+            &[
+                "not-a-pid\troot\t1\t1\t10\tbad",
+                "7\troot\tnot-a-number\t1\t10\tbad",
+                "8\troot\t1\t1\t10\t", // 命令为空 → 丢弃
+                "9\troot\t1\t1\t10\tok",
+            ],
+            Some(100),
+            1.0,
+            1000.0,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 9);
     }
 
     #[test]
@@ -475,14 +641,14 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         parse_linux(
             &mut state,
-            &linux_fixture("cpu 500 0 500 1000 0 0 0 0", 0),
+            &linux_fixture("cpu 500 0 500 1000 0 0 0 0", 0, PS_FIRST),
             Duration::from_secs(2),
             now,
         )
         .unwrap();
         let tick = parse_linux(
             &mut state,
-            &linux_fixture("cpu 10 0 10 20 0 0 0 0", 0),
+            &linux_fixture("cpu 10 0 10 20 0 0 0 0", 0, PS_FIRST),
             Duration::from_secs(2),
             now,
         )
@@ -508,14 +674,14 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         parse_linux(
             &mut state,
-            &linux_fixture("cpu 1 0 1 8 0 0 0 0", 0),
+            &linux_fixture("cpu 1 0 1 8 0 0 0 0", 0, PS_FIRST),
             Duration::from_secs(1),
             now,
         )
         .unwrap();
         let tick = parse_linux(
             &mut state,
-            &linux_fixture("cpu 2 0 2 16 0 0 0 0", 0),
+            &linux_fixture("cpu 2 0 2 16 0 0 0 0", 0, PS_FIRST),
             Duration::from_secs(1),
             now,
         )
