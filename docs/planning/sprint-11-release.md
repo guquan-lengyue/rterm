@@ -5,6 +5,11 @@
 > **目标**：全量回归（含 S10 手工 smoke）+ Release 构建 + 安装包 + README + CHANGELOG 定稿 + 压力测试
 >
 > **S10 基线**：`cargo test --workspace` **174 passed / 1 ignored**；`cargo clippy --workspace --all-targets` 0 warning；`cargo fmt --all` 通过；本地门禁脚本 [check.ps1](../../scripts/check.ps1)。
+>
+> **进度（2026-11-17）**：11.3 Release 构建执行中；11.4 安装包脚本已落地
+> [installer/rterm.iss](../../installer/rterm.iss)（本机未装 Inno Setup 6，需安装后 `iscc` 生成）；
+> 11.5 README 用户版 ✅；11.6 CHANGELOG 补齐 Sprint 9 ✅；11.7 代码清理核对 ✅（无 TODO/FIXME，clippy 0 warning）；
+> 11.1 / 11.2 / 11.8 ⏳ 需真实远端，待手工执行。
 
 ---
 

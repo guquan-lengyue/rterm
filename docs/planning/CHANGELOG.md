@@ -52,6 +52,35 @@
 
 ---
 
+## Sprint 9 — 远程性能监控
+
+**状态**：✅ COMPLETED | **Commit**：`2046d6c`（监控主体）+ `b109da7`（/proc 优化） | **时间**：2026-11-17
+**前置**：S5（SSH exec）+ S6（Canvas 渲染）
+**后续**：S10 稳定性收尾（监控 Tab 回归合并进 9.12.1）
+
+### 交付清单
+
+| 模块 | 内容 |
+|------|------|
+| `rterm-monitor` | 独立 SSH 会话的后台采集线程；单次 exec 多段脚本（`@@RT_<SECTION>@@` 标记）代替多次往返；分段增量解析 CPU / 网络速率；RollingAverage + 95% 阈值滞回告警；Linux 侧改为 `/proc` 直读（awk 一次遍历 stat/status/passwd，进程 CPU% 用 tick 差值），macOS 保留 `ps` 回退 |
+| `MonitorView` | 6 张指标卡片 + Canvas 折线图（最近 60 点）；Top 进程表（PID / USER / CPU% / MEM% / COMMAND，可排序）；Kill / Force Kill（二次确认）；暂停 / 恢复 / 重置；采集间隔与阈值走全局设置 |
+
+### 验证
+
+| 项 | 结果 |
+|----|------|
+| `cargo test --workspace` | ✅ S9 完成时 120 passed / 1 ignored；`/proc` 优化后 122 |
+| 实机 | ✅ 监控 Tab 打开、Top 列表实时刷新、Kill 生效；`/proc` 方案 CPU% 与 top 语义一致 |
+| 关闭窗口日志 | ⚠️ 出现 `window not found` 噪音；已复现并确认与 S9 无关（无 Tab 也会出现）→ S10 9.22 |
+
+### 踩坑 & 修正
+
+- **栈溢出（0xC00000FD）**：`ResourceSample::default()` 调用 `zeroed()`，后者又用 `..Self::default()` → 无限递归；改为 default 自包含，并用 H 阶段二分定位。
+- **每秒 fork `ps` 太重**：改成单次 awk 读 `/proc`，进程 CPU% = Δ(utime+stime) / Δ(总 tick) × ncpu × 100。
+- **关闭窗口噪音误判**：先复现（空 Tab 关闭同样报错）再归因，确认属于 gpui Windows 后端 teardown，转 S10 9.22 处理。
+
+---
+
 ## Sprint 8 — 路径同步
 
 **状态**：✅ COMPLETED | **Commit**：工作区（未提交） | **时间**：2026-11-17
