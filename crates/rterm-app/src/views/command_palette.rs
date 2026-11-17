@@ -15,6 +15,7 @@ pub enum PaletteAction {
     OpenSettings,
     ImportSessions,
     ExportSessions,
+    ExportDiagnostics,
 }
 
 /// 一条可搜索命令。

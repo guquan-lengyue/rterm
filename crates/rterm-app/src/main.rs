@@ -5,6 +5,7 @@
 //   只用来承载 EventEmitter<AppEvent>。所有 View subscribe 它；
 //   emit 必须通过 app.update_entity(&host, |_, cx| cx.emit(event))
 
+pub mod diagnostics;
 pub mod event;
 pub mod single_instance;
 pub mod state;

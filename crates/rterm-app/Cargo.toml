@@ -25,6 +25,7 @@ serde_json.workspace = true
 uuid.workspace = true
 dirs = "5"
 rfd.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # 单实例锁：命名互斥体 + MessageBox 提示
 [target.'cfg(target_os = "windows")'.dependencies]

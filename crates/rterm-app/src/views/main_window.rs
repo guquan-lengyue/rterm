@@ -685,6 +685,11 @@ impl MainWindow {
             "会话",
             PaletteAction::ExportSessions,
         ));
+        items.push(PaletteItem::new(
+            "导出诊断包…",
+            "诊断",
+            PaletteAction::ExportDiagnostics,
+        ));
 
         self.palette = Some(PaletteState::new(items));
         self.context_menu = None;
@@ -724,6 +729,22 @@ impl MainWindow {
             PaletteAction::OpenSettings => self.open_settings(cx),
             PaletteAction::ImportSessions => self.open_import_export(false, cx),
             PaletteAction::ExportSessions => self.open_import_export(true, cx),
+            PaletteAction::ExportDiagnostics => self.export_diagnostics(cx),
+        }
+    }
+
+    /// 生成诊断包到数据目录，并在状态栏提示路径。
+    fn export_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let sessions_count = {
+            let state = cx.global::<AppState>();
+            let store = lock_or_recover(&state.session_store);
+            store.list().len()
+        };
+        let settings = cx.global::<AppState>().settings.clone();
+        let dest = crate::diagnostics::default_export_path();
+        match crate::diagnostics::export_diagnostics(&dest, sessions_count, &settings) {
+            Ok(path) => self.set_status(format!("诊断包已导出: {}", path.display()), cx),
+            Err(error) => self.set_status(format!("导出诊断包失败: {error:#}"), cx),
         }
     }
 
