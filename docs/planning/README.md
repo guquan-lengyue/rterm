@@ -15,12 +15,12 @@
 | **S4** | 设置 + 导入导出 | [sprint-04-settings-io.md](./sprint-04-settings-io.md) | ✅ 已完成（2026-11-14） | S3 |
 | **S5** | SSH 连接 & 终端核心 | [sprint-05-ssh-terminal.md](./sprint-05-ssh-terminal.md) | ✅ 已完成（2026-11-14） | S2 + S3 + S4 |
 | **S6** | 终端渲染 | [sprint-06-terminal-render.md](./sprint-06-terminal-render.md) | ✅ 已完成（2026-11-16） | S5 |
-| **S7** | SFTP 文件管理 | [sprint-07-sftp.md](./sprint-07-sftp.md) | 🚧 核心完成（2026-11-16） | S5 + S6 ✅ |
+| **S7** | SFTP 文件管理 | [sprint-07-sftp.md](./sprint-07-sftp.md) | ✅ 已完成（S7 + S10 收口） | S5 + S6 ✅ |
 | **S7.5** | 技术债清偿（S8 前插入） | [sprint-07.5-tech-debt.md](./sprint-07.5-tech-debt.md) | ✅ 已完成（2026-11-16） | S7 🚧 |
 | **S8** | 路径同步 | [sprint-08-sync.md](./sprint-08-sync.md) | ✅ 已完成（2026-11-17，含真实 GUI E2E） | S6 ✅ + S7 🚧 + S7.5 ✅ |
-| **S9** | 远程性能监控 | [sprint-09-monitor.md](./sprint-09-monitor.md) | 待开始（可与 S8 并行） | S5 + S6 ✅ + S7.5 ✅ |
-| **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | 待开始（等 S8–S9） | S6 ✅–S9 + S7.5 ✅ |
-| **S11** | v1.0 打磨 & 发布 | [sprint-11-release.md](./sprint-11-release.md) | 待开始（等 S10） | S10 |
+| **S9** | 远程性能监控 | [sprint-09-monitor.md](./sprint-09-monitor.md) | ✅ 已完成（2026-11-17） | S5 + S6 ✅ + S7.5 ✅ |
+| **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | ✅ 代码任务完成（2026-11-17，待 9.12.1 手工 smoke → S11 11.1） | S6 ✅–S9 ✅ + S7.5 ✅ |
+| **S11** | v1.0 打磨 & 发布 | [sprint-11-release.md](./sprint-11-release.md) | 🚧 就绪（先跑 S10 9.12.1 手工 smoke） | S10 ✅ |
 
 ---
 
@@ -34,26 +34,26 @@ S1 ✅ 基础设施 ────┐
                    │
 S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 ══▶ S4 ✅ 设置 + 导入导出
                    │
-                   └──▶ S5 ✅ SSH核心 ────┬──▶ S6 ✅ 终端渲染 ──▶ S7 🚧 SFTP
+                   └──▶ S5 ✅ SSH核心 ────┬──▶ S6 ✅ 终端渲染 ──▶ S7 ✅ SFTP（S10 收口）
                                          │                         │
                                          │                         ▼
-                                         │                 S7.5 技术债清偿（已完成）
+                                         │                 S7.5 ✅ 技术债清偿
                                          │                         │
                                          │                         ▼
-                                         │                 S8 路径同步
+                                         │                 S8 ✅ 路径同步
                                          │
-                                         └──▶ S9 远程监控（可与 S8 并行）
+                                         └──▶ S9 ✅ 远程监控
 
-                         S10 稳定性收尾 ──▶ S11 v1.0 发布
+                         S10 ✅ 稳定性收尾 ──▶ S11 🚧 v1.0 发布
 ```
 
-**关键路径**：S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → **S7.5** → S8 → S10 → S11
+**关键路径**：S0 → S1 → S2 → S3 → S4 → S5 → S6 → S7 → **S7.5** → S8 → S9 → **S10** → S11
 
-**可并行**：
-- S6（终端渲染）与 S7（SFTP 核心）已完成，TabBar / 多类型 Tab 可直接被 S8 / S9 复用
-- S8 已完成（2026-11-17），其 SyncBridge / 事件路由可被 S9 状态栏复用；S9 可立即开始
-- S9 依赖 S6 ✅ + S7.5 ✅；S10 等 S9 完成后进入
-- S10 承接 S7.5 / S8 的已知限制（SFTP 顶部路径标签刷新、pwd 兜底边界、GUI 自动化输入方式）
+**当前状态**：
+- S10 的 21 项代码任务全部完成，workspace 174 passed / 1 ignored，clippy 0 warning
+- S10 只差 9.12.1 GUI 手工 smoke（真实远端 / 大目录 / 长空闲 / 多类型 Tab），已并入 S11 11.1
+- S11 依次执行：全量回归 → Release 构建 → 安装包 → 文档（补 S9 CHANGELOG）→ 代码清理 → 压力测试 → 发布验收
+- S10 已知限制（命令面板仅 ASCII、vi 仅导航、回显抑制边界等）列在 S11 文档「S10 交接项」
 
 ---
 
@@ -79,8 +79,8 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 
 | 我想…… | 去这里 |
 |--------|--------|
-| **开始写代码** | 🚧 **[sprint-09-monitor.md](./sprint-09-monitor.md)**（S8 已完成，S9 可开始）/ 稳定性收尾见 [sprint-10-stability.md](./sprint-10-stability.md) |
-| 看 Sprint 完成总结 | [CHANGELOG.md](./CHANGELOG.md)（S1–S8 已记录） |
+| **开始写代码** | 🚧 **[sprint-11-release.md](./sprint-11-release.md)**（先执行 11.1：S10 9.12.1 手工 smoke） |
+| 看 Sprint 完成总结 | [CHANGELOG.md](./CHANGELOG.md)（S1–S8、S10 已记录；S9 待 S11 11.6 补齐） |
 | 看里程碑概览 + 风险缓解 | [roadmap.md](./roadmap.md) |
 | 看 UI 原型线框图 | `docs/architecture/ui-prototypes.md` |
 | 查依赖图 | 本文件「依赖图」章节 |
@@ -90,6 +90,8 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 
 ## 变更记录
 
+- **2026-11-17** v4.3：S10 完成（21 项代码任务 + 回归；174 passed / 1 ignored，clippy 0 warning，fmt 通过）；S10 总结写入 CHANGELOG；S11 重排任务（11.1 先跑 9.12.1 手工 smoke，新增「S10 交接项」）；roadmap Phase 3/5/6 收口、Phase 7 进行中
+- **2026-11-17** v4.2：S9 远程监控完成（MonitorView / 采集 / Top / Kill；/proc awk 优化 CPU%）；S10 转为下一个
 - **2026-11-17** v4.1：S8 完成（双向路径同步 + 防回环 + Off 模式，真实 GUI E2E 通过；104 passed / 1 ignored，clippy 0 warning，fmt 通过）；S9 转为下一个
 - **2026-11-17** v4.0：S8 核心落地（SyncBridge + 终端/SFTP 路由 + pwd 兜底；103 passed / 1 ignored）；真实 GUI 双向 E2E 待复验
 - **2026-11-16** v3.9：S7.5 完成（P0–P3 + 主机密钥收口；92 passed / 1 ignored，clippy 0 warning，fmt 通过）；S8 转为下一个

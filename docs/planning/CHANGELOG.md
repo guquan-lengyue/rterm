@@ -4,6 +4,54 @@
 
 ---
 
+## Sprint 10 — 稳定性收尾
+
+**状态**：✅ 代码任务完成（仅剩 9.12.1 GUI 手工 smoke，转 S11 11.1） | **Commit**：`06766b9`…`a4ad676`（21 项任务） | **时间**：2026-11-17
+**前置**：S6 ✅ + S7.5 ✅ + S8 ✅ + S9 ✅
+**后续**：S11 v1.0 打磨 & 发布
+
+### 交付清单
+
+| 分组 | 内容 |
+|------|------|
+| 主机密钥 & SSH 错误（9.1b/9.1c/9.2） | hashed known_hosts（`\|1\|` + HMAC-SHA1 常量时间校验，展示旧指纹并在接受后删除匹配行）；Windows 原子替换（临时文件 + 备份 + 失败回滚）；`errors.rs` 把 ssh2 / io 错误分类为认证 / 超时 / 主机密钥 / 网络 → 中文文案，终端、SFTP、监控统一使用 |
+| 配置导入（9.8） | OpenSSH config：Include 递归 2 层；Match 条件（all / host / user，glob + `!` 负向，跨 HostName 候选判断） |
+| 可靠性（9.5/9.9/9.11/9.16/9.16b/9.22） | 会话日志 Ctrl+Shift+L（`terminal_log_dir` 或默认 `logs/`，按 Tab 独立开关）；24h 自动备份 + 保留 7 份；data_dir 迁移（复制 + 失败中止，不丢旧会话）；诊断包 zip（版本 / OS / 设置摘要 / 会话数 + 最近 8 个日志，刻意排除 sessions.json）；关闭窗口 teardown 日志噪音过滤器 |
+| 交互（9.3/9.4/9.13/9.14/9.17/9.18） | Ctrl+P 命令面板（模糊搜索 8 类动作 + ↑↓/Enter/Esc，上下文 keybinding 不抢终端按键）；Ctrl+Shift+N / F11 / Ctrl+, 等全局快捷键；自绘滚动容器（滚轮 + 裁剪 + 定高行虚拟化 + 滑块，5 项几何单测）；系统字体枚举（4 预设兜底，当前字体卸载时置顶保留选中态）；方块光标反色、滚动条拖拽、双击选词 / 三击整行；SFTP 跨面板拖拽传输、列表虚拟化、空白区右键菜单、本地 listdir 后台化 |
+| 终端能力（9.6/9.7/9.19/9.21） | OSC 52 远程复制（`Osc52::OnlyCopy`，远程 → 本地单向）；vi 模式（Ctrl+Shift+Space 切换，hjkl/方向键/w/b/0/$/g/G，半透明 vi 光标随视口滚动）；PTY 可中断空闲等待（`IoWaker` + `park_timeout`/`unpark`，空闲首键不再等 50ms）；路径同步注入命令回显抑制（跨 PTY 读块匹配，512 字节上限后放弃） |
+
+### 验证
+
+| 项 | 结果 |
+|----|------|
+| `cargo fmt --all` | ✅ 通过 |
+| `cargo clippy --workspace --all-targets` | ✅ 0 warning / 0 error |
+| `cargo test --workspace` | ✅ **174 passed / 1 ignored**（live_ssh 需真实主机） |
+| 9.1 / 9.10 / 9.15 回归 | ✅ 代码路径复核：主机密钥三选一 Modal、CRUD 即时落盘 + 退出兜底、删除二次确认卡片均在线 |
+| 9.12.1 自动化部分 | ✅ workspace 全绿，覆盖存储 / 导入导出 / openssh / known_hosts / 错误映射 / 终端引擎 / 监控 / SFTP 队列 / 滚动与虚拟化几何 / 备份 / 迁移 |
+| 9.12.1 GUI 手工 smoke | ⚠️ 待执行（真实远端、大目录、长空闲、多类型 Tab）→ S11 11.1 |
+
+### 踩坑 & 修正
+
+- **rustc ICE**：增量缓存损坏导致 `encode_metadata` 在 rterm-crypto / rterm-sftp 稳定 panic；`CARGO_INCREMENTAL=0` 重编恢复，与业务代码无关。
+- **fuzzy 测试期望错误**：`fuzzy_score("pd","db-prod")` 实际可匹配（p@3、d@4），改用 `"pb"` 验证不匹配。
+- **openssh Match**：空格分隔多模式需 join 成逗号；`!db2` 负向匹配必须跨 HostName 候选统一判断，否则会被回退值绕过。
+- **滚动容器方向**：`scroll_by` 的“正数向下”和 gpui 滚轮 delta（向上为正）相反，统一在 `on_wheel` 取负。
+- **9.17 手算索引**：`git commit -m msg` 末列是 16，首版单测写成 15。
+- **9.7 视图接线**：engine 单测先绿，但 terminal.rs 漏 `ViMove` 导入与 `toggle_vi_mode` 方法，编译期兜住。
+- **9.18 拖拽与右键冒泡**：行右键菜单必须 `stop_propagation`，否则会被父容器的“空白区菜单”覆盖。
+
+### 已知限制（转 S11，不阻塞 v1.0）
+
+- 命令面板搜索仅 ASCII：`key_char` 无 IME 组合输入，中文会话名需拼音或改名。
+- OSC 52 只做远端 → 本地 copy；按安全策略禁止远端读取本地剪贴板。
+- vi 模式只有导航 + 选词，不含 yank / 搜索 / 命令等完整 vim 操作。
+- 回显抑制依赖远端原样回显：readline 补全、多行 PS2 等场景超过 512 字节后放弃匹配，命令会显示。
+- 关闭窗口 `window not found` / `0x80040102` 噪音仅被过滤器静音，根因在 bezel-gpui（HWND 销毁后仍 `update_window_erased`），可向上游提 issue。
+- SFTP 本地 mkdir / rename / delete 仍在 UI 线程（评估：本地操作通常 <1ms，listdir 已后台化，暂不迁移）；拖拽不支持目录、无拖影，仅状态栏提示。
+
+---
+
 ## Sprint 8 — 路径同步
 
 **状态**：✅ COMPLETED | **Commit**：工作区（未提交） | **时间**：2026-11-17

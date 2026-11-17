@@ -10,11 +10,11 @@
 | **P0 环境 & 骨架** | gpui 空窗口可运行 + 所有 crate 骨架 + MSVC 环境脚本 | ✅ 已完成 | VS Build Tools、perl、bezel-gpui 0.3 |
 | **P1 会话管理** | 会话树 View + SessionStore CRUD + 持久化 JSON + 导入导出 + 全局设置界面 | ✅ 已完成（S2–S4） | serde / uuid / rterm-crypto |
 | **P2 SSH 连接 & 终端** | ssh2 Session 封装 + PTY + alacritty_terminal glue + gpui Canvas 渲染 + 基础主题 | ✅ 已完成（S5 + S6） | ssh2 vendored-openssl / alacritty_terminal |
-| **P3 SFTP 文件管理** | SFTP 双栏浏览 + 传输队列 + 进度条 + 拖拽 | 🚧 核心完成（S7），拖拽/取消 E2E 转 S10 | ssh2 Sftp / walkdir |
+| **P3 SFTP 文件管理** | SFTP 双栏浏览 + 传输队列 + 进度条 + 拖拽 | ✅ 已完成（S7 + S10 收口） | ssh2 Sftp / walkdir |
 | **P4 路径同步** | SyncBridge + PS1 正则 + ignore 防回环 + 双向开关 | ✅ 已完成（S8） | ssh2 / 手写解析（无 regex 依赖） |
-| **P5 远程性能监控** | MonitorCollector + 折线图 + Top 进程 + 阈值告警 | — | tokio 定时 + Canvas 折线图 |
-| **P6 稳定性收尾** | 主机密钥管理 + 重连策略 + 命令面板 + 快捷键 + 日志导出 + 自动备份 | — | winreg / dirs |
-| **P7 打磨 & v1.0** | 主题扩展 + vi 模式 + 会话日志 + 命令面板完善 + OpenSSH config 导入 + 安装包 | — | — |
+| **P5 远程性能监控** | MonitorCollector + 折线图 + Top 进程 + 阈值告警 | ✅ 已完成（S9） | tokio 定时 + Canvas 折线图 |
+| **P6 稳定性收尾** | 主机密钥管理 + 重连策略 + 命令面板 + 快捷键 + 日志导出 + 自动备份 | ✅ 已完成（S10） | winreg / dirs |
+| **P7 打磨 & v1.0** | 全量回归 + Release 构建 + 安装包 + 文档 + 压力测试 | 🚧 进行中（S11） | — |
 
 **注**：预估时间相对粗略，按全职进度。P2（终端）是最具技术挑战的 Phase，也是整个 MVP 的核心。
 
@@ -148,9 +148,10 @@
 
 ---
 
-## Phase 3 — SFTP 文件管理 🚧（S7 核心完成）
+## Phase 3 — SFTP 文件管理 ✅（S7 + S10 收口，2026-11-17）
 
 > **S7.5 技术债清偿已完成（2026-11-16）**：[sprint-07.5-tech-debt.md](./sprint-07.5-tech-debt.md) 已完成数据安全、线程生命周期、状态一致性与主机密钥收口；自动化门禁 92 passed / 1 ignored、clippy 0 warning、fmt 通过。Phase 4 可开始。
+> **S10 9.18 已收口**：跨面板拖拽传输、暂停/继续/取消 GUI、空白区右键菜单、列表虚拟化、本地 listdir 后台化；真实远端 E2E 见 S11 11.1。
 
 ### 前置条件
 - [x] P1（SessionStore）
@@ -171,15 +172,16 @@
 - [x] 下载：SFTP open → 分块写入本地
 - [x] 每个任务进度实时更新（~100ms 节流）
 - [ ] 速度（bytes / sec）显示
-- [x] 暂停 / 恢复 / 取消 / 失败重试（代码完成；暂停取消 E2E 留 S10）
+- [x] 暂停 / 恢复 / 取消 / 失败重试（代码完成；GUI E2E 见 S11 11.1）
 
-#### 3.3 Sftp View（gpui）🚧
+#### 3.3 Sftp View（gpui）✅
 - [x] 双栏 Split View（左本地，右远程）
 - [x] 地址栏 + 面包屑 + 刷新
 - [ ] 前进 / 后退
 - [x] 文件列表图标（目录 / 文件 / 符号链接）
-- [ ] 拖拽上传 / 下载（S10 9.18）
-- [x] 右键菜单：上传 / 下载 / 重命名 / 删除 / chmod / 属性（新建目录在顶部工具栏）
+- [x] 拖拽上传 / 下载（S10 9.18，文件级；目录拖拽转 v1.1）
+- [x] 列表虚拟化（S10 9.18，只渲染可视行）
+- [x] 右键菜单：上传 / 下载 / 重命名 / 删除 / chmod / 属性（新建目录在顶部工具栏）；空白区菜单（S10）
 - [x] 传输进度条（底部传输面板）
 
 ---
@@ -202,17 +204,19 @@
 - [x] `SyncBridge::on_sftp_navigated(path) → Option<String>`（注入 `cd`）
 - [x] ignore_list（VecDeque, max 10）+ pending SFTP nav + 初始 home 标记：防止双向回环
 - [x] 方向开关（off / term→sftp / sftp→term / bidirectional），设置变更即时生效
-- [ ] per-session 可覆盖默认方向（未做，全局设置已满足当前需求，转 S10 评估）
+- [ ] per-session 可覆盖默认方向（未排期；全局设置已满足当前需求）
 
 #### 4.2 集成到 Terminal + SFTP
 - [x] TerminalView 每次 PTY 字节流喂 Term 后 → SyncBridge.on_terminal_output
 - [x] SFTP View 每次导航（双击 / 面包屑 / 地址栏）→ `SftpNavigated`
 - [x] SyncBridge.on_sftp_navigated → 组装注入命令 → TerminalView.inject_command（shell 转义）
-- [ ] 回显抑制：注入命令仍会在终端显示，S10 评估（需 Term 侧识别内部命令）
+- [x] 回显抑制：注入命令的回显由 engine 在输出流中吞掉（S10 9.21）
 
 ---
 
-## Phase 5 — 远程性能监控
+## Phase 5 — 远程性能监控 ✅（S9，2026-11-17）
+
+> 交付记录见 [CHANGELOG.md](./CHANGELOG.md)（Sprint 9）与 [sprint-09-monitor.md](./sprint-09-monitor.md)；9.12.1 多 Tab 回归见 S11 11.1。
 
 ### 前置条件
 - [x] P2（SSH exec）
@@ -220,53 +224,55 @@
 ### 任务清单
 
 #### 5.1 rterm-monitor MonitorCollector
-- [ ] `start(session_id, interval_secs=2)`：tokio interval loop
-- [ ] Linux 采集脚本：`cat /proc/stat; cat /proc/meminfo; df -P / | tail -1; cat /proc/net/dev; uptime`
-- [ ] macOS 采集脚本：`sysctl -n vm.loadavg; sysctl -n hw.memsize; vm_stat; netstat -ib`
-- [ ] 单行解析 → ResourceSample
-- [ ] 最近 60 个采样点 VecDeque（每指标独立）
-- [ ] 阈值比较（rolling avg 避免尖刺误报）
-- [ ] 告警触发：EventBus + 系统通知
+- [x] `start(session_id, interval_secs=2)`：后台线程 + 独立 SSH 会话
+- [x] Linux 采集脚本：单次 exec 多段输出（`@@RT_<SECTION>@@` 标记）
+- [x] macOS 采集脚本：ps 回退路径
+- [x] 分段解析 → ResourceSample（增量 CPU / 网络速率）
+- [x] 最近 60 个采样点 VecDeque（每指标独立）
+- [x] 阈值比较（rolling avg 避免尖刺误报）
+- [x] 告警触发：EventBus + 状态栏
 
 #### 5.2 Monitor View（gpui）
-- [ ] 6 个卡片：CPU% / 内存% / Swap% / 磁盘% / rx_kbps / tx_kbps / load_avg_1
-- [ ] 每张卡片内嵌 canvas 折线图（最近 60 点）
-- [ ] 暂停 / 恢复 / 重置按钮
-- [ ] Top 进程表：PID / USER / CPU% / MEM% / COMMAND，可排序
-- [ ] 右键进程 Kill / Force Kill（二次确认）
-- [ ] 阈值设置入口（per-session 或全局）
+- [x] 6 个卡片：CPU% / 内存% / Swap% / 磁盘% / rx_kbps / tx_kbps / load_avg_1
+- [x] 每张卡片内嵌 canvas 折线图（最近 60 点）
+- [x] 暂停 / 恢复 / 重置按钮
+- [x] Top 进程表：PID / USER / CPU% / MEM% / COMMAND，可排序（/proc 直读 awk，CPU% 按 tick 差值）
+- [x] 右键进程 Kill / Force Kill（二次确认）
+- [x] 阈值设置入口（全局设置 → 监控）
 
 ---
 
-## Phase 6 — 稳定性收尾
+## Phase 6 — 稳定性收尾 ✅（S10，2026-11-17）
 
 ### 任务清单
 
-- [x] 主机密钥 known_hosts 持久化（兼容格式 + 原子写 + 三选一确认；hashed/Windows 原子替换边界见 S10 9.1b/9.1c）
-- [ ] 连接失败错误码映射（auth / timeout / host_key_changed / network）→ 面向用户的文案
-- [ ] 命令面板 Ctrl+P（gpui 自带 keybinding 框架）
-- [ ] 全局快捷键全部生效（Ctrl+, 设置 / Ctrl+Shift+N 新会话 / F11 全屏 / Ctrl+T 新标签 / Ctrl+W 关标签）
-- [ ] 帮助 → 导出诊断包（logs + 版本 + 会话数）
-- [ ] 自动备份定时器启动（24h）
-- [ ] 会话日志文件写入（per-tab 可开 / 关）
-- [ ] OSC 52 远程剪贴板支持
-- [ ] vi 模式（alacritty_terminal 自带）
-- [ ] OpenSSH config 导入完善（S7.5 已修顶层 Include / 多模式 Host / ProxyJump / Match 跳过；剩余 Include 递归 2 层 + Match 条件 → S10 9.8）
-- [ ] `.ppk` / PuTTY reg 文件导入（可选）
+- [x] 主机密钥 known_hosts 持久化（兼容格式 + 原子写 + 三选一确认；hashed 匹配与 Windows 原子替换见 S10 9.1b/9.1c）
+- [x] 连接失败错误码映射（auth / timeout / host_key_changed / network）→ 面向用户的文案（9.2）
+- [x] 命令面板 Ctrl+P + 模糊搜索（9.3，搜索仅 ASCII，见已知限制）
+- [x] 全局快捷键全部生效（Ctrl+, 设置 / Ctrl+Shift+N 新会话 / F11 全屏 / Ctrl+T 新标签 / Ctrl+W 关标签 / Ctrl+Shift+L 会话日志 / Ctrl+Shift+Space vi）
+- [x] 导出诊断包（logs + 版本 + 会话数 → zip，9.11）
+- [x] 自动备份定时器启动（24h + 保留 7 份，9.9）
+- [x] 会话日志文件写入（per-tab 可开 / 关，9.5）
+- [x] OSC 52 远程剪贴板支持（9.6，只读方向）
+- [x] vi 模式（9.7，导航 + 选词）
+- [x] OpenSSH config 导入完善（Include 递归 2 层 + Match 条件，9.8）
+- [ ] `.ppk` / PuTTY reg 文件导入（可选，未排期）
 
 ---
 
-## Phase 7 — v1.0 打磨
+## Phase 7 — v1.0 打磨 🚧（S11 进行中）
+
+> 任务拆分与 S10 交接项见 [sprint-11-release.md](./sprint-11-release.md)；S10 已完成 Release profile 预配置与 CHANGELOG 主体。
 
 ### 任务清单
 
-- [ ] Release profile 优化（lto=thin / codegen-units=1 / strip=true 已配好）
-- [ ] Windows 安装包（MSI 或 Inno Setup：rterm.exe + 图标 + 文件关联）
+- [ ] Release 构建验证（lto=thin / codegen-units=1 / strip=true 已配好）
+- [ ] Windows 安装包（Inno Setup：rterm.exe + 图标 + 文件关联）
 - [ ] macOS .dmg 构建流程（后续）
 - [ ] Linux AppImage / deb（后续）
 - [ ] 国际化（i18n，可选）
 - [ ] 完整 README.md（用户版 + 开发者版）
-- [ ] CHANGELOG.md（v0.1 → v1.0 历史）
+- [ ] CHANGELOG.md v1.0 发布说明（补齐 Sprint 9 条目）
 - [ ] 全量回归测试（基础连接 + 终端仿真 + SFTP 上传 + 路径同步 + 监控）
 
 ---
@@ -288,11 +294,11 @@
 
 - [x] 会话：增删改查 + 持久化 + DPAPI 加密 + 导入导出 + OpenSSH config
 - [x] 终端：xterm-256color + 主题 + 滚动缓冲 + 复制粘贴 + 快捷键
-- [ ] SFTP：双栏浏览 + 批量传输 + 进度已就绪；拖拽/暂停取消 E2E/大目录虚拟化待 S10
-- [ ] 路径同步：PS1 + pwd 兜底 + 双向 + ignore 防回环（S8 已完成，真实 GUI E2E 通过；回显抑制留 S10 评估）
-- [ ] 监控：CPU / MEM / NET / DISK / Load + 折线图 + Kill（S9）
-- [ ] 稳定性：重连 + known_hosts 已完成；命令面板/自动备份/日志/诊断包待 S10
-- [x] 工程门禁：`cargo fmt --check` / `cargo clippy --all-targets` 0 warning / `cargo test --workspace`
-- [ ] Windows MSI 安装包 + 用户版 README + CHANGELOG 定稿（S11）
+- [x] SFTP：双栏浏览 + 批量传输 + 进度 + 拖拽 + 列表虚拟化（S10 收口；GUI E2E 见 S11 11.1）
+- [x] 路径同步：PS1 + pwd 兜底 + 双向 + ignore 防回环 + 回显抑制（S8 + S10）
+- [x] 监控：CPU / MEM / NET / DISK / Load + 折线图 + Kill（S9）
+- [x] 稳定性：重连 + known_hosts + 命令面板 + 自动备份 + 日志 + 诊断包（S10）
+- [x] 工程门禁：`cargo fmt --check` / `cargo clippy --all-targets` 0 warning / `cargo test --workspace` 174 passed
+- [ ] Windows 安装包 + 用户版 README + CHANGELOG 定稿（S11）
 
 **全部满足 → 发布 v1.0.0**

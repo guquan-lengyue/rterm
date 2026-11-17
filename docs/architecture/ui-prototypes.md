@@ -407,8 +407,8 @@ App (gpui::Application)
 | ImportExportDialog | **S4** 4.2 | ✅ 已完成 |
 | TabBar | **S6** 5.4 | ✅ 已完成 |
 | 终端 Canvas View | **S6** 5.1 | ✅ 已完成 |
-| SFTP 双栏 View | **S7** 7.2 | ✅ 核心完成（拖拽留 S10） |
-| 监控折线图 View | **S9** 9.2 | ⏳ |
-| 命令面板 | **S10** 10.3 | ⏳ |
-| HostKey/Delete 确认 | **S3** / **S10** | ⏳ |
+| SFTP 双栏 View | **S7** 7.2 | ✅ 已完成（S10 9.18 收口拖拽/虚拟化） |
+| 监控折线图 View | **S9** 9.2 | ✅ 已完成 |
+| 命令面板 | **S10** 9.3 | ✅ 已完成（搜索仅 ASCII） |
+| HostKey/Delete 确认 | **S3** / **S7.5** | ✅ 已完成 |
 | StatusBar（真实） | **S6** 5.5.2 | ✅ 已完成 |
