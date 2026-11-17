@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 // ---------- 入口 ----------
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    install_logger();
     log::info!("rterm-app starting (Sprint 7 — SFTP 文件管理)");
 
     // 0. 单实例保护：已有实例在跑就直接退出。
@@ -157,6 +157,48 @@ fn main() {
 
 // ---------- 辅助 ----------
 
+/// 安装 env_logger，并过滤掉 gpui Windows 后端退出期的固定噪音。
+fn install_logger() {
+    let inner =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).build();
+    if log::set_boxed_logger(Box::new(TeardownNoiseFilter(inner))).is_ok() {
+        // 具体过滤由 env_logger 内部完成，全局只做放行上限。
+        log::set_max_level(log::LevelFilter::Trace);
+    }
+}
+
+/// 只丢弃「无 target 的窗口 teardown 错误」，其它日志原样透传。
+///
+/// bezel-gpui 在关闭窗口时会先销毁 HWND，再清理 OLE/TSF 对象，产生
+/// `window not found` 与 `无效的窗口句柄 (0x80040102 / 0x80070578)`。
+/// 这些记录没有模块 target，不影响功能，属于已知上游噪音（S10 9.22）。
+struct TeardownNoiseFilter<L>(L);
+
+impl<L: log::Log> log::Log for TeardownNoiseFilter<L> {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.0.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        if is_window_teardown_noise(record) {
+            return;
+        }
+        self.0.log(record);
+    }
+
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
+fn is_window_teardown_noise(record: &log::Record) -> bool {
+    if record.level() != log::Level::Error || !record.target().is_empty() {
+        return false;
+    }
+    let message = record.args().to_string();
+    message.contains("window not found") || message.contains("无效的窗口句柄")
+}
+
 /// 启动加载会话。
 /// 返回 (store, 启动错误提示, 是否成功加载)。
 /// 加载失败返回空 store + 错误提示 + false；单条解密失败仍算成功（true）。
@@ -278,5 +320,54 @@ fn save_store(shared: &Arc<Mutex<rterm_session::SessionStore>>) {
     match state::persist_sessions(shared) {
         Ok(()) => log::info!("Saved OK"),
         Err(e) => log::error!("保存会话失败: {e:#}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_window_teardown_noise;
+
+    fn record<'a>(
+        level: log::Level,
+        target: &'a str,
+        args: std::fmt::Arguments<'a>,
+    ) -> log::Record<'a> {
+        log::Record::builder()
+            .level(level)
+            .target(target)
+            .args(args)
+            .build()
+    }
+
+    #[test]
+    fn filters_only_empty_target_window_teardown_errors() {
+        assert!(is_window_teardown_noise(&record(
+            log::Level::Error,
+            "",
+            format_args!("window not found")
+        )));
+        assert!(is_window_teardown_noise(&record(
+            log::Level::Error,
+            "",
+            format_args!("无效的窗口句柄。 (0x80070578)")
+        )));
+        // 有 target 的错误不拦（避免误伤业务日志）
+        assert!(!is_window_teardown_noise(&record(
+            log::Level::Error,
+            "rterm_app",
+            format_args!("window not found")
+        )));
+        // 非 Error 级别不拦
+        assert!(!is_window_teardown_noise(&record(
+            log::Level::Warn,
+            "",
+            format_args!("window not found")
+        )));
+        // 其它无 target 错误不拦
+        assert!(!is_window_teardown_noise(&record(
+            log::Level::Error,
+            "",
+            format_args!("some other failure")
+        )));
     }
 }

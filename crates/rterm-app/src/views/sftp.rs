@@ -537,6 +537,8 @@ impl SftpView {
                 self.remote.selected = None;
                 self.remote.scroll = 0;
                 self.remote.error = None;
+                // 顶部状态标签跟随导航刷新，而不是停留在连接时的 home。
+                self.status_text = format!("已连接 · {}", self.remote.path);
                 self.set_address(PaneSide::Remote, &nav.path, cx);
                 if let Some(session_id) = self.session_id {
                     self.emit(
