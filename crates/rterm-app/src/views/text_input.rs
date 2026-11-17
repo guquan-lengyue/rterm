@@ -199,7 +199,7 @@ impl TextInput {
     /// 处理要点：
     /// - GPUI 的 `index_for_x` 超出文本时返回 None → 光标放到末尾
     /// - 点击字符右半部分时 → 光标前进到下一个字符边界
-    /// - 保证 index 总是落在合法 UTF-8 字符边界上
+    /// - 密码模式在"显示坐标"里定位（● 串），再换算回明文字节偏移
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -208,10 +208,6 @@ impl TextInput {
     ) {
         window.focus(&self.focus_handle, cx);
 
-        // 密码模式显示的是 ●，与 content 下标不一致，不做定位
-        if self.password_mode {
-            return;
-        }
         let (Some(bounds), Some(line)) = (self.last_bounds, self.last_layout.as_ref()) else {
             return;
         };
@@ -219,45 +215,31 @@ impl TextInput {
             return;
         };
 
-        let content_len = self.content.len();
+        let display = self.display_content();
+        let display_len = display.len();
 
-        // 1) 拿候选索引；index_for_x 返回超出范围（None）→ 直接放末尾
+        // 1) 拿候选索引；index_for_x 返回超范围（None）→ 放末尾
         let hit = match line.index_for_x(local.x) {
-            Some(idx) => clamp_index(&self.content, idx),
-            None => {
-                self.selected_range = content_len..content_len;
-                self.marked_range = None;
-                cx.notify();
-                return;
-            }
+            Some(index) => clamp_index(&display, index),
+            None => display_len,
         };
 
-        // 2) 如果 hit 已经是末尾（空文本 / 末尾字符被点中右半），直接设
-        if hit >= content_len {
-            self.selected_range = content_len..content_len;
-            self.marked_range = None;
-            cx.notify();
-            return;
-        }
-
-        // 3) 取当前边界和下一个边界的 x 坐标；
-        //    若点击 x > 中点 → 前进到下一个边界
-        let cur_x = f32::from(line.x_for_index(hit));
-        let next_boundary = self.next_boundary(hit);
-        let final_idx = if next_boundary <= content_len {
-            let next_x = f32::from(line.x_for_index(next_boundary));
-            let click_x = f32::from(local.x);
-            let mid = (cur_x + next_x) / 2.0;
-            if click_x > mid {
-                next_boundary.min(content_len)
+        // 2) 取当前边界与下一个边界的 x 中点，点击落在右半 → 前进一格
+        let display_index = if hit >= display_len {
+            display_len
+        } else {
+            let current_x = f32::from(line.x_for_index(hit));
+            let next = next_char_boundary(&display, hit);
+            let next_x = f32::from(line.x_for_index(next));
+            if f32::from(local.x) > (current_x + next_x) / 2.0 {
+                next
             } else {
                 hit
             }
-        } else {
-            hit
         };
 
-        self.selected_range = final_idx..final_idx;
+        let index = self.plain_offset(display_index);
+        self.selected_range = index..index;
         self.marked_range = None;
         cx.notify();
     }
@@ -268,10 +250,20 @@ impl TextInput {
 
     fn display_content(&self) -> SharedString {
         if self.password_mode && !self.content.is_empty() {
-            SharedString::from("●".repeat(self.content.chars().count()))
+            SharedString::from(PASSWORD_MASK.repeat(self.content.chars().count()))
         } else {
             self.content.clone()
         }
+    }
+
+    /// 明文字节偏移 → 显示文本字节偏移（密码模式按 ● 个数换算）。
+    fn display_offset(&self, byte_offset: usize) -> usize {
+        to_display_offset(&self.content, self.password_mode, byte_offset)
+    }
+
+    /// 显示文本字节偏移 → 明文字节偏移（密码模式把 ● 个数还原为字符数）。
+    fn plain_offset(&self, display_offset: usize) -> usize {
+        to_plain_offset(&self.content, self.password_mode, display_offset)
     }
 
     fn cursor_offset(&self) -> usize {
@@ -469,11 +461,53 @@ impl EntityInputHandler for TextInput {
 // 下标安全工具
 // ---------------------------------------------------------------------------
 
+/// 密码模式的占位符（每个明文字符显示一个）。
+const PASSWORD_MASK: &str = "●";
+
+/// 明文字节偏移 → 显示文本字节偏移。
+///
+/// 密码模式显示的是 `●●●`，每个占位符占 `PASSWORD_MASK.len()` 字节，
+/// 需要按"字符数"换算，否则光标会停在第一个圆点后面。
+fn to_display_offset(content: &str, password_mode: bool, byte_offset: usize) -> usize {
+    let clamped = clamp_index(content, byte_offset);
+    if !password_mode {
+        return clamped;
+    }
+    content[..clamped].chars().count() * PASSWORD_MASK.len()
+}
+
+/// 显示文本字节偏移 → 明文字节偏移（[`to_display_offset`] 的逆运算）。
+fn to_plain_offset(content: &str, password_mode: bool, display_offset: usize) -> usize {
+    if !password_mode {
+        return clamp_index(content, display_offset);
+    }
+    let chars = display_offset / PASSWORD_MASK.len();
+    content
+        .char_indices()
+        .nth(chars)
+        .map(|(index, _)| index)
+        .unwrap_or(content.len())
+}
+
 /// 夹到 `text` 的字节长度内，并回退到最近的字符边界。
 fn clamp_index(text: &str, index: usize) -> usize {
     let mut index = index.min(text.len());
     while index > 0 && !text.is_char_boundary(index) {
         index -= 1;
+    }
+    index
+}
+
+/// `offset` 之后的下一个字符边界（已到末尾则返回 `text.len()`）。
+fn next_char_boundary(text: &str, offset: usize) -> usize {
+    let len = text.len();
+    let mut index = offset.min(len);
+    if index >= len {
+        return len;
+    }
+    index += 1;
+    while index < len && !text.is_char_boundary(index) {
+        index += 1;
     }
     index
 }
@@ -558,10 +592,22 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.display_content();
-        // IME marked_range 记录的是 content 字节下标；password 模式 / 内容被外部替换后
-        // 可能超出 display_text 长度，这里全部夹到合法字符边界，避免渲染越界 panic。
-        let selected_range = clamp_range(input.selected_range.clone(), &content);
-        let cursor = clamp_index(&content, input.cursor_offset());
+        // 选区 / 光标都换算到"显示文本"坐标：密码模式下显示的是 ● 串，
+        // 与明文 content 的字节偏移不一致，直接复用会画错位置。
+        let content_len = content.len();
+        let cursor = input.display_offset(input.cursor_offset()).min(content_len);
+        let sel_start = input
+            .display_offset(input.selected_range.start)
+            .min(content_len);
+        let sel_end = input
+            .display_offset(input.selected_range.end)
+            .min(content_len);
+        let (sel_start, sel_end) = if sel_start <= sel_end {
+            (sel_start, sel_end)
+        } else {
+            (sel_end, sel_start)
+        };
+        let is_focused = input.focus_handle.is_focused(window);
         let style = window.text_style();
 
         // 从 AppState 拿主题色（TextInput 是 gpui::Global，prepaint 用 &mut App）
@@ -635,7 +681,11 @@ impl Element for TextElement {
 
         let cursor_hsla: Hsla = cursor_color.into();
 
-        let (selection, cursor) = if selected_range.is_empty() {
+        // 失焦时既不画光标也不画选区高亮：否则选中文字后点到别处，
+        // 蓝色高亮会残留在输入框里。
+        let (selection, cursor) = if !is_focused {
+            (None, None)
+        } else if sel_start == sel_end {
             (
                 None,
                 Some(fill(
@@ -650,14 +700,8 @@ impl Element for TextElement {
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.start),
-                            bounds.top(),
-                        ),
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.end),
-                            bounds.bottom(),
-                        ),
+                        point(bounds.left() + line.x_for_index(sel_start), bounds.top()),
+                        point(bounds.left() + line.x_for_index(sel_end), bounds.bottom()),
                     ),
                     selection_color,
                 )),
@@ -701,10 +745,8 @@ impl Element for TextElement {
             cx,
         );
 
-        if focus_handle.is_focused(window) {
-            if let Some(cur) = prepaint.cursor.take() {
-                window.paint_quad(cur);
-            }
+        if let Some(cur) = prepaint.cursor.take() {
+            window.paint_quad(cur);
         }
 
         self.input.update(cx, |input, _cx| {
@@ -776,7 +818,46 @@ impl Render for TextInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_index, clamp_range, utf16_to_utf8_offset};
+    use super::{
+        clamp_index, clamp_range, next_char_boundary, to_display_offset, to_plain_offset,
+        utf16_to_utf8_offset,
+    };
+
+    #[test]
+    fn password_offsets_map_between_plain_and_display() {
+        // 明文 3 个 ASCII → 3 个 ●，每个 ● 占 3 字节
+        assert_eq!(to_display_offset("abc", true, 0), 0);
+        assert_eq!(to_display_offset("abc", true, 2), 6);
+        assert_eq!(to_display_offset("abc", true, 3), 9);
+        assert_eq!(to_plain_offset("abc", true, 0), 0);
+        assert_eq!(to_plain_offset("abc", true, 6), 2);
+        assert_eq!(to_plain_offset("abc", true, 9), 3);
+    }
+
+    #[test]
+    fn password_offsets_handle_multibyte_and_overflow() {
+        // 中文：1 字符 = 3 字节明文，显示仍是 1 个 ●（3 字节）
+        assert_eq!(to_display_offset("你好", true, 3), 3);
+        assert_eq!(to_plain_offset("你好", true, 3), 3);
+        // emoji 占 1 个 UTF-16 代理对 / 4 字节，显示仍是 1 个 ●
+        assert_eq!(to_display_offset("😀", true, 4), 3);
+        assert_eq!(to_plain_offset("😀", true, 3), 4);
+        // 超出范围收敛到末尾
+        assert_eq!(to_display_offset("ab", true, 99), 6);
+        assert_eq!(to_plain_offset("ab", true, 99), 2);
+        // 非密码模式恒等
+        assert_eq!(to_display_offset("abc", false, 2), 2);
+        assert_eq!(to_plain_offset("abc", false, 2), 2);
+    }
+
+    #[test]
+    fn next_char_boundary_steps_over_multibyte_chars() {
+        assert_eq!(next_char_boundary("abc", 1), 2);
+        assert_eq!(next_char_boundary("abc", 3), 3);
+        assert_eq!(next_char_boundary("你好", 0), 3);
+        assert_eq!(next_char_boundary("你好", 3), 6);
+        assert_eq!(next_char_boundary("", 0), 0);
+    }
 
     #[test]
     fn clamp_index_handles_overflow_and_char_boundaries() {
