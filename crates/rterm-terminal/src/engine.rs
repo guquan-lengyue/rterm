@@ -417,6 +417,43 @@ impl TerminalEngine {
         self.term.grid().display_offset()
     }
 
+    /// 把视口滚动到指定历史偏移（0 = 底部）。滚动条拖拽用。
+    pub fn set_display_offset(&mut self, offset: usize) {
+        let offset = offset
+            .min(self.term.grid().history_size())
+            .min(i32::MAX as usize);
+        let current = self.term.grid().display_offset() as i32;
+        let target = offset as i32;
+        if target != current {
+            self.term.scroll_display(Scroll::Delta(target - current));
+        }
+    }
+
+    /// 双击选词：返回与 `(row, col)` 同属一个空白分隔词的视口区间（含端点）。
+    /// 点中空白时返回 None。
+    pub fn word_range(&self, row: usize, col: usize) -> Option<((usize, usize), (usize, usize))> {
+        let chars = self.row_chars(row)?;
+        let (start, end) = word_bounds(&chars, col)?;
+        Some(((row, start), (row, end)))
+    }
+
+    /// 三击整行：返回该行从第 0 列到最后一个非空白字符的区间。
+    pub fn line_range(&self, row: usize) -> Option<((usize, usize), (usize, usize))> {
+        let chars = self.row_chars(row)?;
+        let (start, end) = line_bounds(&chars)?;
+        Some(((row, start), (row, end)))
+    }
+
+    /// 视口某行的所有字符（宽字符 spacer 归一为空格）。
+    fn row_chars(&self, row: usize) -> Option<Vec<char>> {
+        if row >= self.rows {
+            return None;
+        }
+        let line = Line(row as i32 - self.display_offset() as i32);
+        let cells = &self.term.grid()[line];
+        Some((0..self.cols).map(|col| cells[Column(col)].c).collect())
+    }
+
     /// 视口坐标 → Grid Cell。行 0 = 屏幕顶部，已考虑 display_offset。
     pub fn cell_at(&self, row: usize, col: usize) -> Option<&Cell> {
         if row >= self.rows || col >= self.cols {
@@ -482,6 +519,34 @@ fn f_key_sequence(n: u8) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// 选词边界（纯函数，便于单测）
+// ---------------------------------------------------------------------------
+
+/// 以空白为分隔符，返回 `col` 所在词的 `[start, end]` 列区间；点中空白返回 None。
+fn word_bounds(chars: &[char], col: usize) -> Option<(usize, usize)> {
+    let is_word = |ch: char| !ch.is_whitespace() && ch != '\0';
+    let clicked = *chars.get(col)?;
+    if !is_word(clicked) {
+        return None;
+    }
+    let mut start = col;
+    while start > 0 && is_word(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = col;
+    while end + 1 < chars.len() && is_word(chars[end + 1]) {
+        end += 1;
+    }
+    Some((start, end))
+}
+
+/// 整行选区：第 0 列到最后一个非空白字符；全空白行返回 None。
+fn line_bounds(chars: &[char]) -> Option<(usize, usize)> {
+    let last = chars.iter().rposition(|ch| !ch.is_whitespace())?;
+    Some((0, last))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -534,6 +599,45 @@ mod tests {
         engine.input_bytes(b"hello\r\n");
         let lines = engine.visible_lines();
         assert_eq!(lines[0], "hello");
+    }
+
+    #[test]
+    fn word_and_line_bounds_cover_clicked_token() {
+        let chars: Vec<char> = "git commit -m msg".chars().collect();
+        assert_eq!(word_bounds(&chars, 0), Some((0, 2)));
+        assert_eq!(word_bounds(&chars, 5), Some((4, 9)));
+        assert_eq!(word_bounds(&chars, 3), None, "空格不算词");
+        assert_eq!(word_bounds(&chars, 999), None, "越界返回 None");
+        assert_eq!(line_bounds(&chars), Some((0, 16)));
+        assert_eq!(line_bounds(&[' ', ' ', ' ']), None, "全空白行不选区");
+    }
+
+    #[test]
+    fn word_and_line_range_from_engine() {
+        let mut engine = TerminalEngine::new(40, 5, 100);
+        engine.input_bytes(b"echo hello world");
+        assert_eq!(engine.word_range(0, 7), Some(((0, 5), (0, 9))));
+        assert_eq!(engine.word_range(0, 0), Some(((0, 0), (0, 3))));
+        assert_eq!(engine.line_range(0), Some(((0, 0), (0, 15))));
+        assert_eq!(engine.line_range(4), None, "全空白行返回 None");
+    }
+
+    #[test]
+    fn set_display_offset_clamps_to_history() {
+        let mut engine = TerminalEngine::new(20, 4, 100);
+        for index in 0..30 {
+            engine.input_bytes(format!("line {index}\r\n").as_bytes());
+        }
+        let history = engine.history_size();
+        assert!(history > 0);
+
+        engine.set_display_offset(3);
+        assert_eq!(engine.display_offset(), 3);
+        engine.set_display_offset(0);
+        assert_eq!(engine.display_offset(), 0);
+        // 超出上限时由 alacritty 夹到最大历史
+        engine.set_display_offset(usize::MAX);
+        assert_eq!(engine.display_offset(), history);
     }
 
     #[test]

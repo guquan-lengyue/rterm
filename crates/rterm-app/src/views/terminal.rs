@@ -181,6 +181,8 @@ pub struct TerminalView {
     /// 选区锚点 / 头部（视口坐标 row, col）
     selection: Option<((usize, usize), (usize, usize))>,
     selecting: bool,
+    /// 鼠标是否正在拖拽滚动条
+    scrollbar_drag: bool,
     blink_on: bool,
 
     attempt_started: Option<Instant>,
@@ -279,6 +281,7 @@ impl TerminalView {
             autofocus_pending: false,
             selection: None,
             selecting: false,
+            scrollbar_drag: false,
             blink_on: true,
             attempt_started: None,
             last_latency_ms: None,
@@ -1027,6 +1030,31 @@ impl TerminalView {
 
         match event.button {
             MouseButton::Left => {
+                // 滚动条拖拽（9.17）：右侧热区命中后直接按 y 定位
+                if self.scrollbar_hit(event.position) {
+                    self.scrollbar_drag = true;
+                    self.selecting = false;
+                    self.drag_scrollbar_to(event.position.y, cx);
+                    return;
+                }
+
+                // 双击选词 / 三击整行（9.17）
+                if event.click_count >= 2 {
+                    if let Some(cell) = self.cell_at_position(event.position, false) {
+                        let range = if event.click_count >= 3 {
+                            self.engine.line_range(cell.0)
+                        } else {
+                            self.engine.word_range(cell.0, cell.1)
+                        };
+                        if let Some((anchor, head)) = range {
+                            self.selection = Some((anchor, head));
+                            self.selecting = false;
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
+
                 if let Some(cell) = self.cell_at_position(event.position, false) {
                     self.selection = Some((cell, cell));
                     self.selecting = true;
@@ -1044,6 +1072,10 @@ impl TerminalView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.scrollbar_drag {
+            self.drag_scrollbar_to(event.position.y, cx);
+            return;
+        }
         if !self.selecting {
             return;
         }
@@ -1061,7 +1093,14 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
-        if event.button != MouseButton::Left || !self.selecting {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        if self.scrollbar_drag {
+            self.scrollbar_drag = false;
+            return;
+        }
+        if !self.selecting {
             return;
         }
         self.selecting = false;
@@ -1145,6 +1184,35 @@ impl TerminalView {
         let col = col.clamp(0.0, self.cols.saturating_sub(1) as f32) as usize;
         let row = row.clamp(0.0, self.rows.saturating_sub(1) as f32) as usize;
         Some((row, col))
+    }
+
+    /// 滚动条热区：右侧 12px、有真实历史时才可拖。
+    fn scrollbar_hit(&self, position: gpui::Point<Pixels>) -> bool {
+        if self.engine.history_size() == 0 {
+            return false;
+        }
+        let metrics = *self.metrics.borrow();
+        let Some(bounds) = metrics.bounds else {
+            return false;
+        };
+        let x = f32::from(position.x) - f32::from(bounds.left());
+        let y = f32::from(position.y) - f32::from(bounds.top());
+        let width = f32::from(bounds.size.width);
+        let height = f32::from(bounds.size.height);
+        x >= width - 12.0 && x <= width && (0.0..=height).contains(&y)
+    }
+
+    /// 按鼠标 y 定位滚动偏移：顶部 = 最大历史偏移，底部 = 0。
+    fn drag_scrollbar_to(&mut self, position_y: Pixels, cx: &mut Context<Self>) {
+        let Some(bounds) = self.metrics.borrow().bounds else {
+            return;
+        };
+        let y = f32::from(position_y) - f32::from(bounds.top());
+        let height = f32::from(bounds.size.height);
+        let offset = offset_from_scrollbar(y, height, self.engine.history_size());
+        self.engine.set_display_offset(offset);
+        self.selection = None;
+        cx.notify();
     }
 
     // -----------------------------------------------------------------------
@@ -1535,7 +1603,7 @@ fn paint_snapshot(
         }
     }
 
-    // 4. 字形
+    // 5. 字形
     let text_system = window.text_system().clone();
     let primary_font = font(SharedString::from(snapshot.font_family.clone()));
     let primary_font_id = snapshot.font_id;
@@ -1577,7 +1645,11 @@ fn paint_snapshot(
             if glyph.is_emoji {
                 let _ = window.paint_emoji(origin, glyph.font_id, glyph.glyph_id, font_size);
             } else {
-                let color: Hsla = cell.fg.into();
+                // 方块光标下反色绘制（用终端背景色），保证任意配色下都清晰可辨
+                let cursor_here = snapshot.cursor_style == CursorStyle::Block
+                    && snapshot.cursor == Some((row, col));
+                let fg = if cursor_here { palette.bg } else { cell.fg };
+                let color: Hsla = fg.into();
                 let _ = window.paint_glyph(origin, glyph.font_id, glyph.glyph_id, font_size, color);
             }
 
@@ -1611,7 +1683,7 @@ fn paint_snapshot(
         }
     }
 
-    // 5. 滚动条（仅当有真实历史时）
+    // 6. 滚动条（仅当有真实历史时）
     let viewport_lines = snapshot.rows;
     let history = snapshot.scroll_history;
     if history > 0 {
@@ -1919,5 +1991,37 @@ fn connect_error_is_retryable(reason: &str) -> bool {
                 || reason.contains("主机地址为空")
                 || reason.contains("known_hosts 校验失败"))
         }
+    }
+}
+
+/// 滚动条 y 坐标 → 历史偏移（顶部 = 最大历史，底部 = 0）。
+///
+/// 与绘制逻辑保持一致：thumb 在顶部时对应最大 `display_offset`。
+fn offset_from_scrollbar(y: f32, height: f32, history: usize) -> usize {
+    if height <= 0.0 || history == 0 {
+        return 0;
+    }
+    let progress = (y / height).clamp(0.0, 1.0);
+    ((1.0 - progress) * history as f32).round() as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollbar_top_maps_to_oldest_history() {
+        assert_eq!(offset_from_scrollbar(0.0, 200.0, 100), 100);
+        assert_eq!(offset_from_scrollbar(100.0, 200.0, 100), 50);
+        assert_eq!(offset_from_scrollbar(200.0, 200.0, 100), 0);
+    }
+
+    #[test]
+    fn scrollbar_out_of_range_is_clamped() {
+        assert_eq!(offset_from_scrollbar(-50.0, 200.0, 100), 100);
+        assert_eq!(offset_from_scrollbar(500.0, 200.0, 100), 0);
+        // 没有历史 / 非法高度时不动
+        assert_eq!(offset_from_scrollbar(10.0, 200.0, 0), 0);
+        assert_eq!(offset_from_scrollbar(10.0, 0.0, 100), 0);
     }
 }
