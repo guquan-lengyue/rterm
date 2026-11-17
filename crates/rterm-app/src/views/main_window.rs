@@ -17,11 +17,16 @@
 //! └─────────────────────────────────────────┘
 //! ```
 
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
 use gpui::prelude::*;
 use gpui::{
     actions, div, px, AnyElement, ClickEvent, Context, Entity, FocusHandle, IntoElement,
     KeyBinding, MouseDownEvent, Render, Window,
 };
+use rterm_sync::SyncBridge;
 use uuid::Uuid;
 
 use crate::event::{AppEvent, EventBusHost};
@@ -29,6 +34,7 @@ use crate::state::{lock_or_recover, AppState, TabInfo, TabKind};
 use crate::ui::theme;
 
 use super::import_export::{ImportExportDialog, IoMode};
+use super::monitor::MonitorView;
 use super::session_dialog::SessionEditDialog;
 use super::session_tree::SessionTreeView;
 use super::settings::SettingsView;
@@ -70,6 +76,7 @@ enum ContextMenuAction {
     EditSession(Uuid),
     OpenTerminal(Uuid),
     OpenSftp(Uuid),
+    OpenMonitor(Uuid),
     DeleteSession(Uuid),
     OpenExportDialog,
     OpenImportDialog,
@@ -85,6 +92,7 @@ enum ContextMenuAction {
 pub enum TabContentView {
     Terminal(Entity<TerminalView>),
     Sftp(Entity<SftpView>),
+    Monitor(Entity<MonitorView>),
 }
 
 impl TabContentView {
@@ -92,6 +100,7 @@ impl TabContentView {
         match self {
             Self::Terminal(view) => view.read(cx).focus_handle(),
             Self::Sftp(view) => view.read(cx).focus_handle(),
+            Self::Monitor(view) => view.read(cx).focus_handle(),
         }
     }
 
@@ -103,6 +112,9 @@ impl TabContentView {
             Self::Sftp(view) => {
                 view.update(cx, |view, cx| view.shutdown(cx));
             }
+            Self::Monitor(view) => {
+                view.update(cx, |view, cx| view.shutdown(cx));
+            }
         }
     }
 
@@ -111,6 +123,7 @@ impl TabContentView {
         match self {
             Self::Terminal(view) => view.read(cx).has_host_key_prompt(),
             Self::Sftp(view) => view.read(cx).has_modal_dialog(),
+            Self::Monitor(view) => view.read(cx).has_modal_dialog(),
         }
     }
 
@@ -118,6 +131,7 @@ impl TabContentView {
         match self {
             Self::Terminal(view) => view.clone().into_any_element(),
             Self::Sftp(view) => view.clone().into_any_element(),
+            Self::Monitor(view) => view.clone().into_any_element(),
         }
     }
 }
@@ -135,6 +149,8 @@ pub struct MainWindow {
     status_bar: Entity<StatusBar>,
     tab_bar: Entity<TabBar>,
     tabs: Vec<TabEntry>,
+    /// 每个终端 Tab 一份路径同步状态机，tab_id → bridge。
+    sync_bridges: HashMap<Uuid, Arc<Mutex<SyncBridge>>>,
     active_tab: usize,
     /// 切换 / 新建 Tab 后，下一帧把焦点交给活动终端
     focus_pending: bool,
@@ -195,6 +211,95 @@ impl MainWindow {
                 AppEvent::ImportExportCloseRequested => {
                     this.close_import_export(cx);
                 }
+                AppEvent::TerminalCwdHint {
+                    tab_id,
+                    session_id,
+                    cwd,
+                    ..
+                } => {
+                    // 终端 → SFTP：同一会话的所有 SFTP Tab 跟随；先登记期望事件，
+                    // 避免 SftpNavigated 反向注入 cd 形成回环。
+                    let sftp_views: Vec<Entity<SftpView>> = this
+                        .tabs
+                        .iter()
+                        .filter(|tab| {
+                            tab.session_id == *session_id && matches!(&tab.kind, TabKind::Sftp)
+                        })
+                        .filter_map(|tab| match &tab.content {
+                            TabContentView::Sftp(view) => Some(view.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if !sftp_views.is_empty() {
+                        if let Some(bridge) = this.sync_bridges.get(tab_id).cloned() {
+                            lock_or_recover(&bridge).expect_sftp_navigation(sftp_views.len());
+                        }
+                        for view in sftp_views {
+                            view.update(cx, |view, cx| view.navigate_to_remote(cwd, cx));
+                        }
+                    }
+                }
+                AppEvent::SftpOpened { tab_id, session_id } => {
+                    // SFTP 连接完成：把远端 home 告诉同会话的终端桥，
+                    // 并把 home 标记为已同步，避免初始化导航反向 cd。
+                    let home = this
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id == *tab_id)
+                        .and_then(|tab| match &tab.content {
+                            TabContentView::Sftp(view) => view.read(cx).remote_home(),
+                            _ => None,
+                        });
+                    if let Some(home) = home {
+                        for tab in this.tabs.iter().filter(|tab| {
+                            tab.session_id == *session_id && matches!(&tab.kind, TabKind::Terminal)
+                        }) {
+                            if let Some(bridge) = this.sync_bridges.get(&tab.id) {
+                                let mut bridge = lock_or_recover(bridge);
+                                bridge.set_remote_home(home.clone());
+                                bridge.mark_sftp_synced(Path::new(&home));
+                            }
+                        }
+                    }
+                }
+                AppEvent::SftpNavigated {
+                    session_id, path, ..
+                } => {
+                    // SFTP → 终端：选择活动终端（否则该会话第一个终端）注入 cd。
+                    let active_id = this.tabs.get(this.active_tab).map(|tab| tab.id);
+                    let target = this
+                        .tabs
+                        .iter()
+                        .find(|tab| {
+                            tab.session_id == *session_id
+                                && matches!(&tab.kind, TabKind::Terminal)
+                                && Some(tab.id) == active_id
+                        })
+                        .or_else(|| {
+                            this.tabs.iter().find(|tab| {
+                                tab.session_id == *session_id
+                                    && matches!(&tab.kind, TabKind::Terminal)
+                            })
+                        })
+                        .and_then(|tab| match &tab.content {
+                            TabContentView::Terminal(view) => Some((tab.id, view.clone())),
+                            _ => None,
+                        });
+
+                    let Some((terminal_tab_id, view)) = target else {
+                        return;
+                    };
+                    let Some(bridge) = this.sync_bridges.get(&terminal_tab_id).cloned() else {
+                        return;
+                    };
+                    let command = {
+                        let mut bridge = lock_or_recover(&bridge);
+                        bridge.on_sftp_navigated(Path::new(path))
+                    };
+                    if let Some(command) = command {
+                        view.update(cx, |view, cx| view.inject_command(&command, cx));
+                    }
+                }
                 _ => {}
             },
         )
@@ -205,6 +310,7 @@ impl MainWindow {
             status_bar,
             tab_bar,
             tabs: Vec::new(),
+            sync_bridges: HashMap::new(),
             active_tab: 0,
             focus_pending: false,
             edit_dialog: None,
@@ -233,6 +339,7 @@ impl MainWindow {
         let view = cx.new(TerminalView::new);
         view.update(cx, |view, cx| view.connect(session_id, cx));
         let id = view.read(cx).tab_id();
+        self.sync_bridges.insert(id, view.read(cx).sync_bridge());
 
         self.tabs.push(TabEntry {
             id,
@@ -274,6 +381,33 @@ impl MainWindow {
         cx.notify();
     }
 
+    fn open_monitor_tab(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let title = {
+            let state = cx.global::<AppState>();
+            let store = lock_or_recover(&state.session_store);
+            store
+                .get(session_id)
+                .map(|session| format!("{} · 监控", session.display_label()))
+                .unwrap_or_else(|| "监控".to_string())
+        };
+
+        let view = cx.new(MonitorView::new);
+        view.update(cx, |view, cx| view.connect(session_id, cx));
+        let id = view.read(cx).tab_id();
+
+        self.tabs.push(TabEntry {
+            id,
+            session_id,
+            title,
+            kind: TabKind::Monitor,
+            content: TabContentView::Monitor(view),
+        });
+        self.active_tab = self.tabs.len() - 1;
+        self.focus_pending = true;
+        self.sync_tab_bar(cx);
+        cx.notify();
+    }
+
     fn activate_tab(&mut self, tab_id: Uuid, cx: &mut Context<Self>) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) {
             self.active_tab = index;
@@ -289,6 +423,7 @@ impl MainWindow {
         };
         let entry = self.tabs.remove(index);
         let session_id = entry.session_id;
+        self.sync_bridges.remove(&tab_id);
         entry.content.close(cx);
 
         if index < self.active_tab {
@@ -318,6 +453,7 @@ impl MainWindow {
         self.active_tab = 0;
         let removed_sessions: Vec<Uuid> = removed.iter().map(|tab| tab.session_id).collect();
         for entry in removed {
+            self.sync_bridges.remove(&entry.id);
             entry.content.close(cx);
         }
         self.focus_pending = true;
@@ -333,6 +469,7 @@ impl MainWindow {
         let removed: Vec<TabEntry> = self.tabs.drain(index + 1..).collect();
         let removed_sessions: Vec<Uuid> = removed.iter().map(|tab| tab.session_id).collect();
         for entry in removed {
+            self.sync_bridges.remove(&entry.id);
             entry.content.close(cx);
         }
         if self.active_tab > index {
@@ -700,10 +837,10 @@ impl Render for MainWindow {
         if let Some(menu_state) = self.context_menu {
             let viewport = window.viewport_size();
             let menu_w = CONTEXT_MENU_W;
-            // 有会话：新建/编辑/终端/SFTP/删除 + 导出/导入/设置 = 8 项；
+            // 有会话：新建/编辑/终端/SFTP/监控/删除 + 导出/导入/设置 = 9 项；
             // 空白处：新建 + 导出/导入/设置 = 4 项。
             let menu_item_count = if menu_state.session_id.is_some() {
-                8
+                9
             } else {
                 4
             };
@@ -763,6 +900,13 @@ impl Render for MainWindow {
                         "📁 打开 SFTP",
                         false,
                         ContextMenuAction::OpenSftp(sid),
+                        cx,
+                    ))
+                    .child(self.render_menu_item(
+                        "rterm-ctx-open-monitor",
+                        "📊 打开监控",
+                        false,
+                        ContextMenuAction::OpenMonitor(sid),
                         cx,
                     ))
                     .child(self.render_menu_item(
@@ -995,6 +1139,7 @@ impl MainWindow {
                         ContextMenuAction::EditSession(sid) => this.edit_session(sid, cx),
                         ContextMenuAction::OpenTerminal(sid) => this.request_terminal(sid, cx),
                         ContextMenuAction::OpenSftp(sid) => this.open_sftp_tab(sid, cx),
+                        ContextMenuAction::OpenMonitor(sid) => this.open_monitor_tab(sid, cx),
                         ContextMenuAction::DeleteSession(sid) => {
                             // 不立即删除：先弹出确认卡片。
                             this.pending_delete = Some(sid);

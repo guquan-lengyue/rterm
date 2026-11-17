@@ -4,6 +4,51 @@
 
 ---
 
+## Sprint 8 — 路径同步
+
+**状态**：✅ COMPLETED | **Commit**：工作区（未提交） | **时间**：2026-11-17
+**前置**：S6（PTY 输出）+ S7（`SftpNavigated`）+ S7.5（异步导航 / 状态栏 / 死事件清理）
+**后续**：S9 远程监控（状态栏与事件模式可复用）
+
+### 交付清单
+
+| 模块 | 内容 |
+|------|------|
+| `rterm-sync` | `SyncBridge`：四模式（Off / 终端→SFTP / SFTP→终端 / 双向）、bash/zsh PS1 解析、ANSI 剥离、跨 chunk tail、去重、`~` + remote home 解析、ignore FIFO(10)、pending SFTP nav 防回环、shell 转义（保留 `~`）、OSC 9 pwd 兜底；13 个单元测试 |
+| `TerminalView` | 每个 Tab 一份 `Arc<Mutex<SyncBridge>>`；`handle_pty_event` 内直接解析并 emit `TerminalCwdHint`；`inject_command` 写 PTY；设置变更即时 `set_mode` |
+| `MainWindow` | `sync_bridges: HashMap<tab_id, Arc<Mutex<SyncBridge>>>`；`TerminalCwdHint` → 同会话 SFTP 跳转（先 `expect_sftp_navigation`）；`SftpNavigated` → 活动/首个同会话终端注入 `cd`；`SftpOpened` → 下发 remote home 并标记已同步 |
+| `SftpView` | 新增 `navigate_to_remote` / `remote_home`，复用现有 `navigate` 与 `SftpNavigated` |
+
+### 验证
+
+| 项 | 结果 |
+|----|------|
+| `cargo test --workspace` | ✅ 104 passed / 0 failed / 1 ignored（`rterm-sync` 13） |
+| `cargo clippy --workspace --all-targets` | ✅ 0 warning |
+| `cargo fmt --all -- --check` | ✅ 通过 |
+| E2E 终端→SFTP | ✅ `cd /var/log` → SFTP 远端自动跳 `/var/log`（54 项） |
+| E2E SFTP→终端 | ✅ 地址栏 `/etc` → 终端 `cd '/etc'`，prompt 变 `/etc` |
+| E2E 防回环 | ✅ 双向注入后无重复命令、prompt 稳定 |
+| E2E Off 模式 | ✅ SFTP 跳 `/etc` 时终端仍在 home；终端 `cd /tmp` 时 SFTP 仍 `/etc` |
+| E2E 即时生效 | ✅ 设置切回「双向同步」保存后无需重启，SFTP 导航 `/var` 立即注入 `cd '/var'` |
+| E2E 持久化 | ✅ `settings.json` 的 `sftp_sync_mode` 在 `off` / `bidirectional` 正确往返 |
+
+### 踩坑 & 修正
+
+- **防回环三层**：ignore FIFO + `pending_sftp_nav` + `mark_sftp_synced`（SFTP 打开时把 home 标记为已同步），否则初始化导航会反向 `cd`。
+- **锁序**：`SyncBridge` 的计算与 emit / 注入分离，先释放锁再调用 GPUI，避免持锁 emit 死锁。
+- **pwd 兜底误判**：拒绝把 `>` 当提示符（防 Python REPL），只认 `$ # % ❯`；命令输出以换行结束时清 `need_pwd`；2 秒节流。
+- **GUI 自动化输入**：Unicode 注入（VK_PACKET）不会被 gpui 终端当作字符，需用扫描码按键；与业务代码无关。
+- **环境限制**：`%APPDATA%\rterm` 对我们启动的进程不可写（sandbox / 作业对象继承），设置保存报 os error 5；经 Explorer 启动应用后保存正常，验证了保存链路。
+
+### 已知限制（转 S10）
+
+- SFTP 顶部「已连接 · 远端路径」标签不随导航刷新（纯展示）。
+- pwd 兜底对自定义 `read -p` 类提示仍有误判可能，已收敛但无法根除。
+- 终端日志 / SFTP 本地文件系统操作仍在 UI 线程（与本 Sprint 无关）。
+
+---
+
 ## Sprint 7.5 — 技术债清偿（S8 前插入）
 
 **状态**：✅ COMPLETED | **Commit**：`e77e480`（P0/P1）+ 工作区（P2/P3） | **时间**：2026-11-16

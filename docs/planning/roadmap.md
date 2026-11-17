@@ -10,8 +10,8 @@
 | **P0 环境 & 骨架** | gpui 空窗口可运行 + 所有 crate 骨架 + MSVC 环境脚本 | ✅ 已完成 | VS Build Tools、perl、bezel-gpui 0.3 |
 | **P1 会话管理** | 会话树 View + SessionStore CRUD + 持久化 JSON + 导入导出 + 全局设置界面 | ✅ 已完成（S2–S4） | serde / uuid / rterm-crypto |
 | **P2 SSH 连接 & 终端** | ssh2 Session 封装 + PTY + alacritty_terminal glue + gpui Canvas 渲染 + 基础主题 | ✅ 已完成（S5 + S6） | ssh2 vendored-openssl / alacritty_terminal |
-| **P3 SFTP 文件管理** | SFTP 双栏浏览 + 传输队列 + 进度条 + 拖拽 | — | ssh2 Sftp / walkdir |
-| **P4 路径同步** | SyncBridge + PS1 正则 + ignore 防回环 + 双向开关 | — | regex |
+| **P3 SFTP 文件管理** | SFTP 双栏浏览 + 传输队列 + 进度条 + 拖拽 | 🚧 核心完成（S7），拖拽/取消 E2E 转 S10 | ssh2 Sftp / walkdir |
+| **P4 路径同步** | SyncBridge + PS1 正则 + ignore 防回环 + 双向开关 | ✅ 已完成（S8） | ssh2 / 手写解析（无 regex 依赖） |
 | **P5 远程性能监控** | MonitorCollector + 折线图 + Top 进程 + 阈值告警 | — | tokio 定时 + Canvas 折线图 |
 | **P6 稳定性收尾** | 主机密钥管理 + 重连策略 + 命令面板 + 快捷键 + 日志导出 + 自动备份 | — | winreg / dirs |
 | **P7 打磨 & v1.0** | 主题扩展 + vi 模式 + 会话日志 + 命令面板完善 + OpenSSH config 导入 + 安装包 | — | — |
@@ -126,8 +126,8 @@
 - [x] `input_key()`：TerminalKey → xterm 字节序列
 - [x] `resize()`：Term 同步
 - [x] `TerminalKey` enum 映射（gpui KeyDown → xterm 序列）
-- [ ] PS1 解析正则集合（bash / zsh / generic）→ S8
-- [ ] 终端输入回显抑制（SyncBridge 注入 cd 时）→ S8
+- [x] PS1 解析（bash / zsh / generic + ANSI 剥离 + pwd 兜底）→ S8
+- [ ] 终端输入回显抑制（SyncBridge 注入 cd 时）→ S8 未做，注入命令仍可见，S10 评估
 
 #### 2.4 Terminal View（gpui Canvas 渲染）✅（S6）
 - [x] S5 文本 placeholder（实时显示 PTY 输出）
@@ -184,7 +184,9 @@
 
 ---
 
-## Phase 4 — 路径同步
+## Phase 4 — 路径同步（✅ 完成，2026-11-17）
+
+> 交付记录见 [CHANGELOG.md](./CHANGELOG.md) Sprint 8；验收记录见 [sprint-08-sync.md](./sprint-08-sync.md)。
 
 ### 前置条件
 - [x] P2（Terminal 输出字节流 + PS1 解析）
@@ -194,19 +196,19 @@
 ### 任务清单
 
 #### 4.1 rterm-sync SyncBridge
-- [ ] `SyncBridge::on_terminal_output(bytes) → Option<PathBuf>`
-- [ ] 3 套 PS1 正则模板（bash default `w@h:p$`、zsh `w@h p $`、generic 带颜色控制码）
-- [ ] 兜底 pwd 触发：正则匹配失败 → 后台注入 `pwd 2>/dev/null` → 1s 超时忽略
-- [ ] `SyncBridge::on_sftp_navigated(path) → Option<InjectCommand>`
-- [ ] ignore_list（VecDeque, max 10）：防止 SFTP→Terminal 注入的 cd 又被反同步
-- [ ] 方向开关（off / term→sftp / sftp→term / bidirectional）
-- [ ] per-session 可覆盖默认方向
+- [x] `SyncBridge::on_terminal_output(bytes) → Option<DetectedCwd>`
+- [x] 3 套 PS1 解析（bash `w@h:p$`、zsh `w@h p %`、ANSI 剥离 + 跨 chunk）
+- [x] 兜底 pwd 触发：正则匹配失败 → 注入 OSC 9 标记的 pwd 探测 → 2s 节流忽略
+- [x] `SyncBridge::on_sftp_navigated(path) → Option<String>`（注入 `cd`）
+- [x] ignore_list（VecDeque, max 10）+ pending SFTP nav + 初始 home 标记：防止双向回环
+- [x] 方向开关（off / term→sftp / sftp→term / bidirectional），设置变更即时生效
+- [ ] per-session 可覆盖默认方向（未做，全局设置已满足当前需求，转 S10 评估）
 
 #### 4.2 集成到 Terminal + SFTP
-- [ ] TerminalView 每次 PTY 字节流喂 Term 后 → SyncBridge.on_terminal_output
-- [ ] SFTP View 每次导航（双击 / 面包屑 / 右键 cd）→ 广播 UserRequestedCwd
-- [ ] SyncBridge.on_sftp_navigated → 组装注入命令 → TerminalService 注入 PTY
-- [ ] 回显抑制：注入命令前加 escape，Term 侧识别为内部命令不显示给用户
+- [x] TerminalView 每次 PTY 字节流喂 Term 后 → SyncBridge.on_terminal_output
+- [x] SFTP View 每次导航（双击 / 面包屑 / 地址栏）→ `SftpNavigated`
+- [x] SyncBridge.on_sftp_navigated → 组装注入命令 → TerminalView.inject_command（shell 转义）
+- [ ] 回显抑制：注入命令仍会在终端显示，S10 评估（需 Term 侧识别内部命令）
 
 ---
 
@@ -287,7 +289,7 @@
 - [x] 会话：增删改查 + 持久化 + DPAPI 加密 + 导入导出 + OpenSSH config
 - [x] 终端：xterm-256color + 主题 + 滚动缓冲 + 复制粘贴 + 快捷键
 - [ ] SFTP：双栏浏览 + 批量传输 + 进度已就绪；拖拽/暂停取消 E2E/大目录虚拟化待 S10
-- [ ] 路径同步：PS1 + pwd 兜底 + 双向 + ignore 防回环（S8）
+- [ ] 路径同步：PS1 + pwd 兜底 + 双向 + ignore 防回环（S8 已完成，真实 GUI E2E 通过；回显抑制留 S10 评估）
 - [ ] 监控：CPU / MEM / NET / DISK / Load + 折线图 + Kill（S9）
 - [ ] 稳定性：重连 + known_hosts 已完成；命令面板/自动备份/日志/诊断包待 S10
 - [x] 工程门禁：`cargo fmt --check` / `cargo clippy --all-targets` 0 warning / `cargo test --workspace`

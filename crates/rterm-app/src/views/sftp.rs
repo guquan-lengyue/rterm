@@ -459,6 +459,16 @@ impl SftpView {
     // 导航
     // -----------------------------------------------------------------------
 
+    /// 远端 home：MainWindow 用它把终端的 `~` 解析成绝对路径。
+    pub fn remote_home(&self) -> Option<String> {
+        self.remote_home.clone()
+    }
+
+    /// 路径同步入口：MainWindow 收到 TerminalCwdHint 后调用。
+    pub fn navigate_to_remote(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.navigate(PaneSide::Remote, path.to_string(), cx);
+    }
+
     fn navigate(&mut self, side: PaneSide, raw_path: String, cx: &mut Context<Self>) {
         if side.is_remote() {
             let Some(service) = self.service.clone() else {

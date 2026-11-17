@@ -1,6 +1,6 @@
 # Sprint 9 — 远程性能监控
 
-> **状态**：待开始（S7.5 ✅ 已完成；可与 S8 并行）
+> **状态**：待开始（S7.5 ✅、S8 ✅ 已完成；可直接开始）
 > **前置**：[Sprint 5](./sprint-05-ssh-terminal.md)（SSH exec 能力；Perl ✅ 已完成）+ [Sprint 4](./sprint-04-settings-io.md)（监控间隔与阈值已持久化）+ [Sprint 7.5](./sprint-07.5-tech-debt.md)（线程/事件门禁 ✅）
 > **目标**：MonitorCollector + tokio interval 采集 + gpui Canvas 折线图 + Top 进程 + Kill
 >

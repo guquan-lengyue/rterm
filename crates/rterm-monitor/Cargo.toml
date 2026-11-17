@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-tokio.workspace = true
 anyhow.workspace = true
+futures.workspace = true
 log.workspace = true
+ssh2.workspace = true
+rterm-ssh.workspace = true

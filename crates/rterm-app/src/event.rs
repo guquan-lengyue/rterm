@@ -106,20 +106,10 @@ pub enum AppEvent {
         tab_id: Uuid,
     },
 
-    // ---- 监控（S8/S9 消费方：S9 监控 Tab 接入后订阅，当前预留） ----
+    // ---- 监控（S9：采样数据由 MonitorView 本地消费，不走全局事件） ----
     MonitorOpened {
         tab_id: Uuid,
         session_id: Uuid,
-    },
-    MonitorSample {
-        session_id: Uuid,
-        data: String,
-    },
-    MonitorAlert {
-        session_id: Uuid,
-        metric: String,
-        value: f64,
-        threshold: f64,
     },
     MonitorClosed {
         tab_id: Uuid,

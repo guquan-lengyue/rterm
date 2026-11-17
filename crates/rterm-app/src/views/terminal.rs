@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::index::{Column, Line};
@@ -34,6 +35,7 @@ use uuid::Uuid;
 use rterm_ssh::pty::{self, PtyCommand, PtyEvent};
 use rterm_ssh::reconnect::ReconnectPolicy;
 use rterm_ssh::{HostKeyChoice, HostKeyDecision, HostKeyInfo, SshSession};
+use rterm_sync::{SyncBridge, SyncMode};
 use rterm_terminal::{TerminalEngine, TerminalKey};
 
 use crate::event::{AppEvent, EventBusHost};
@@ -183,11 +185,13 @@ pub struct TerminalView {
     last_latency_ms: Option<u64>,
     /// 未知 / 变更主机密钥三选一弹窗（打开期间暂停连接）。
     host_key_prompt: Option<HostKeyPromptState>,
+    /// 该终端 Tab 独占的路径同步状态机；MainWindow 通过 clone 读取同一实例。
+    sync_bridge: Arc<Mutex<SyncBridge>>,
 }
 
 impl TerminalView {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let (cols, rows, scrollback, font_family, font_size, cursor_style, theme_name) = {
+        let (cols, rows, scrollback, font_family, font_size, cursor_style, theme_name, sync_mode) = {
             let state = cx.global::<AppState>();
             let settings = &state.settings;
             (
@@ -198,6 +202,7 @@ impl TerminalView {
                 settings.default_font_size,
                 settings.terminal_cursor_style.clone(),
                 state.theme.name().to_string(),
+                SyncMode::from_setting(&settings.sftp_sync_mode),
             )
         };
 
@@ -272,11 +277,17 @@ impl TerminalView {
             attempt_started: None,
             last_latency_ms: None,
             host_key_prompt: None,
+            sync_bridge: Arc::new(Mutex::new(SyncBridge::new(sync_mode))),
         }
     }
 
     pub fn tab_id(&self) -> Uuid {
         self.tab_id
+    }
+
+    /// MainWindow 用同一份 SyncBridge 处理 SFTP 导航事件。
+    pub fn sync_bridge(&self) -> Arc<Mutex<SyncBridge>> {
+        self.sync_bridge.clone()
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -293,14 +304,16 @@ impl TerminalView {
     }
 
     fn apply_settings(&mut self, cx: &mut Context<Self>) {
-        let (font_family, font_size, cursor_style) = {
+        let (font_family, font_size, cursor_style, sync_mode) = {
             let settings = &cx.global::<AppState>().settings;
             (
                 settings.default_font_family.clone(),
                 settings.default_font_size,
                 settings.terminal_cursor_style.clone(),
+                SyncMode::from_setting(&settings.sftp_sync_mode),
             )
         };
+        lock_or_recover(&self.sync_bridge).set_mode(sync_mode);
 
         if self.font_family != font_family || (self.font_size - font_size).abs() > f32::EPSILON {
             self.font_family = font_family;
@@ -481,6 +494,43 @@ impl TerminalView {
                 self.engine.input_bytes(&bytes);
                 // DSR / DA 等查询会通过 Event::PtyWrite 产生应答，写回 PTY
                 self.drain_engine_responses();
+
+                // 路径同步：只在 PS1 中识别到新 cwd 时才发低频事件。
+                // 先释放 bridge 锁再 emit/写 PTY，避免重入死锁。
+                let (detected, pwd_probe) = {
+                    let mut bridge = lock_or_recover(&self.sync_bridge);
+                    let detected = bridge.on_terminal_output(&bytes);
+                    let probe = if detected.is_none() {
+                        bridge.take_pwd_probe()
+                    } else {
+                        None
+                    };
+                    (detected, probe)
+                };
+                if let Some(probe) = pwd_probe {
+                    // 兜底探测只在 PS1 无法识别时触发；命令自带 `\r`。
+                    self.send_bytes(probe.as_bytes().to_vec());
+                }
+                if let Some(detected) = detected {
+                    if let Some(session_id) = self.session_id {
+                        let source = match detected.source {
+                            rterm_sync::CwdSource::Ps1 => crate::event::CwdSource::Ps1,
+                            rterm_sync::CwdSource::PwdFallback => {
+                                crate::event::CwdSource::PwdFallback
+                            }
+                            rterm_sync::CwdSource::SftpNav => crate::event::CwdSource::SftpNav,
+                        };
+                        self.emit(
+                            cx,
+                            AppEvent::TerminalCwdHint {
+                                tab_id: self.tab_id,
+                                session_id,
+                                cwd: detected.path.to_string_lossy().into_owned(),
+                                source,
+                            },
+                        );
+                    }
+                }
                 cx.notify();
             }
             PtyEvent::Closed { reason } => {
@@ -660,6 +710,17 @@ impl TerminalView {
         if let Some(tx) = &self.input_tx {
             let _ = tx.send(PtyCommand::Write(bytes));
         }
+    }
+
+    /// 路径同步：向终端注入一条命令（不经过键盘事件）。
+    pub fn inject_command(&mut self, command: &str, cx: &mut Context<Self>) {
+        if !matches!(self.status, TerminalStatus::Connected) {
+            return;
+        }
+        let mut bytes = command.as_bytes().to_vec();
+        bytes.push(b'\r');
+        self.send_bytes(bytes);
+        cx.notify();
     }
 
     /// 把终端内部应答（DSR / DA 等 PtyWrite）写回 PTY。

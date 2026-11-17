@@ -1,7 +1,7 @@
 # Sprint 10 — 稳定性收尾
 
-> **状态**：待开始（S7.5 ✅ 已完成；前置 S8 + S9）
-> **前置**：[Sprint 6](./sprint-06-terminal-render.md) ✅ + [Sprint 7](./sprint-07-sftp.md) + [Sprint 7.5](./sprint-07.5-tech-debt.md) + [Sprint 8](./sprint-08-sync.md) + [Sprint 9](./sprint-09-monitor.md) 全部（Perl ✅ 已完成）
+> **状态**：待开始（S7.5 ✅、S8 ✅ 已完成；等 S9）
+> **前置**：[Sprint 6](./sprint-06-terminal-render.md) ✅ + [Sprint 7](./sprint-07-sftp.md) + [Sprint 7.5](./sprint-07.5-tech-debt.md) ✅ + [Sprint 8](./sprint-08-sync.md) ✅ + [Sprint 9](./sprint-09-monitor.md)（Perl ✅ 已完成）
 > **目标**：known_hosts 回归 + 错误映射 + 命令面板 + 全局快捷键 + 日志 + 备份 + 全量 smoke test
 >
 > **S3/S4 遗留（本 Sprint 收口）**：
@@ -33,6 +33,11 @@
 > - mkdir / rename / delete / chmod 逐项 E2E → 9.12.1
 > - 文件列表虚拟化（大目录）→ 9.18
 > - SFTP 本地文件系统操作仍在 UI 线程（远端已后台化）→ 9.18 评估
+>
+> **S8 遗留（本 Sprint 收口）**：
+> - SFTP 顶部「已连接 · 远端路径」标签不随导航刷新 → 9.20
+> - SyncBridge 注入的 `cd` 命令仍会在终端回显 → 9.21
+> - pwd 兜底对自定义提示符（`read -p` 等）仍有误判可能，已用 `$ # % ❯` 白名单收敛 → 记录为已知限制，不新增任务
 
 ---
 
@@ -61,6 +66,8 @@
 | 9.17 | 0.5h | `crates/rterm-app/src/views/terminal.rs` | 终端交互打磨（S6 遗留）：方块光标改用反色/半透明提升对比度；滚动条支持鼠标拖拽；双击选中单词 / 三击选中整行 | 光标在任意配色下可辨认；滚动条可拖；双击选词 |
 | 9.18 | 1h | `crates/rterm-app/src/views/sftp.rs` | SFTP 交互补全（S7 遗留）：Pane 间拖拽上传/下载；暂停/继续/取消 GUI E2E；空白区右键菜单；列表虚拟化（大目录不卡）；评估本地 fs 操作后台化 | 拖拽可传输；暂停后进度停止；1000 项目录滚动流畅 |
 | 9.19 | 0.5h | `crates/rterm-ssh/src/pty.rs` | PTY 空闲唤醒：用 socket readiness / 可中断等待替代最长 50ms 轮询，恢复首键低延迟 | 空闲 1 分钟后按键回显 ≤ 当前活跃路径 + 10ms |
+| 9.20 | 0.25h | `crates/rterm-app/src/views/sftp.rs` | SFTP 顶部状态标签随 `SftpNavigated` 刷新远端路径（当前停留在打开时的 home） | 任意导航后标签与地址栏一致 |
+| 9.21 | 0.5h | `crates/rterm-app/src/views/terminal.rs` + `rterm-sync` | 评估注入命令回显抑制：标记内部命令，输入行不上屏（或短暂高亮/淡出），不影响真实用户输入 | 双向同步时不出现可见的 `cd '/path'` 行 |
 
 ### 9.12 全量 Smoke Test
 

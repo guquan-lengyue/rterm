@@ -1,9 +1,15 @@
 # Sprint 8 — 路径同步
 
-> **状态**：⏳ **下一个**（S7.5 技术债清偿已完成）
+> **状态**：✅ **已完成**（2026-11-17：7.1 核心 + 7.2 集成 + 7.3 真实 GUI E2E 全部通过）
 > **前置**：[Sprint 6](./sprint-06-terminal-render.md)（Terminal PTY 输出 ✅）+ [Sprint 7](./sprint-07-sftp.md)（SFTP 导航；Perl ✅ 已完成）+ **[Sprint 7.5](./sprint-07.5-tech-debt.md)（技术债清偿；强制前置）** + [Sprint 4](./sprint-04-settings-io.md)（`Settings.sftp_sync_mode` 已持久化）
 > **目标**：SyncBridge + PS1 正则 + ignore 防回环
 > **定位**：rterm 独有杀手功能
+>
+> **当前实现（2026-11-17）**：
+> - `SyncBridge`：四模式、bash/zsh/ANSI PS1 解析、跨 chunk、去重、`~` + remote home 解析、ignore FIFO(10)、pending SFTP nav 防回环、shell 转义（保留 `~`）、OSC 9 pwd 兜底
+> - 集成：每个终端 Tab 一份 `Arc<Mutex<SyncBridge>>`；`TerminalView` 在 `handle_pty_event` 直接解析并 emit `TerminalCwdHint`；MainWindow 路由到同会话 SFTP / 终端；设置变更即时切换模式
+> - 测试：`rterm-sync` 13 个单元测试；workspace 共 104 passed / 1 ignored；clippy 0 warning、fmt 通过
+> - E2E：2026-11-17 真实 GUI 全量通过（见 7.3 验收记录）
 >
 > **S7.5 完成后的现状（已交接）**：
 > - SFTP 导航已改为后台异步执行，但 `SftpNavigated` 仍在“列表加载成功后 emit”，语义与顺序不变；S8 不感知线程模型
@@ -48,3 +54,24 @@
 | # | 粒度 | 验收 |
 |---|------|------|
 | 7.3.1 | 0.25h | Bidirectional 模式：`cd /var/log && pwd` → SFTP 跳 /var/log；SFTP 手动导航 /etc → 终端 prompt 变；**不**无限循环；在设置 → SFTP Tab 切 Off 模式 → 完全独立 |
+
+> **交付状态**：7.1.1–7.1.6、7.2.1–7.2.2、7.3.1 全部完成。
+
+### 7.3 验收记录（2026-11-17，真实 GUI / SSH 192.168.1.95）
+
+| 场景 | 操作 | 结果 |
+|------|------|------|
+| 终端 → SFTP | 终端 `cd /var/log` | SFTP 远端自动跳 `/var/log`，列表 54 项 ✅ |
+| SFTP → 终端 | SFTP 地址栏输入 `/etc` | 终端出现 `cd '/etc'`，prompt 变 `/etc` ✅ |
+| 防回环 | 双向注入后继续操作 | 无重复注入、prompt 稳定 ✅ |
+| Off 模式 | 设置切「关闭」并保存 | SFTP 跳 `/etc` 时终端仍为 `/home/ubuntu`；终端 `cd /tmp` 时 SFTP 仍停在 `/etc` ✅ |
+| 即时生效 | 不重启应用，切回「双向同步」并保存 | SFTP 导航 `/var` → 终端立即 `cd '/var'` ✅ |
+| 持久化 | 保存后读取 settings.json | `sftp_sync_mode` 在 `off` / `bidirectional` 间正确往返 ✅ |
+| 初始化 | 打开 SFTP（远端 home） | 不反向注入 `cd`，终端 prompt 保持原状 ✅ |
+
+自动化门禁：`cargo fmt --check` 通过、`cargo clippy --workspace --all-targets` 0 warning、`cargo test --workspace` 104 passed / 1 ignored（其中 `rterm-sync` 13 个）。
+
+已知限制（移至 S10 打磨，不阻塞 S8）：
+- SFTP 顶部「已连接 · 远端路径」标签停留在打开时的 home，不随导航刷新（纯展示）。
+- pwd 兜底仅在 PS1 无法识别时启用，2 秒节流；对 `read -p` 等自定义提示可能误判，已通过 `$ # % ❯` 白名单收敛。
+- Windows 下 GUI 自动化工具用 Unicode 注入时终端收不到字符（gpui 对 VK_PACKET 的处理），需用扫描码按键；与业务代码无关。
