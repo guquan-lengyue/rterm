@@ -1076,7 +1076,8 @@ impl Render for ImportExportDialog {
                             .flex_col()
                             .overflow_y_scroll()
                             .track_scroll(&self.body_scroll)
-                            .child(body),
+                            // 子项保持自然高度，内容超出时滚动距离 > 0
+                            .child(div().w_full().flex_shrink_0().child(body)),
                     )
                     .child(footer),
             )

@@ -552,7 +552,13 @@ impl Render for SessionEditDialog {
                             .min_h(px(0.))
                             .overflow_y_scroll()
                             .track_scroll(&self.form_scroll)
-                            .child(self.render_tab_content(cx)),
+                            // 子项保持自然高度，内容超出时滚动距离 > 0
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex_shrink_0()
+                                    .child(self.render_tab_content(cx)),
+                            ),
                     )
                     .child(
                         // 底部按钮栏：左侧 测试连接 + 状态，右侧 取消/保存

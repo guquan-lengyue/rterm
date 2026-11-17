@@ -1223,7 +1223,8 @@ impl Render for SettingsView {
                                     .flex_col()
                                     .overflow_y_scroll()
                                     .track_scroll(&self.form_scroll)
-                                    .child(content),
+                                    // 子项不允许被压缩，否则内容高度=视口高度，滚动距离为 0
+                                    .child(div().w_full().flex_shrink_0().child(content)),
                             ),
                     )
                     .child(footer),
