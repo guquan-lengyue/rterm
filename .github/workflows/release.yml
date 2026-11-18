@@ -1,0 +1,154 @@
+name: Release
+
+# 打 tag（v*）时编译并发布 Release；手动触发只构建产物，不创建 Release。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      # gpui 在 Linux 上需要 X11 / Wayland 后端与 xkbcommon；freetype 用于字体渲染。
+      # ssh2 开启了 vendored-openssl，因此需要 perl / make / C 工具链。
+      - name: 安装 Linux 构建依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config perl \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libx11-dev libxcb1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: 编译 Release
+        run: cargo build --release --locked --target ${{ matrix.target }} -p rterm-app
+
+      - name: 解析版本号
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: 打包（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path "target/${{ matrix.target }}/release/rterm-app.exe", "README.md" -DestinationPath "dist/rterm-$env:VERSION-windows-x86_64.zip"
+
+      - name: 打包（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          tar -czf "dist/rterm-$VERSION-linux-x86_64.tar.gz" \
+            -C "target/${{ matrix.target }}/release" rterm-app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rterm-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # macOS 端先尝试构建；失败不阻塞 Windows / Linux 的 Release。
+  macos:
+    name: build (macos-aarch64)
+    runs-on: macos-14
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-apple-darwin
+
+      - name: 编译 Release
+        run: cargo build --release --locked --target aarch64-apple-darwin -p rterm-app
+
+      - name: 解析版本号
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: 打包（macOS）
+        run: |
+          mkdir -p dist
+          zip -j "dist/rterm-$VERSION-macos-aarch64.zip" \
+            "target/aarch64-apple-darwin/release/rterm-app" README.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rterm-macos-aarch64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: 发布 GitHub Release
+    needs: [build, macos]
+    # macOS 允许失败（continue-on-error），但 Windows / Linux 必须成功。
+    if: always() && github.ref_type == 'tag' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: rterm-*
+          merge-multiple: true
+
+      - name: 列出待发布产物
+        run: ls -lh dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: false
