@@ -1010,8 +1010,11 @@ impl SftpView {
         row: Option<usize>,
         x: f32,
         y: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 把焦点收到 SFTP 视图，Esc 才能冒泡到 handle_key 关闭菜单
+        window.focus(&self.focus_handle, cx);
         self.active_side = side;
         if let Some(index) = row {
             self.pane_mut(side).selected = Some(index);
@@ -1942,13 +1945,14 @@ impl SftpView {
                     // 空白区右键菜单（9.18）：新建目录 / 刷新
                     .on_mouse_down(
                         MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, _w, cx| {
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             let local = this.to_local(event.position);
                             this.open_menu(
                                 side,
                                 None,
                                 f32::from(local.x).max(0.),
                                 f32::from(local.y).max(0.),
+                                window,
                                 cx,
                             );
                         }),
@@ -2096,7 +2100,7 @@ impl SftpView {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     let local = this.to_local(ev.position);
                     this.open_menu(
@@ -2104,6 +2108,7 @@ impl SftpView {
                         Some(index),
                         f32::from(local.x).max(0.),
                         f32::from(local.y).max(0.),
+                        window,
                         cx,
                     );
                 }),
