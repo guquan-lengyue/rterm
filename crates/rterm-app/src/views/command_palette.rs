@@ -66,6 +66,14 @@ impl PaletteState {
         scored.into_iter().map(|(_, item)| item).collect()
     }
 
+    /// 同步查询串（TextInput 内容变化时调用），并复位选择。
+    pub fn set_query(&mut self, query: String) {
+        if self.query != query {
+            self.query = query;
+            self.selected = 0;
+        }
+    }
+
     /// 追加一个字符（输入框内容变化后调用）。
     pub fn type_char(&mut self, ch: char) {
         self.query.push(ch);

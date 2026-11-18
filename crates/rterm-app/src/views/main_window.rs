@@ -44,6 +44,7 @@ use super::sftp::SftpView;
 use super::status_bar::StatusBar;
 use super::tab_bar::TabBar;
 use super::terminal_tab::TerminalTabView;
+use super::text_input::{TextInput, TextInputEvent};
 use super::{CONTEXT_MENU_ITEM_H, CONTEXT_MENU_W, MENU_PADDING_Y, SIDEBAR_W, TOOLBAR_H};
 
 // ---------------------------------------------------------------------------
@@ -182,6 +183,10 @@ pub struct MainWindow {
     active_tab: usize,
     /// 切换 / 新建 Tab 后，下一帧把焦点交给活动终端
     focus_pending: bool,
+    /// 主窗口根节点焦点：右键菜单 / 删除确认打开时承接 Esc
+    root_focus: FocusHandle,
+    root_focus_pending: bool,
+    overlay_focus_active: bool,
     pub edit_dialog: Option<Entity<SessionEditDialog>>,
     settings_dialog: Option<Entity<SettingsView>>,
     import_export_dialog: Option<Entity<ImportExportDialog>>,
@@ -192,9 +197,10 @@ pub struct MainWindow {
     startup_error: Option<String>,
     /// Ctrl+P 命令面板（打开期间独占键盘焦点）。
     palette: Option<PaletteState>,
-    palette_focus: FocusHandle,
     /// 命令面板结果列表的滚动状态（选中项自动滚入视野）
     palette_scroll: ScrollHandle,
+    /// 命令面板查询框（TextInput：支持 IME 与光标编辑）
+    palette_input: Option<Entity<TextInput>>,
     /// 文件夹右键菜单打开时记录分组路径，供「新建会话」预填
     pending_new_folder: Option<String>,
 }
@@ -203,7 +209,7 @@ impl MainWindow {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let session_tree = cx.new(SessionTreeView::new);
         let status_bar = cx.new(StatusBar::new);
-        let tab_bar = cx.new(|_cx| TabBar::new());
+        let tab_bar = cx.new(TabBar::new);
 
         let host = cx.global::<AppState>().event_bus_host.clone();
         let startup_error = cx.global::<AppState>().startup_error.clone();
@@ -241,6 +247,8 @@ impl MainWindow {
                         x: *x,
                         y: *y,
                     });
+                    this.root_focus_pending = true;
+                    this.overlay_focus_active = true;
                     cx.notify();
                 }
                 AppEvent::SettingsCloseRequested { saved } => {
@@ -356,6 +364,9 @@ impl MainWindow {
             sync_bridges: HashMap::new(),
             active_tab: 0,
             focus_pending: false,
+            root_focus: cx.focus_handle(),
+            root_focus_pending: false,
+            overlay_focus_active: false,
             edit_dialog: None,
             settings_dialog: None,
             import_export_dialog: None,
@@ -363,8 +374,8 @@ impl MainWindow {
             pending_delete: None,
             startup_error,
             palette: None,
-            palette_focus: cx.focus_handle(),
             palette_scroll: ScrollHandle::new(),
+            palette_input: None,
             pending_new_folder: None,
         }
     }
@@ -793,12 +804,27 @@ impl MainWindow {
 
         self.palette = Some(PaletteState::new(items));
         self.context_menu = None;
-        window.focus(&self.palette_focus, cx);
+
+        // 查询框用 TextInput：支持中文 IME 与光标编辑
+        let input = cx.new(|cx| TextInput::new(cx).with_placeholder("输入以搜索会话或命令…"));
+        cx.subscribe(
+            &input,
+            |this: &mut Self, input: Entity<TextInput>, _ev: &TextInputEvent, cx| {
+                if let Some(palette) = this.palette.as_mut() {
+                    palette.set_query(input.read(cx).content.to_string());
+                }
+                cx.notify();
+            },
+        )
+        .detach();
+        self.palette_input = Some(input.clone());
+        window.focus(&input.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
     fn close_command_palette(&mut self, cx: &mut Context<Self>) {
         if self.palette.take().is_some() {
+            self.palette_input = None;
             self.focus_pending = true;
             cx.notify();
         }
@@ -848,37 +874,7 @@ impl MainWindow {
         }
     }
 
-    /// 面板内文本输入：只处理可打印字符与退格（ASCII 足够检索会话名）。
-    fn palette_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(palette) = self.palette.as_mut() else {
-            return;
-        };
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.control || keystroke.modifiers.platform || keystroke.modifiers.alt {
-            return;
-        }
-        if keystroke.key == "backspace" {
-            palette.backspace();
-            cx.notify();
-            return;
-        }
-        if keystroke.key == "space" {
-            palette.type_char(' ');
-            cx.notify();
-            return;
-        }
-        if let Some(text) = keystroke.key_char.as_ref() {
-            for ch in text.chars() {
-                palette.type_char(ch);
-            }
-            cx.notify();
-        }
-    }
+    /// 面板内文本输入由 TextInput 实体负责（含 IME）；这里只保留导航动作。
 
     fn render_command_palette(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
@@ -950,10 +946,25 @@ impl MainWindow {
         // 选中项始终保持在可视区内（↑/↓ 移动超出视口时自动滚动）
         self.palette_scroll.scroll_to_item(palette.selected);
 
-        let (query_text, query_color) = if palette.query.is_empty() {
-            ("输入以搜索会话或命令…".to_string(), t.text_placeholder())
-        } else {
-            (palette.query.clone(), t.text_on_card_bg())
+        let query_row: AnyElement = match &self.palette_input {
+            Some(input) => div()
+                .w_full()
+                .px_2()
+                .py_1()
+                .border_b_1()
+                .border_color(t.border_subtle())
+                .child(input.clone())
+                .into_any_element(),
+            None => div()
+                .w_full()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(t.border_subtle())
+                .text_size(px(13.))
+                .text_color(t.text_placeholder())
+                .child("输入以搜索会话或命令…")
+                .into_any_element(),
         };
 
         div()
@@ -964,8 +975,6 @@ impl MainWindow {
             .justify_center()
             .pt(px(80.))
             .key_context("CommandPalette")
-            .track_focus(&self.palette_focus)
-            .on_key_down(cx.listener(Self::palette_key_down))
             .on_action(cx.listener(|this, _: &PaletteUp, _window, cx| this.palette_move(-1, cx)))
             .on_action(cx.listener(|this, _: &PaletteDown, _window, cx| this.palette_move(1, cx)))
             .on_action(
@@ -985,17 +994,7 @@ impl MainWindow {
                     .rounded_lg()
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .w_full()
-                            .px_3()
-                            .py_2()
-                            .border_b_1()
-                            .border_color(t.border_subtle())
-                            .text_size(px(13.))
-                            .text_color(query_color)
-                            .child(query_text),
-                    )
+                    .child(query_row)
                     .child(list),
             )
             .into_any_element()
@@ -1148,11 +1147,44 @@ impl Render for MainWindow {
             self.focus_pending = false;
         }
 
+        // 菜单 / 删除确认打开时把焦点交给根节点，Esc 才能生效
+        if self.root_focus_pending {
+            window.focus(&self.root_focus, cx);
+            self.root_focus_pending = false;
+        }
+        // 菜单 / 确认框已关闭：焦点还给终端
+        if self.overlay_focus_active && self.context_menu.is_none() && self.pending_delete.is_none()
+        {
+            self.overlay_focus_active = false;
+            self.focus_pending = true;
+        }
+
         let settings_hover = t.secondary_btn_hover();
         let mut root = div()
             .size_full()
             .bg(t.app_bg())
             .relative()
+            .track_focus(&self.root_focus)
+            .on_key_down(
+                cx.listener(|this: &mut Self, event: &KeyDownEvent, _w, cx| {
+                    if event.keystroke.key != "escape" {
+                        return;
+                    }
+                    let mut closed = false;
+                    if this.pending_delete.is_some() {
+                        this.pending_delete = None;
+                        closed = true;
+                    } else if this.context_menu.is_some() {
+                        this.context_menu = None;
+                        closed = true;
+                    }
+                    if closed {
+                        this.overlay_focus_active = false;
+                        this.focus_pending = true;
+                        cx.notify();
+                    }
+                }),
+            )
             .flex()
             .flex_col()
             // Toolbar
@@ -1608,6 +1640,8 @@ impl MainWindow {
                         ContextMenuAction::DeleteSession(sid) => {
                             // 不立即删除：先弹出确认卡片。
                             this.pending_delete = Some(sid);
+                            this.root_focus_pending = true;
+                            this.overlay_focus_active = true;
                         }
                         ContextMenuAction::OpenExportDialog => this.open_import_export(true, cx),
                         ContextMenuAction::OpenImportDialog => this.open_import_export(false, cx),

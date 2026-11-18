@@ -34,16 +34,19 @@ pub struct TabBar {
     /// Tab 过多时的横向滚动；活动 Tab 会自动滚入视野
     scroll: ScrollHandle,
     last_active: Option<usize>,
+    /// 菜单打开时承接 Esc 的焦点
+    focus_handle: gpui::FocusHandle,
 }
 
 impl TabBar {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             tabs: Vec::new(),
             active: 0,
             menu: None,
             scroll: ScrollHandle::new(),
             last_active: None,
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -115,8 +118,10 @@ impl TabBar {
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                     let x = (f32::from(ev.position.x) - SIDEBAR_W - CONTENT_BORDER_W).max(0.0);
+                    // 焦点交给 TabBar 根节点，Esc 才能关闭菜单
+                    window.focus(&this.focus_handle, cx);
                     this.menu = Some(TabMenu { tab_id, x });
                     cx.notify();
                 }),
@@ -153,12 +158,27 @@ impl Render for TabBar {
         let mut bar = div()
             .w_full()
             .h(px(TAB_BAR_H))
+            .relative()
             .bg(t.toolbar_bg())
             .border_b_1()
             .border_color(t.border_subtle())
             .flex()
             .items_center()
             .id("rterm-tab-bar")
+            .track_focus(&self.focus_handle)
+            .on_key_down(
+                cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _w, cx| {
+                    if event.keystroke.key == "escape" && this.menu.is_some() {
+                        this.menu = None;
+                        cx.notify();
+                        // 把焦点还给活动 Tab 的内容（终端 / SFTP / 监控）
+                        if let Some(tab) = this.tabs.get(this.active) {
+                            let tab_id = tab.id;
+                            this.emit(cx, AppEvent::TabSelectRequested { tab_id });
+                        }
+                    }
+                }),
+            )
             .on_mouse_down_out(cx.listener(|this, _ev: &MouseDownEvent, _w, cx| {
                 if this.menu.is_some() {
                     this.menu = None;
@@ -255,15 +275,11 @@ impl Render for TabBar {
                 }
                 items = items.child(item.child(label));
             }
-            bar = bar.child(items);
+            // 菜单要盖在右侧内容区之上：普通 child 会先于内容绘制而被遮挡，
+            // 用 deferred 延迟到本帧内容之后绘制。
+            bar = bar.child(gpui::deferred(items));
         }
 
         bar
-    }
-}
-
-impl Default for TabBar {
-    fn default() -> Self {
-        Self::new()
     }
 }

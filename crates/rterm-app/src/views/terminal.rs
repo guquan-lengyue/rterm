@@ -1801,7 +1801,14 @@ impl Render for TerminalView {
         let t = ui_theme(cx);
 
         if self.status == TerminalStatus::Connected && self.autofocus_pending {
-            window.focus(&self.focus_handle, cx);
+            // 连接完成时不要把焦点从用户当前正在操作的控件（Tab 菜单、
+            // 对话框等）抢走；没有任何焦点时才自动聚焦终端。
+            let someone_else_focused = window
+                .focused(cx)
+                .is_some_and(|handle| handle != self.focus_handle);
+            if !someone_else_focused {
+                window.focus(&self.focus_handle, cx);
+            }
             self.autofocus_pending = false;
         }
 

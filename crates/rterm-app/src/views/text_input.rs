@@ -14,9 +14,9 @@ use std::ops::Range;
 use gpui::prelude::*;
 use gpui::{
     actions, div, fill, point, px, relative, size, App, Bounds, Context, CursorStyle, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, PaintQuad, Pixels, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    GlobalElementId, Hsla, IntoElement, LayoutId, MouseButton, MouseDownEvent, PaintQuad, Pixels,
+    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 
 // 键盘编辑动作。绑定在 main.rs 的 App::bind_keys。
@@ -26,6 +26,12 @@ actions!(
     rterm_text_input,
     [Backspace, Delete, Left, Right, Home, End, SelectAll, Paste]
 );
+
+/// 内容变化事件（命令面板用它刷新过滤结果；IME 组合中不触发）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextInputEvent {
+    Changed,
+}
 
 // ---------------------------------------------------------------------------
 // TextInput View
@@ -42,6 +48,8 @@ pub struct TextInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
 }
+
+impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl TextInput {
     pub fn new(cx: &mut App) -> Self {
@@ -77,6 +85,7 @@ impl TextInput {
         self.content = SharedString::default();
         self.selected_range = 0..0;
         self.marked_range = None;
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 
@@ -86,6 +95,7 @@ impl TextInput {
         let end = self.content.len();
         self.selected_range = end..end;
         self.marked_range = None;
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 
@@ -105,6 +115,7 @@ impl TextInput {
         let cursor = start + new_text.len();
         self.selected_range = cursor..cursor;
         self.marked_range = None;
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 
@@ -378,6 +389,7 @@ impl EntityInputHandler for TextInput {
         let new_end = range.start + new_text.len();
         self.selected_range = new_end..new_end;
         self.marked_range = None;
+        cx.emit(TextInputEvent::Changed);
         cx.notify();
     }
 
@@ -421,6 +433,10 @@ impl EntityInputHandler for TextInput {
                 cursor..cursor
             });
         self.selected_range = selected_range;
+        // IME 组合中（marked_range 仍在）不通知，提交后才刷新过滤结果
+        if self.marked_range.is_none() {
+            cx.emit(TextInputEvent::Changed);
+        }
         cx.notify();
     }
 
