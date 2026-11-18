@@ -47,11 +47,19 @@ pub(crate) const MENU_PADDING_Y: f32 = 8.0;
 
 /// 弹窗尺寸随窗口收缩：优先使用设计尺寸，视口不足时四周保留 24px 边距。
 ///
-/// 只负责“封顶”，不做“保底”——调用方按各自最小可用宽度再 `.max()`；
-/// 高度缩到放不下内容时，由弹窗内部的 `overflow_y_scroll` 容器兜底。
-pub(crate) fn adaptive_dialog_size(window: &gpui::Window, pref_w: f32, pref_h: f32) -> (f32, f32) {
+/// `min_w/min_h` 是最小可用尺寸，但不能反超视口——极小窗口下钳到视口内，
+/// 高度放不下内容时由弹窗内部的 `overflow_y_scroll` 容器兜底。
+pub(crate) fn adaptive_dialog_size(
+    window: &gpui::Window,
+    pref_w: f32,
+    pref_h: f32,
+    min_w: f32,
+    min_h: f32,
+) -> (f32, f32) {
     let viewport = window.viewport_size();
-    let width = (f32::from(viewport.width) - 48.0).min(pref_w);
-    let height = (f32::from(viewport.height) - 48.0).min(pref_h);
+    let view_w = f32::from(viewport.width);
+    let view_h = f32::from(viewport.height);
+    let width = (view_w - 48.0).min(pref_w).max(min_w.min(view_w - 16.0));
+    let height = (view_h - 48.0).min(pref_h).max(min_h.min(view_h - 16.0));
     (width.max(1.0), height.max(1.0))
 }

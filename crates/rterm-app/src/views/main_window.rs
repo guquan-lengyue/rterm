@@ -24,7 +24,8 @@ use std::sync::{Arc, Mutex};
 use gpui::prelude::*;
 use gpui::{
     actions, div, px, AnyElement, ClickEvent, Context, CursorStyle, Entity, FocusHandle,
-    IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Render, Window,
+    IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, Render, ScrollHandle,
+    Window,
 };
 use rterm_sync::SyncBridge;
 use uuid::Uuid;
@@ -192,6 +193,10 @@ pub struct MainWindow {
     /// Ctrl+P 命令面板（打开期间独占键盘焦点）。
     palette: Option<PaletteState>,
     palette_focus: FocusHandle,
+    /// 命令面板结果列表的滚动状态（选中项自动滚入视野）
+    palette_scroll: ScrollHandle,
+    /// 文件夹右键菜单打开时记录分组路径，供「新建会话」预填
+    pending_new_folder: Option<String>,
 }
 
 impl MainWindow {
@@ -206,7 +211,7 @@ impl MainWindow {
             &host,
             |this: &mut Self, _host, event: &AppEvent, cx| match event {
                 AppEvent::SessionConnectRequested { session_id } => {
-                    this.open_terminal_tab(*session_id, cx);
+                    this.request_terminal_tab(*session_id, cx);
                 }
                 AppEvent::TabSelectRequested { tab_id } => {
                     this.activate_tab(*tab_id, cx);
@@ -224,7 +229,13 @@ impl MainWindow {
                     Some(sid) => this.edit_session(*sid, cx),
                     None => this.close_edit_dialog(cx),
                 },
-                AppEvent::SessionTreeOpenContextMenuAt { session_id, x, y } => {
+                AppEvent::SessionTreeOpenContextMenuAt {
+                    session_id,
+                    folder,
+                    x,
+                    y,
+                } => {
+                    this.pending_new_folder = folder.clone();
                     this.context_menu = Some(ContextMenuState {
                         session_id: *session_id,
                         x: *x,
@@ -353,6 +364,8 @@ impl MainWindow {
             startup_error,
             palette: None,
             palette_focus: cx.focus_handle(),
+            palette_scroll: ScrollHandle::new(),
+            pending_new_folder: None,
         }
     }
 
@@ -369,6 +382,7 @@ impl MainWindow {
                 .map(|session| session.display_label())
                 .unwrap_or_else(|| "终端".to_string())
         };
+        let title = self.unique_title(title, TabKind::Terminal);
 
         let tab = cx.new(|cx| TerminalTabView::new(cx, session_id));
         let terminal = tab.read(cx).terminal();
@@ -398,6 +412,7 @@ impl MainWindow {
                 .map(|session| format!("{} · SFTP", session.display_label()))
                 .unwrap_or_else(|| "SFTP".to_string())
         };
+        let title = self.unique_title(title, TabKind::Sftp);
 
         let view = cx.new(SftpView::new);
         view.update(cx, |view, cx| view.connect(session_id, cx));
@@ -425,6 +440,7 @@ impl MainWindow {
                 .map(|session| format!("{} · 监控", session.display_label()))
                 .unwrap_or_else(|| "监控".to_string())
         };
+        let title = self.unique_title(title, TabKind::Monitor);
 
         let view = cx.new(MonitorView::new);
         view.update(cx, |view, cx| view.connect(session_id, cx));
@@ -449,6 +465,60 @@ impl MainWindow {
             self.focus_pending = true;
             self.sync_tab_bar(cx);
             cx.notify();
+        }
+    }
+
+    /// 同类型 + 同会话的已开 Tab（用于「打开终端/SFTP/监控」时复用，避免重复实例）。
+    fn find_open_tab(&self, session_id: Uuid, kind: TabKind) -> Option<Uuid> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.session_id == session_id && tab.kind == kind)
+            .map(|tab| tab.id)
+    }
+
+    /// 同名 Tab 加序号，避免多个 Tab 完全无法区分。
+    fn unique_title(&self, base: String, kind: TabKind) -> String {
+        let taken = |title: &str| {
+            self.tabs
+                .iter()
+                .any(|tab| tab.kind == kind && tab.title == title)
+        };
+        if !taken(&base) {
+            return base;
+        }
+        for n in 2..1000 {
+            let candidate = format!("{base} ({n})");
+            if !taken(&candidate) {
+                return candidate;
+            }
+        }
+        base
+    }
+
+    /// 打开终端：已有同会话终端 Tab 时直接激活，否则新建。
+    fn request_terminal_tab(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(tab_id) = self.find_open_tab(session_id, TabKind::Terminal) {
+            self.activate_tab(tab_id, cx);
+        } else {
+            self.open_terminal_tab(session_id, cx);
+        }
+    }
+
+    /// 打开 SFTP：已有同会话 SFTP Tab 时直接激活。
+    fn request_sftp_tab(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(tab_id) = self.find_open_tab(session_id, TabKind::Sftp) {
+            self.activate_tab(tab_id, cx);
+        } else {
+            self.open_sftp_tab(session_id, cx);
+        }
+    }
+
+    /// 打开监控：已有同会话监控 Tab 时直接激活。
+    fn request_monitor_tab(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(tab_id) = self.find_open_tab(session_id, TabKind::Monitor) {
+            self.activate_tab(tab_id, cx);
+        } else {
+            self.open_monitor_tab(session_id, cx);
         }
     }
 
@@ -547,12 +617,16 @@ impl MainWindow {
             .map(|tab| TabInfo {
                 id: tab.id,
                 title: tab.title.clone(),
-                kind: tab.kind.clone(),
+                kind: tab.kind,
             })
             .collect();
         let active = self.active_tab;
         self.tab_bar
             .update(cx, |bar, cx| bar.set_tabs(tabs, active, cx));
+        // 状态栏右侧跟随活动 Tab 的会话（不是“最后连接的会话”）
+        let active_session = self.tabs.get(self.active_tab).map(|tab| tab.session_id);
+        self.status_bar
+            .update(cx, |bar, cx| bar.set_active_session(active_session, cx));
     }
 
     /// 是否有任何弹窗 / 确认卡片打开（弹窗期间屏蔽全局 Tab 快捷键）。
@@ -748,9 +822,9 @@ impl MainWindow {
         };
         self.close_command_palette(cx);
         match action {
-            PaletteAction::OpenTerminal(session_id) => self.open_terminal_tab(session_id, cx),
-            PaletteAction::OpenSftp(session_id) => self.open_sftp_tab(session_id, cx),
-            PaletteAction::OpenMonitor(session_id) => self.open_monitor_tab(session_id, cx),
+            PaletteAction::OpenTerminal(session_id) => self.request_terminal_tab(session_id, cx),
+            PaletteAction::OpenSftp(session_id) => self.request_sftp_tab(session_id, cx),
+            PaletteAction::OpenMonitor(session_id) => self.request_monitor_tab(session_id, cx),
             PaletteAction::NewSession => self.open_edit_dialog(None, cx),
             PaletteAction::OpenSettings => self.open_settings(cx),
             PaletteAction::ImportSessions => self.open_import_export(false, cx),
@@ -867,6 +941,15 @@ impl MainWindow {
             );
         }
 
+        let list = list
+            .id("rterm-palette-list")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .track_scroll(&self.palette_scroll);
+        // 选中项始终保持在可视区内（↑/↓ 移动超出视口时自动滚动）
+        self.palette_scroll.scroll_to_item(palette.selected);
+
         let (query_text, query_color) = if palette.query.is_empty() {
             ("输入以搜索会话或命令…".to_string(), t.text_placeholder())
         } else {
@@ -938,7 +1021,7 @@ impl MainWindow {
             if saved {
                 "设置已保存"
             } else {
-                "设置已取消"
+                "设置未保存"
             },
             cx,
         );
@@ -979,7 +1062,7 @@ impl MainWindow {
     }
 
     fn request_terminal(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
-        self.open_terminal_tab(session_id, cx);
+        self.request_terminal_tab(session_id, cx);
     }
 
     fn edit_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
@@ -995,6 +1078,13 @@ impl MainWindow {
     }
 
     fn delete_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let name = {
+            let state = cx.global::<AppState>();
+            lock_or_recover(&state.session_store)
+                .get(session_id)
+                .map(|session| session.display_label())
+                .unwrap_or_else(|| "会话".to_string())
+        };
         {
             let state = cx.global_mut::<AppState>();
             lock_or_recover(&state.session_store).delete(session_id);
@@ -1006,11 +1096,23 @@ impl MainWindow {
             log::error!("删除会话后保存失败: {e:#}");
         }
 
+        // 该会话已打开的终端 / SFTP / 监控 Tab 一并关闭，避免“删除后仍在运行”
+        let tab_ids: Vec<Uuid> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.session_id == session_id)
+            .map(|tab| tab.id)
+            .collect();
+        for tab_id in tab_ids {
+            self.close_tab(tab_id, cx);
+        }
+
         self.context_menu = None;
         let host = cx.global::<AppState>().event_bus_host.clone();
         cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
             cx.emit(AppEvent::SessionDeleted { session_id });
         });
+        self.set_status(format!("已删除会话「{name}」"), cx);
         log::info!("Session deleted: {}", session_id);
         cx.notify();
     }
@@ -1019,6 +1121,7 @@ impl MainWindow {
         let msg = msg.into();
         self.status_bar.update(cx, |bar, cx| {
             bar.message = msg;
+            bar.clear_expiry();
             cx.notify();
         });
     }
@@ -1115,6 +1218,34 @@ impl Render for MainWindow {
                     ),
             );
 
+        // 启动加载出错：作为正常布局行显示在工具条下方，不再覆盖 TabBar
+        if let Some(err) = self.startup_error.clone() {
+            root = root.child(
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .bg(t.danger())
+                    .text_color(t.text_on_primary_btn())
+                    .text_size(px(11.))
+                    .child(div().flex_1().truncate().child(err))
+                    .child(
+                        div()
+                            .id("rterm-dismiss-startup-error")
+                            .px_2()
+                            .cursor_pointer()
+                            .child("✕")
+                            .on_click(cx.listener(|this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                                this.startup_error = None;
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+
         root = root
             // 左 SessionTree + 右 TabBar + Content
             .child(
@@ -1150,38 +1281,6 @@ impl Render for MainWindow {
             )
             // 底部 StatusBar
             .child(self.status_bar.clone());
-
-        // 启动加载出错时的红色横幅：绝对定位覆盖在内容区顶部，
-        // 不参与布局高度计算（否则终端 cols/rows 会算错）。
-        if let Some(err) = self.startup_error.clone() {
-            root = root.child(
-                div()
-                    .absolute()
-                    .top(px(TOOLBAR_H))
-                    .left(px(SIDEBAR_W))
-                    .right_0()
-                    .px_3()
-                    .py_1()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .bg(t.danger())
-                    .text_color(t.text_on_primary_btn())
-                    .text_size(px(11.))
-                    .child(div().flex_1().truncate().child(err))
-                    .child(
-                        div()
-                            .id("rterm-dismiss-startup-error")
-                            .px_2()
-                            .cursor_pointer()
-                            .child("✕")
-                            .on_click(cx.listener(|this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                                this.startup_error = None;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        }
 
         if let Some(menu_state) = self.context_menu {
             let viewport = window.viewport_size();
@@ -1354,7 +1453,7 @@ impl Render for MainWindow {
                                     .text_center()
                                     .text_size(px(11.))
                                     .text_color(t.text_subtle())
-                                    .child("删除后无法恢复"),
+                                    .child("配置不可恢复，相关标签会一并关闭"),
                             )
                             .child(
                                 div()
@@ -1489,11 +1588,23 @@ impl MainWindow {
                 cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
                     this.context_menu = None;
                     match action {
-                        ContextMenuAction::NewSession => this.open_edit_dialog(None, cx),
+                        ContextMenuAction::NewSession => {
+                            let folder = this.pending_new_folder.take();
+                            this.open_edit_dialog(None, cx);
+                            if let (Some(folder), Some(dialog)) = (folder, this.edit_dialog.clone())
+                            {
+                                dialog.update(cx, |dialog, cx| {
+                                    dialog.folder_input.update(cx, |input, cx| {
+                                        input.set_content(folder, cx);
+                                    });
+                                    cx.notify();
+                                });
+                            }
+                        }
                         ContextMenuAction::EditSession(sid) => this.edit_session(sid, cx),
                         ContextMenuAction::OpenTerminal(sid) => this.request_terminal(sid, cx),
-                        ContextMenuAction::OpenSftp(sid) => this.open_sftp_tab(sid, cx),
-                        ContextMenuAction::OpenMonitor(sid) => this.open_monitor_tab(sid, cx),
+                        ContextMenuAction::OpenSftp(sid) => this.request_sftp_tab(sid, cx),
+                        ContextMenuAction::OpenMonitor(sid) => this.request_monitor_tab(sid, cx),
                         ContextMenuAction::DeleteSession(sid) => {
                             // 不立即删除：先弹出确认卡片。
                             this.pending_delete = Some(sid);

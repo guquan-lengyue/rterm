@@ -253,6 +253,33 @@ impl TerminalTabView {
             )
             .into_any_element()
     }
+
+    /// 侧栏开关按钮：停靠在终端列头部右上角（不遮挡 SFTP 面板头控件）。
+    fn render_dock_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        div()
+            .absolute()
+            .top(px(3.))
+            .right(px(8.))
+            .h(px(18.))
+            .px_2()
+            .rounded_md()
+            .bg(t.card_header_bg())
+            .text_size(px(10.))
+            .text_color(t.text_subtle())
+            .cursor_pointer()
+            .id("terminal-sftp-toggle")
+            .hover(move |s| s.bg(t.secondary_btn_hover()))
+            .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
+                this.toggle_dock(cx);
+            }))
+            .child(if self.dock_visible {
+                "隐藏 SFTP"
+            } else {
+                "SFTP"
+            })
+            .into_any_element()
+    }
 }
 
 /// 同步模式是否允许「终端 → SFTP」方向（off / sftp_to_term 不跟随）。
@@ -271,7 +298,6 @@ fn dock_max_width(window: &Window) -> f32 {
 
 impl Render for TerminalTabView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme(cx);
         let dock_w = self.dock_width.min(dock_max_width(window));
         let mut root = div()
             .size_full()
@@ -290,8 +316,10 @@ impl Render for TerminalTabView {
                 div()
                     .flex_1()
                     .h_full()
+                    .relative()
                     .overflow_hidden()
-                    .child(self.terminal.clone()),
+                    .child(self.terminal.clone())
+                    .child(self.render_dock_toggle(cx)),
             );
 
         if self.dock_visible {
@@ -307,29 +335,6 @@ impl Render for TerminalTabView {
             }
         }
 
-        // 临时开关（12.6 会替换为终端头部按钮 + Ctrl+Shift+S）
-        root.child(
-            div()
-                .absolute()
-                .top(px(3.))
-                .right(px(8.))
-                .h(px(18.))
-                .px_2()
-                .rounded_md()
-                .bg(t.card_header_bg())
-                .text_size(px(10.))
-                .text_color(t.text_subtle())
-                .cursor_pointer()
-                .id("terminal-sftp-toggle")
-                .hover(move |s| s.bg(t.secondary_btn_hover()))
-                .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
-                    this.toggle_dock(cx);
-                }))
-                .child(if self.dock_visible {
-                    "隐藏 SFTP"
-                } else {
-                    "SFTP"
-                }),
-        )
+        root
     }
 }

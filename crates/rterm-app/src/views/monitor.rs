@@ -98,6 +98,8 @@ pub struct MonitorView {
     sort_ascending: bool,
     selected_pid: Option<u32>,
     scroll: usize,
+    /// 进程表可视行数（每帧按窗口高度更新，用于虚拟化与滚动上限）
+    visible_rows: usize,
     paused: bool,
     error: Option<String>,
     alert: Option<MonitorAlert>,
@@ -133,6 +135,7 @@ impl MonitorView {
             sort_ascending: false,
             selected_pid: None,
             scroll: 0,
+            visible_rows: 12,
             paused: false,
             error: None,
             alert: None,
@@ -454,12 +457,17 @@ impl MonitorView {
             return;
         }
         let next = (self.scroll as i32 - lines).max(0) as usize;
-        self.scroll = next.min(self.top.len().saturating_sub(1));
+        self.scroll = next.min(self.max_scroll());
         cx.notify();
     }
 
+    /// 最大滚动偏移：只允许滚到「最后一行贴底」。
+    fn max_scroll(&self) -> usize {
+        self.top.len().saturating_sub(self.visible_rows.max(1))
+    }
+
     fn clamp_scroll(&mut self) {
-        self.scroll = self.scroll.min(self.top.len().saturating_sub(1));
+        self.scroll = self.scroll.min(self.max_scroll());
     }
 
     fn open_kill_menu(
@@ -897,6 +905,7 @@ impl MonitorView {
             .top
             .iter()
             .skip(self.scroll)
+            .take(self.visible_rows)
             .map(|process| self.render_process_row(process, cx))
             .collect();
 
@@ -920,6 +929,7 @@ impl MonitorView {
                 div()
                     .w_full()
                     .flex_1()
+                    .min_h(px(0.))
                     .overflow_hidden()
                     .flex()
                     .flex_col()
@@ -1238,8 +1248,12 @@ impl Focusable for MonitorView {
 }
 
 impl Render for MonitorView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        // 进程表可视行数：窗口高度扣除页面头部 / 概览 / 图表等固定区域
+        let viewport_h = f32::from(window.viewport_size().height);
+        self.visible_rows = (((viewport_h - 320.0) / PROCESS_ROW_H).floor() as usize).max(1);
+        self.clamp_scroll();
         let mut root = div()
             .size_full()
             .bg(t.app_bg())

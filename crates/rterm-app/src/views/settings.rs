@@ -110,6 +110,8 @@ pub struct SettingsView {
     draft: Settings,
 
     focus_handle: FocusHandle,
+    /// 首次渲染时把焦点交给弹窗根节点（Esc 关闭依赖键盘事件冒泡）
+    autofocus_pending: bool,
 
     port_input: Entity<TextInput>,
     username_input: Entity<TextInput>,
@@ -152,6 +154,7 @@ impl SettingsView {
         Self {
             active_tab: SettingsTab::General,
             focus_handle: cx.focus_handle(),
+            autofocus_pending: true,
             port_input: ti(cx, draft.default_port.to_string()),
             username_input: ti(cx, draft.default_username.clone().unwrap_or_default()),
             keepalive_input: ti(cx, draft.keepalive_secs.to_string()),
@@ -610,7 +613,7 @@ impl SettingsView {
                     .text_color(hint_color)
                     .flex()
                     .justify_center()
-                    .child("默认用户名留空时，连接时会提示输入"),
+                    .child("留空将无法连接，请先在会话中填写用户名"),
             )
             .into_any_element()
     }
@@ -747,7 +750,7 @@ impl SettingsView {
                     .text_color(t.text_subtle())
                     .flex()
                     .justify_center()
-                    .child(format!("共 {} 个字体 · 滚轮浏览", self.font_choices.len())),
+                    .child(format!("共 {} 种字体 · 滚轮浏览", self.font_choices.len())),
             );
 
         form = form
@@ -817,7 +820,7 @@ impl SettingsView {
                     .mb_2()
                     .child(self.radio(
                         "settings-dock-show".into(),
-                        "打开终端时显示",
+                        "默认显示",
                         self.draft.terminal_sftp_dock,
                         cx,
                         |this, _cx| this.draft.terminal_sftp_dock = true,
@@ -923,7 +926,7 @@ impl SettingsView {
                     .text_color(t.text_subtle())
                     .flex()
                     .justify_center()
-                    .child("路径同步在 Sprint 8 生效"),
+                    .child("修改后对新开的终端生效"),
             )
             .into_any_element()
     }
@@ -958,7 +961,7 @@ impl SettingsView {
                     .text_color(t.text_subtle())
                     .flex()
                     .justify_center()
-                    .child("远程监控在 Sprint 9 生效"),
+                    .child("修改后对新开的监控页生效"),
             )
             .into_any_element()
     }
@@ -1094,10 +1097,14 @@ impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
+        // 首次渲染聚焦弹窗根节点：Esc 才能冒泡到这里关闭弹窗
+        if self.autofocus_pending {
+            window.focus(&self.focus_handle, cx);
+            self.autofocus_pending = false;
+        }
+
         // 自适应尺寸：默认 760×680，窗口更小时收缩；表单区域支持纵向滚动
-        let (card_w, card_h) = super::adaptive_dialog_size(window, 760.0, 680.0);
-        let card_w = card_w.max(560.0);
-        let card_h = card_h.max(320.0);
+        let (card_w, card_h) = super::adaptive_dialog_size(window, 760.0, 680.0, 560.0, 320.0);
 
         let mut tabs = div()
             .w(px(140.))
@@ -1127,6 +1134,7 @@ impl Render for SettingsView {
         let footer = div()
             .w_full()
             .h(px(52.))
+            .flex_shrink_0()
             .px_4()
             .flex()
             .items_center()
@@ -1169,6 +1177,13 @@ impl Render for SettingsView {
             .items_center()
             .justify_center()
             .track_focus(&self.focus_handle)
+            .on_key_down(
+                cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _w, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.cancel(cx);
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, _ev: &MouseDownEvent, _w, cx| {

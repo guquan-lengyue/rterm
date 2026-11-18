@@ -124,6 +124,8 @@ pub struct SessionTreeView {
     expanded: HashSet<String>,
     selected: Option<Uuid>,
     connection: HashMap<Uuid, ConnectionBadge>,
+    /// 会话较多时的纵向滚动
+    scroll: ScrollHandle,
 }
 
 impl SessionTreeView {
@@ -131,8 +133,27 @@ impl SessionTreeView {
         // 只在构造时订阅一次，避免 render 每次重绘泄漏订阅
         let host = cx.global::<AppState>().event_bus_host.clone();
         cx.subscribe(&host, |this: &mut Self, _host_entity, ev, cx| match ev {
-            AppEvent::SessionCreated { .. }
-            | AppEvent::SessionUpdated { .. }
+            AppEvent::SessionCreated { session_id } => {
+                // 新建会话落位后自动展开其所在分组的每一级父路径
+                let folder = {
+                    let state = cx.global::<AppState>();
+                    lock_or_recover(&state.session_store)
+                        .get(*session_id)
+                        .and_then(|session| session.folder.clone())
+                };
+                if let Some(folder) = folder {
+                    let mut acc = String::new();
+                    for part in folder.split('/').filter(|part| !part.is_empty()) {
+                        if !acc.is_empty() {
+                            acc.push('/');
+                        }
+                        acc.push_str(part);
+                        this.expanded.insert(acc.clone());
+                    }
+                }
+                cx.notify()
+            }
+            AppEvent::SessionUpdated { .. }
             | AppEvent::SessionDeleted { .. }
             | AppEvent::SessionImported { .. } => cx.notify(),
             AppEvent::SessionTreeSelectRequested { session_id } => {
@@ -170,6 +191,7 @@ impl SessionTreeView {
             expanded: HashSet::new(),
             selected: None,
             connection: HashMap::new(),
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -191,7 +213,7 @@ impl Render for SessionTreeView {
         let tree = TreeNode::build(&sessions_refs);
 
         let mut root = div()
-            .w(px(240.))
+            .w(px(super::SIDEBAR_W))
             .size_full()
             .bg(t.sidebar_bg())
             .flex()
@@ -212,10 +234,43 @@ impl Render for SessionTreeView {
                 .child(format!("会话 ({})", sessions.len())),
         );
 
-        let mut list = div().w_full().flex_1();
-        for node in &tree {
-            list = list.child(self.render_node(node, 0, cx));
-        }
+        // 会话列表：滚动容器 + 空状态引导
+        let list: gpui::AnyElement = if tree.is_empty() {
+            div()
+                .w_full()
+                .flex_1()
+                .min_h(px(0.))
+                .pt_6()
+                .px_3()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1()
+                .text_size(px(11.))
+                .text_color(t.text_subtle())
+                .child("还没有会话")
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(t.text_placeholder())
+                        .child("点击上方「＋ 新建会话」开始"),
+                )
+                .into_any_element()
+        } else {
+            let mut rows = div().w_full().flex_shrink_0();
+            for node in &tree {
+                rows = rows.child(self.render_node(node, 0, cx));
+            }
+            div()
+                .w_full()
+                .flex_1()
+                .min_h(px(0.))
+                .id("session-tree-scroll")
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(rows)
+                .into_any_element()
+        };
         root = root.child(list);
 
         root
@@ -239,6 +294,7 @@ impl SessionTreeView {
             } => {
                 let is_expanded = self.expanded.contains(path);
                 let path_clone = path.clone();
+                let folder_path = path.clone();
 
                 let row = div()
                     .w_full()
@@ -258,6 +314,7 @@ impl SessionTreeView {
                                 cx,
                                 AppEvent::SessionTreeOpenContextMenuAt {
                                     session_id: None,
+                                    folder: Some(folder_path.clone()),
                                     x: ev.position.x.to_f64() as i32,
                                     y: ev.position.y.to_f64() as i32,
                                 },
@@ -342,6 +399,7 @@ impl SessionTreeView {
                                 cx,
                                 AppEvent::SessionTreeOpenContextMenuAt {
                                     session_id: Some(id_copy),
+                                    folder: None,
                                     x: ev.position.x.to_f64() as i32,
                                     y: ev.position.y.to_f64() as i32,
                                 },

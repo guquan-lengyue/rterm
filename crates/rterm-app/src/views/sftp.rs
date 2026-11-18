@@ -6,16 +6,18 @@
 //! - 底部传输面板：进度、暂停/继续、取消
 //! - 每个 SFTP Tab 独立 SSH 连接（不占用终端 Tab 的 PTY 会话）
 
+use std::cell::Cell;
 use std::path::{Path as StdPath, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use futures::channel::mpsc::unbounded;
 use futures::StreamExt;
 use gpui::prelude::*;
 use gpui::{
-    div, px, transparent_black, AnyElement, ClickEvent, Context, Entity, FocusHandle, Focusable,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render,
-    ScrollWheelEvent, SharedString, Window,
+    div, point, px, transparent_black, AnyElement, Bounds, ClickEvent, Context, Entity,
+    FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString, Window,
 };
 use uuid::Uuid;
 
@@ -50,6 +52,22 @@ const COL_ICON_W: f32 = 20.0;
 const COL_SIZE_W: f32 = 70.0;
 const COL_MODE_W: f32 = 80.0;
 const COL_MTIME_W: f32 = 110.0;
+
+/// 窄面板时按可用宽度裁剪列：先隐藏「修改时间」，再隐藏「权限」。
+#[derive(Clone, Copy, Debug)]
+struct SftpColumns {
+    mode: bool,
+    mtime: bool,
+}
+
+impl SftpColumns {
+    fn for_width(width: f32) -> Self {
+        Self {
+            mode: width >= 340.0,
+            mtime: width >= 420.0,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 内部状态
@@ -225,6 +243,9 @@ pub struct SftpView {
     drag: Option<DragState>,
     /// 文件列表可视区高度（每帧 render 时按窗口大小更新，用于虚拟化）。
     rows_view_h: f32,
+    /// SftpView 根元素在窗口中的实测矩形（prepaint 更新）：
+    /// Dock 模式下视图不在内容区左上角，右键菜单需要它把窗口坐标换算为局部坐标。
+    root_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
 impl SftpView {
@@ -289,6 +310,7 @@ impl SftpView {
             local_nav_generation: 0,
             drag: None,
             rows_view_h: ROW_H * 12.0,
+            root_bounds: Rc::new(Cell::new(None)),
         }
     }
 
@@ -298,6 +320,16 @@ impl SftpView {
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    /// 窗口坐标 → SftpView 局部坐标（Tab / Dock 模式通用）。
+    fn to_local(&self, position: Point<Pixels>) -> Point<Pixels> {
+        let origin = self
+            .root_bounds
+            .get()
+            .map(|bounds| bounds.origin)
+            .unwrap_or(point(px(0.), px(0.)));
+        point(position.x - origin.x, position.y - origin.y)
     }
 
     /// 是否有内部弹窗（输入框或确认卡片）打开；用于屏蔽全局快捷键。
@@ -470,11 +502,11 @@ impl SftpView {
         log::warn!("[sftp] connection failed: {reason}");
         self.status = SftpStatus::Failed;
         self.status_text = reason.clone();
-        self.remote.error = Some(reason);
+        self.remote.error = Some(reason.clone());
         self.emit(
             cx,
             AppEvent::StatusBarMessage {
-                text: "SFTP 连接失败".into(),
+                text: format!("SFTP 连接失败：{reason}"),
                 duration_ms: 3000,
             },
         );
@@ -765,6 +797,11 @@ impl SftpView {
         }
         drag.active = true;
         let (side, index) = (drag.side, drag.index);
+        // Dock 模式只有远端栏，没有「另一侧面板」可拖放
+        if self.display_mode == SftpDisplayMode::Dock {
+            self.set_status("侧栏模式不支持拖拽传输，请右键文件选择下载".into(), cx);
+            return;
+        }
         let name = self
             .pane(side)
             .rows
@@ -779,7 +816,7 @@ impl SftpView {
         let Some(drag) = self.drag.take() else {
             return;
         };
-        if !drag.active {
+        if !drag.active || self.display_mode == SftpDisplayMode::Dock {
             return;
         }
         let x = f32::from(event.position.x) - SIDEBAR_W - CONTENT_BORDER_W;
@@ -1015,7 +1052,7 @@ impl SftpView {
             MenuAction::Properties(index) => self.show_properties(self.active_side, index, cx),
             MenuAction::NewFolder => {
                 let side = self.active_side;
-                self.open_dialog(DialogKind::Mkdir(side), "新建文件夹", "新建文件夹", cx);
+                self.open_dialog(DialogKind::Mkdir(side), "新建目录", "新建目录", cx);
             }
             MenuAction::Refresh => self.refresh_both(cx),
         }
@@ -1556,14 +1593,9 @@ impl Render for SftpView {
                         .hover(|s| s.bg(t.secondary_btn_hover()))
                         .on_click(cx.listener(|this, _ev: &ClickEvent, _w, cx| {
                             let side = this.active_side;
-                            this.open_dialog(
-                                DialogKind::Mkdir(side),
-                                "新建文件夹",
-                                "新建文件夹",
-                                cx,
-                            );
+                            this.open_dialog(DialogKind::Mkdir(side), "新建目录", "新建目录", cx);
                         }))
-                        .child("＋ 文件夹"),
+                        .child("＋ 目录"),
                 )
                 .child(
                     div()
@@ -1586,17 +1618,26 @@ impl Render for SftpView {
 
         // 9.18：虚拟化所需可视区高度（只渲染屏幕内的行，1000 项目录不卡）
         let transfers_h = self.transfers.len().min(MAX_VISIBLE_TRANSFERS) as f32 * TRANSFER_ROW_H;
-        let error_h = if self.local.error.is_some() || self.remote.error.is_some() {
+        let is_dock = self.display_mode == SftpDisplayMode::Dock;
+        let error_h = if is_dock {
+            if self.remote.error.is_some() {
+                24.0
+            } else {
+                0.0
+            }
+        } else if self.local.error.is_some() || self.remote.error.is_some() {
             24.0
         } else {
             0.0
         };
+        // Dock 模式没有 SftpView 自己的顶部工具条
+        let toolbar_h = if is_dock { 0.0 } else { 32.0 };
         let viewport_h = f32::from(window.viewport_size().height);
         self.rows_view_h = (viewport_h
             - TOOLBAR_H
             - TAB_BAR_H
             - STATUS_BAR_H
-            - 32.0
+            - toolbar_h
             - transfers_h
             - PANE_HEADER_H
             - 26.0
@@ -1666,7 +1707,7 @@ impl Render for SftpView {
                 ConfirmCard {
                     message: "目标已存在，是否覆盖？".to_string(),
                     detail: Some(name),
-                    ok_label: "继续",
+                    ok_label: "覆盖",
                     ok_id: "sftp-confirm-overwrite",
                     cancel_id: "sftp-confirm-overwrite-cancel",
                     kind: ConfirmKind::Transfer,
@@ -1676,7 +1717,18 @@ impl Render for SftpView {
             ));
         }
 
-        content
+        // 测量根元素在窗口中的位置：Dock 模式的右键菜单坐标依赖它换算
+        let origin = self.root_bounds.clone();
+        div()
+            .size_full()
+            .relative()
+            .on_children_prepainted(move |bounds, _window, _cx| {
+                if let Some(first) = bounds.first() {
+                    origin.set(Some(*first));
+                }
+            })
+            .child(content)
+            .into_any_element()
     }
 }
 
@@ -1688,9 +1740,22 @@ impl SftpView {
         let pane_bg = t.card_bg();
         let header_bg = t.card_header_bg();
         let is_dock = self.display_mode == SftpDisplayMode::Dock;
+        // 面板可用宽度：优先用根元素实测值（Dock 模式宽度由父容器决定）
+        let pane_width = match self.root_bounds.get() {
+            Some(bounds) => {
+                let width = f32::from(bounds.size.width);
+                if is_dock {
+                    width
+                } else {
+                    width / 2.0
+                }
+            }
+            None => 640.0,
+        };
+        let columns = SftpColumns::for_width(pane_width);
 
-        // 列头：与数据行使用同一组列宽 —— 图标定宽 + 名称填充 + 三个定宽列
-        let header = div()
+        // 列头：与数据行使用同一组列宽 —— 图标定宽 + 名称填充 + 定宽列
+        let mut header = div()
             .w_full()
             .h(px(COLUMN_HEADER_H))
             .bg(header_bg)
@@ -1703,15 +1768,25 @@ impl SftpView {
             .text_color(t.text_subtle())
             .child(div().w(px(COL_ICON_W)).flex_none())
             .child(self.render_sort_button("名称", SortKey::Name, None, side, cx))
-            .child(self.render_sort_button("大小", SortKey::Size, Some(COL_SIZE_W), side, cx))
-            .child(self.render_sort_button("权限", SortKey::Mode, Some(COL_MODE_W), side, cx))
-            .child(self.render_sort_button(
+            .child(self.render_sort_button("大小", SortKey::Size, Some(COL_SIZE_W), side, cx));
+        if columns.mode {
+            header = header.child(self.render_sort_button(
+                "权限",
+                SortKey::Mode,
+                Some(COL_MODE_W),
+                side,
+                cx,
+            ));
+        }
+        if columns.mtime {
+            header = header.child(self.render_sort_button(
                 "修改时间",
                 SortKey::Modified,
                 Some(COL_MTIME_W),
                 side,
                 cx,
             ));
+        }
 
         // 9.18：虚拟化 —— 只渲染可视区内的行，并把 scroll 收进合法范围
         let visible = visible_row_count(self.rows_view_h);
@@ -1722,7 +1797,7 @@ impl SftpView {
             .enumerate()
             .skip(start)
             .take(visible)
-            .map(|(index, entry)| self.render_row(side, index, entry, cx))
+            .map(|(index, entry)| self.render_row(side, index, entry, columns, cx))
             .collect();
 
         let error = pane.error.clone().map(|error| {
@@ -1818,7 +1893,7 @@ impl SftpView {
                 // 地址栏：输入框 + 转到
                 div()
                     .w_full()
-                    .h(px(26.))
+                    .h(px(32.))
                     .bg(t.card_bg())
                     .flex()
                     .items_center()
@@ -1828,7 +1903,7 @@ impl SftpView {
                         div()
                             .flex_1()
                             .min_w(px(0.))
-                            .h(px(24.))
+                            .h_full()
                             .overflow_hidden()
                             .child(pane.address.clone()),
                     )
@@ -1864,13 +1939,18 @@ impl SftpView {
                     .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _w, cx| {
                         this.on_pane_scroll(side, event, cx);
                     }))
-                    // 空白区右键菜单（9.18）：新建文件夹 / 刷新
+                    // 空白区右键菜单（9.18）：新建目录 / 刷新
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, _w, cx| {
-                            let x = f32::from(event.position.x) - SIDEBAR_W - CONTENT_BORDER_W;
-                            let y = f32::from(event.position.y) - TOOLBAR_H - TAB_BAR_H;
-                            this.open_menu(side, None, x.max(0.), y.max(0.), cx);
+                            let local = this.to_local(event.position);
+                            this.open_menu(
+                                side,
+                                None,
+                                f32::from(local.x).max(0.),
+                                f32::from(local.y).max(0.),
+                                cx,
+                            );
                         }),
                     )
                     .children(rows),
@@ -1960,6 +2040,7 @@ impl SftpView {
         side: PaneSide,
         index: usize,
         entry: &FileEntry,
+        columns: SftpColumns,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
@@ -1991,7 +2072,7 @@ impl SftpView {
             entry.name.clone()
         };
 
-        div()
+        let mut row = div()
             .w_full()
             .h(px(ROW_H))
             .flex()
@@ -2017,9 +2098,14 @@ impl SftpView {
                 MouseButton::Right,
                 cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
                     cx.stop_propagation();
-                    let x = f32::from(ev.position.x) - SIDEBAR_W - CONTENT_BORDER_W;
-                    let y = f32::from(ev.position.y) - TOOLBAR_H - TAB_BAR_H;
-                    this.open_menu(side, Some(index), x.max(0.), y.max(0.), cx);
+                    let local = this.to_local(ev.position);
+                    this.open_menu(
+                        side,
+                        Some(index),
+                        f32::from(local.x).max(0.),
+                        f32::from(local.y).max(0.),
+                        cx,
+                    );
                 }),
             )
             .child(div().w(px(COL_ICON_W)).flex_none().child(icon))
@@ -2039,8 +2125,9 @@ impl SftpView {
                     } else {
                         format_size(entry.size)
                     }),
-            )
-            .child(
+            );
+        if columns.mode {
+            row = row.child(
                 div()
                     .w(px(COL_MODE_W))
                     .flex_none()
@@ -2050,8 +2137,10 @@ impl SftpView {
                         t.text_subtle()
                     })
                     .child(format_mode(entry)),
-            )
-            .child(
+            );
+        }
+        if columns.mtime {
+            row = row.child(
                 div()
                     .w(px(COL_MTIME_W))
                     .flex_none()
@@ -2061,8 +2150,9 @@ impl SftpView {
                         t.text_subtle()
                     })
                     .child(format_time(entry.mtime)),
-            )
-            .into_any_element()
+            );
+        }
+        row.into_any_element()
     }
 
     fn render_menu(
@@ -2076,9 +2166,19 @@ impl SftpView {
         let item_h = MENU_ITEM_H;
         let items = menu_items(menu);
         let height = items.len() as f32 * item_h + MENU_PADDING_Y;
-        let viewport = window.viewport_size();
-        let max_x = (f32::from(viewport.width) - width - 4.0).max(0.0);
-        let max_y = (f32::from(viewport.height) - height - 4.0).max(0.0);
+        // 菜单限制在 SftpView 自身范围内（Dock 模式宽度远小于窗口）
+        let (view_w, view_h) = match self.root_bounds.get() {
+            Some(bounds) => (f32::from(bounds.size.width), f32::from(bounds.size.height)),
+            None => {
+                let viewport = window.viewport_size();
+                (
+                    f32::from(viewport.width) - SIDEBAR_W - CONTENT_BORDER_W,
+                    f32::from(viewport.height) - TOOLBAR_H - TAB_BAR_H - STATUS_BAR_H,
+                )
+            }
+        };
+        let max_x = (view_w - width - 4.0).max(0.0);
+        let max_y = (view_h - height - 4.0).max(0.0);
         let x = menu.x.min(max_x).max(0.0);
         let y = menu.y.min(max_y).max(0.0);
 
@@ -2192,28 +2292,50 @@ impl SftpView {
                 .items_center()
                 .gap_2()
                 .text_size(px(10.))
-                .child(div().w(px(14.)).text_color(t.text_subtle()).child(arrow))
                 .child(
                     div()
-                        .w(px(160.))
-                        .overflow_hidden()
+                        .w(px(14.))
+                        .flex_none()
+                        .text_color(t.text_subtle())
+                        .child(arrow),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .max_w(px(160.))
+                        .truncate()
                         .text_color(t.text_on_card_bg())
                         .child(name),
                 )
                 .child(
-                    div().flex_1().h(px(6.)).rounded_full().bg(bar_bg).child(
-                        div()
-                            .h_full()
-                            .w(gpui::relative(progress))
-                            .rounded_full()
-                            .bg(bar_fg),
-                    ),
+                    div()
+                        .flex_1()
+                        .min_w(px(8.))
+                        .h(px(6.))
+                        .rounded_full()
+                        .bg(bar_bg)
+                        .child(
+                            div()
+                                .h_full()
+                                .w(gpui::relative(progress))
+                                .rounded_full()
+                                .bg(bar_fg),
+                        ),
                 )
-                .child(div().w(px(110.)).text_color(state_color).child(state_text));
+                .child(
+                    div()
+                        .w(px(90.))
+                        .flex_none()
+                        .truncate()
+                        .text_color(state_color)
+                        .child(state_text),
+                );
             if active {
                 row = row
                     .child(
                         div()
+                            .flex_none()
                             .px_2()
                             .h(px(18.))
                             .rounded_md()
@@ -2247,6 +2369,7 @@ impl SftpView {
                     )
                     .child(
                         div()
+                            .flex_none()
                             .px_2()
                             .h(px(18.))
                             .rounded_md()
@@ -2270,6 +2393,16 @@ impl SftpView {
         panel.into_any_element()
     }
 
+    /// 弹窗宽度：不超过 SftpView 实测宽度（Dock 模式下远小于窗口）。
+    fn overlay_width(&self, preferred: f32) -> f32 {
+        let available = self
+            .root_bounds
+            .get()
+            .map(|bounds| f32::from(bounds.size.width))
+            .unwrap_or(preferred + 24.0);
+        (available - 24.0).clamp(200.0, preferred)
+    }
+
     fn render_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let Some(dialog) = &self.dialog else {
@@ -2277,7 +2410,7 @@ impl SftpView {
         };
         let title = dialog.title;
         let input = dialog.input.clone();
-        let width = 420.0;
+        let width = self.overlay_width(420.0);
         div()
             .absolute()
             .inset_0()
@@ -2361,7 +2494,7 @@ impl SftpView {
         let ok_bg = if card.danger { t.danger() } else { t.primary() };
 
         let mut body = div()
-            .w(px(380.))
+            .w(px(self.overlay_width(380.)))
             .bg(t.card_bg())
             .border_1()
             .border_color(t.border_medium())
@@ -2480,7 +2613,7 @@ fn menu_items(menu: &MenuState) -> Vec<(String, bool, MenuAction)> {
         items
     } else {
         vec![
-            ("📁 新建文件夹…".into(), false, MenuAction::NewFolder),
+            ("📁 新建目录…".into(), false, MenuAction::NewFolder),
             ("⟳ 刷新".into(), false, MenuAction::Refresh),
         ]
     }

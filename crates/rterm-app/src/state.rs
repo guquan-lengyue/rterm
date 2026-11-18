@@ -243,7 +243,7 @@ impl Settings {
 // 实际 Tab 列表与生命周期在 MainWindow.tabs）
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabKind {
     Terminal,
     Sftp,

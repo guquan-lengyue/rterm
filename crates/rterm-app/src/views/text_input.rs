@@ -789,6 +789,7 @@ impl Render for TextInput {
         div()
             .w_full()
             .h(px(32.))
+            .overflow_hidden()
             .id(format!("rterm-ti-{}", cx.entity_id()))
             .key_context("TextInput")
             .track_focus(&self.focus_handle)

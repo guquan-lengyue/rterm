@@ -10,8 +10,8 @@ use std::collections::HashSet;
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, ClickEvent, Context, Entity, IntoElement, MouseButton, MouseDownEvent, Render,
-    ScrollHandle, ScrollWheelEvent, SharedString, Window,
+    div, px, ClickEvent, Context, Entity, FocusHandle, Focusable, IntoElement, MouseButton,
+    MouseDownEvent, Render, ScrollHandle, ScrollWheelEvent, SharedString, Window,
 };
 use uuid::Uuid;
 
@@ -86,6 +86,10 @@ pub struct ImportExportDialog {
 
     /// (是否成功, 文本)
     pub message: Option<(bool, String)>,
+
+    focus_handle: FocusHandle,
+    /// 首次渲染时把焦点交给弹窗根节点（Esc 关闭依赖键盘事件冒泡）
+    autofocus_pending: bool,
 }
 
 impl ImportExportDialog {
@@ -121,6 +125,9 @@ impl ImportExportDialog {
             body_scroll: ScrollHandle::new(),
 
             message: None,
+
+            focus_handle: cx.focus_handle(),
+            autofocus_pending: true,
         }
     }
 
@@ -558,7 +565,7 @@ impl ImportExportDialog {
                 ))
                 .child(self.radio(
                     "io-scope-folder".into(),
-                    "某个文件夹",
+                    "某个分组",
                     self.scope == ScopeKind::Folder,
                     cx,
                     |this, _cx| this.scope = ScopeKind::Folder,
@@ -937,13 +944,21 @@ fn count_scope(sessions: &[rterm_session::Session], scope: &rterm_session::Expor
 // Render
 // ---------------------------------------------------------------------------
 
+impl Focusable for ImportExportDialog {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 impl Render for ImportExportDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        if self.autofocus_pending {
+            window.focus(&self.focus_handle, cx);
+            self.autofocus_pending = false;
+        }
         // 自适应尺寸：默认 620×600，窗口更小时收缩，主体可滚动
-        let (card_w, card_h) = super::adaptive_dialog_size(window, 620.0, 600.0);
-        let card_w = card_w.max(520.0);
-        let card_h = card_h.max(320.0);
+        let (card_w, card_h) = super::adaptive_dialog_size(window, 620.0, 600.0, 520.0, 320.0);
 
         let body = match self.mode {
             IoMode::Export => self.render_export_body(cx),
@@ -958,7 +973,7 @@ impl Render for ImportExportDialog {
 
         let primary_label = match self.mode {
             IoMode::Export => "导出",
-            IoMode::Import => "执行导入",
+            IoMode::Import => "导入",
         };
         let primary_id = match self.mode {
             IoMode::Export => "io-do-export",
@@ -968,6 +983,7 @@ impl Render for ImportExportDialog {
         let mut footer = div()
             .w_full()
             .h(px(52.))
+            .flex_shrink_0()
             .px_4()
             .flex()
             .items_center()
@@ -986,7 +1002,7 @@ impl Render for ImportExportDialog {
                     .child(msg_text),
             )
             .child(
-                self.action_button("io-cancel", "取消", false, cx, |this, cx| {
+                self.action_button("io-cancel", "关闭", false, cx, |this, cx| {
                     this.emit(cx, AppEvent::ImportExportCloseRequested);
                 }),
             );
@@ -1024,6 +1040,14 @@ impl Render for ImportExportDialog {
             .flex()
             .items_center()
             .justify_center()
+            .track_focus(&self.focus_handle)
+            .on_key_down(
+                cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _w, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.emit(cx, AppEvent::ImportExportCloseRequested);
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, _ev: &MouseDownEvent, _w, cx| {

@@ -72,6 +72,8 @@ pub struct SessionEditDialog {
     pub active_tab: DialogTab,
 
     focus_handle: FocusHandle,
+    /// 首次渲染时把焦点交给弹窗根节点（Esc 关闭依赖键盘事件冒泡）
+    autofocus_pending: bool,
 
     // Basic
     pub name_input: Entity<TextInput>,
@@ -196,6 +198,7 @@ impl SessionEditDialog {
             editing_id,
             active_tab: DialogTab::Basic,
             focus_handle: cx.focus_handle(),
+            autofocus_pending: true,
             name_input: Self::make_ti(cx, &name, "会话名称", false),
             host_input: Self::make_ti(cx, &host, "主机地址", false),
             port_input: Self::make_ti(cx, &port, "22", false),
@@ -466,7 +469,7 @@ fn tcp_check(host: &str, port: u16) -> TestStatus {
     };
 
     match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-        Ok(_) => TestStatus::Ok(format!("TCP OK — {addr}")),
+        Ok(_) => TestStatus::Ok(format!("TCP 可达（未验证登录）— {addr}")),
         Err(e) => TestStatus::Failed(rterm_ssh::errors::describe(&anyhow::Error::new(e))),
     }
 }
@@ -484,15 +487,17 @@ impl Focusable for SessionEditDialog {
 impl Render for SessionEditDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        if self.autofocus_pending {
+            window.focus(&self.focus_handle, cx);
+            self.autofocus_pending = false;
+        }
         let title = if self.editing_id.is_some() {
             "编辑会话"
         } else {
             "新建会话"
         };
         // 自适应尺寸：默认 520×470，窗口更小时收缩，内容放不下时滚动
-        let (card_w, card_h) = super::adaptive_dialog_size(window, 520.0, 470.0);
-        let card_w = card_w.max(420.0);
-        let card_h = card_h.max(300.0);
+        let (card_w, card_h) = super::adaptive_dialog_size(window, 520.0, 470.0, 420.0, 300.0);
 
         div()
             .size_full()
@@ -503,6 +508,13 @@ impl Render for SessionEditDialog {
             .items_center()
             .justify_center()
             .track_focus(&self.focus_handle)
+            .on_key_down(
+                cx.listener(|this: &mut Self, event: &gpui::KeyDownEvent, _w, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.cancel(cx);
+                    }
+                }),
+            )
             .child(
                 div()
                     .w(px(card_w))

@@ -165,6 +165,8 @@ pub enum AppEvent {
     }, // None = 新建
     SessionTreeOpenContextMenuAt {
         session_id: Option<Uuid>,
+        /// 文件夹右键时携带分组路径（用于「在此分组新建会话」）
+        folder: Option<String>,
         x: i32,
         y: i32,
     },

@@ -777,13 +777,33 @@ impl TerminalView {
 
     /// 窗口尺寸变化 → 重算 cols/rows → Engine + PTY 同步。
     ///
+    /// 以 Canvas 的实测 bounds 为准（而不是「窗口尺寸 − 固定常量」），
+    /// 这样 SFTP 侧栏展开 / 分隔条拖拽 / 启动横幅等布局变化都会正确传导到 PTY。
+    /// Canvas prepaint 在尺寸变化时会请求下一帧，保证这里能拿到最新 bounds。
+    ///
     /// 仅在 render 期间调用；不 emit / notify，避免事件订阅者重入。
     fn sync_grid_size(&mut self, window: &Window) {
-        let viewport = window.viewport_size();
-        let available_w = (f32::from(viewport.width) - SIDEBAR_W - CONTENT_BORDER_W).max(1.0);
-        let available_h =
-            (f32::from(viewport.height) - TOOLBAR_H - STATUS_BAR_H - TAB_BAR_H - TERMINAL_HEADER_H)
-                .max(1.0);
+        let metrics = *self.metrics.borrow();
+        let (available_w, available_h) = match metrics.bounds {
+            Some(bounds)
+                if f32::from(bounds.size.width) > 0.0 && f32::from(bounds.size.height) > 0.0 =>
+            {
+                (f32::from(bounds.size.width), f32::from(bounds.size.height))
+            }
+            // 首帧 Canvas 尚未布局：退回窗口估算（下一帧会按实测 bounds 修正）
+            _ => {
+                let viewport = window.viewport_size();
+                (
+                    (f32::from(viewport.width) - SIDEBAR_W - CONTENT_BORDER_W).max(1.0),
+                    (f32::from(viewport.height)
+                        - TOOLBAR_H
+                        - STATUS_BAR_H
+                        - TAB_BAR_H
+                        - TERMINAL_HEADER_H)
+                        .max(1.0),
+                )
+            }
+        };
 
         let cols = ((available_w / self.cell_w).floor() as usize).clamp(1, 500);
         let rows = ((available_h / self.line_height).floor() as usize).clamp(1, 300);
@@ -1481,7 +1501,7 @@ impl TerminalView {
                         cx,
                     ))
                     .child(self.host_key_button(
-                        "仅本次",
+                        "仅本次接受",
                         "host-key-accept-once",
                         (
                             t.secondary_btn_bg(),
@@ -1845,7 +1865,7 @@ impl Render for TerminalView {
                         div()
                             .text_size(px(11.))
                             .text_color(t.text_placeholder())
-                            .child("Sprint 6 · Canvas 终端渲染"),
+                            .child("SSH 终端"),
                     ),
             );
         } else {
@@ -1854,9 +1874,17 @@ impl Render for TerminalView {
             let cache = self.glyph_cache.clone();
 
             let canvas_element = canvas(
-                move |bounds, _window, _cx| {
+                move |bounds, window, _cx| {
                     let mut metrics = metrics.borrow_mut();
+                    let size_changed = metrics.bounds.map_or(true, |old| {
+                        old.size.width != bounds.size.width || old.size.height != bounds.size.height
+                    });
                     metrics.bounds = Some(bounds);
+                    drop(metrics);
+                    if size_changed {
+                        // 下一帧 render 会按新 bounds 重算 cols/rows 并同步 PTY
+                        window.request_animation_frame();
+                    }
                 },
                 move |bounds, _state, window, cx| {
                     paint_snapshot(&snapshot, bounds, window, cx, &cache);
@@ -1906,7 +1934,7 @@ impl Render for TerminalView {
                         .px_2()
                         .text_size(px(11.))
                         .text_color(danger)
-                        .child(format!("连接失败: {reason}")),
+                        .child(format!("连接失败：{reason}")),
                 );
             }
         }
