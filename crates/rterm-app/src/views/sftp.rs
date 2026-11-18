@@ -44,6 +44,13 @@ const MAX_VISIBLE_TRANSFERS: usize = 4;
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 const REMOTE_PLACEHOLDER: &str = "远端未连接";
 
+// 文件列表列宽：表头与数据行共用同一组常量，保证任何容器宽度下都左右对齐。
+// 名称列不设固定宽度（`flex_1` 吃掉剩余空间），定宽列禁止收缩。
+const COL_ICON_W: f32 = 20.0;
+const COL_SIZE_W: f32 = 70.0;
+const COL_MODE_W: f32 = 80.0;
+const COL_MTIME_W: f32 = 110.0;
+
 // ---------------------------------------------------------------------------
 // 内部状态
 // ---------------------------------------------------------------------------
@@ -218,8 +225,6 @@ pub struct SftpView {
     drag: Option<DragState>,
     /// 文件列表可视区高度（每帧 render 时按窗口大小更新，用于虚拟化）。
     rows_view_h: f32,
-    /// Dock 模式下的实际宽度（由 TerminalTabView 设置，用于单栏布局计算）。
-    dock_width: Option<f32>,
 }
 
 impl SftpView {
@@ -284,16 +289,6 @@ impl SftpView {
             local_nav_generation: 0,
             drag: None,
             rows_view_h: ROW_H * 12.0,
-            dock_width: None,
-        }
-    }
-
-    /// Dock 模式：由 TerminalTabView 告知实际宽度（影响文件名列 / 地址栏宽度）。
-    pub fn set_dock_width(&mut self, width: f32, cx: &mut Context<Self>) {
-        let width = width.max(200.0);
-        if self.dock_width != Some(width) {
-            self.dock_width = Some(width);
-            cx.notify();
         }
     }
 
@@ -1611,17 +1606,7 @@ impl Render for SftpView {
             - 2.0)
             .max(ROW_H);
 
-        // S12 12.1：Dock 模式只显示远端栏（宽度由 TerminalTabView 提供）；Tab 模式保持双栏
-        let available = self.dock_width.unwrap_or_else(|| {
-            f32::from(window.viewport_size().width) - SIDEBAR_W - CONTENT_BORDER_W
-        });
-        let pane_w = if self.display_mode == SftpDisplayMode::Dock {
-            available
-        } else {
-            (available / 2.0).max(160.0)
-        };
-        let name_w = (pane_w - 16.0 - 20.0 - 70.0 - 80.0 - 110.0 - 8.0).max(60.0);
-
+        // S12 12.1：Dock 模式只显示远端栏；Tab 模式保持双栏
         let mut body = div()
             .w_full()
             .flex_1()
@@ -1636,11 +1621,11 @@ impl Render for SftpView {
                 }),
             );
         if self.display_mode == SftpDisplayMode::Dock {
-            body = body.child(self.render_pane(PaneSide::Remote, pane_w, name_w, cx));
+            body = body.child(self.render_pane(PaneSide::Remote, cx));
         } else {
             body = body
-                .child(self.render_pane(PaneSide::Local, pane_w, name_w, cx))
-                .child(self.render_pane(PaneSide::Remote, pane_w, name_w, cx));
+                .child(self.render_pane(PaneSide::Local, cx))
+                .child(self.render_pane(PaneSide::Remote, cx));
         }
 
         let mut content = root;
@@ -1696,20 +1681,15 @@ impl Render for SftpView {
 }
 
 impl SftpView {
-    fn render_pane(
-        &self,
-        side: PaneSide,
-        pane_w: f32,
-        name_w: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_pane(&self, side: PaneSide, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let pane = self.pane(side);
         let active = self.active_side == side;
         let pane_bg = t.card_bg();
         let header_bg = t.card_header_bg();
+        let is_dock = self.display_mode == SftpDisplayMode::Dock;
 
-        // 列头
+        // 列头：与数据行使用同一组列宽 —— 图标定宽 + 名称填充 + 三个定宽列
         let header = div()
             .w_full()
             .h(px(COLUMN_HEADER_H))
@@ -1721,11 +1701,17 @@ impl SftpView {
             .px_2()
             .text_size(px(10.))
             .text_color(t.text_subtle())
-            .child(div().w(px(20.)))
-            .child(self.render_sort_button("名称", SortKey::Name, name_w, side, cx))
-            .child(self.render_sort_button("大小", SortKey::Size, 70.0, side, cx))
-            .child(self.render_sort_button("权限", SortKey::Mode, 80.0, side, cx))
-            .child(self.render_sort_button("修改时间", SortKey::Modified, 110.0, side, cx));
+            .child(div().w(px(COL_ICON_W)).flex_none())
+            .child(self.render_sort_button("名称", SortKey::Name, None, side, cx))
+            .child(self.render_sort_button("大小", SortKey::Size, Some(COL_SIZE_W), side, cx))
+            .child(self.render_sort_button("权限", SortKey::Mode, Some(COL_MODE_W), side, cx))
+            .child(self.render_sort_button(
+                "修改时间",
+                SortKey::Modified,
+                Some(COL_MTIME_W),
+                side,
+                cx,
+            ));
 
         // 9.18：虚拟化 —— 只渲染可视区内的行，并把 scroll 收进合法范围
         let visible = visible_row_count(self.rows_view_h);
@@ -1736,7 +1722,7 @@ impl SftpView {
             .enumerate()
             .skip(start)
             .take(visible)
-            .map(|(index, entry)| self.render_row(side, index, entry, name_w, cx))
+            .map(|(index, entry)| self.render_row(side, index, entry, cx))
             .collect();
 
         let error = pane.error.clone().map(|error| {
@@ -1750,7 +1736,8 @@ impl SftpView {
         });
 
         div()
-            .w(gpui::relative(0.5))
+            // Dock 模式单栏占满侧栏，Tab 模式左右各半
+            .w(gpui::relative(if is_dock { 1.0 } else { 0.5 }))
             .h_full()
             .bg(pane_bg)
             .border_r_1()
@@ -1839,7 +1826,8 @@ impl SftpView {
                     .gap_1()
                     .child(
                         div()
-                            .w(px((pane_w - 78.0).max(80.0)))
+                            .flex_1()
+                            .min_w(px(0.))
                             .h(px(24.))
                             .overflow_hidden()
                             .child(pane.address.clone()),
@@ -1929,11 +1917,12 @@ impl SftpView {
         row.into_any_element()
     }
 
+    /// 列头排序按钮。`width = None` 表示名称列：填充剩余宽度且禁止撑破容器。
     fn render_sort_button(
         &self,
         label: &'static str,
         key: SortKey,
-        width: f32,
+        width: Option<f32>,
         side: PaneSide,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1948,19 +1937,22 @@ impl SftpView {
         } else {
             ""
         };
-        div()
+        let mut button = div()
             .h_full()
-            .w(px(width))
             .flex()
             .items_center()
+            .overflow_hidden()
             .cursor_pointer()
             .id(format!("sftp-sort-{}-{}", side_key(side), label))
             .on_click(cx.listener(move |this, _ev: &ClickEvent, _w, cx| {
                 this.sort_by(key, cx);
             }))
-            .text_color(if active { t.primary() } else { t.text_subtle() })
-            .child(format!("{label}{arrow}"))
-            .into_any_element()
+            .text_color(if active { t.primary() } else { t.text_subtle() });
+        button = match width {
+            Some(width) => button.w(px(width)).flex_none(),
+            None => button.flex_1().min_w(px(0.)),
+        };
+        button.child(format!("{label}{arrow}")).into_any_element()
     }
 
     fn render_row(
@@ -1968,7 +1960,6 @@ impl SftpView {
         side: PaneSide,
         index: usize,
         entry: &FileEntry,
-        name_w: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
@@ -2031,11 +2022,13 @@ impl SftpView {
                     this.open_menu(side, Some(index), x.max(0.), y.max(0.), cx);
                 }),
             )
-            .child(div().w(px(20.)).child(icon))
-            .child(div().w(px(name_w)).truncate().child(name))
+            .child(div().w(px(COL_ICON_W)).flex_none().child(icon))
+            // 名称列填充剩余宽度；min_w(0) 允许 truncate，不把定宽列挤出容器
+            .child(div().flex_1().min_w(px(0.)).truncate().child(name))
             .child(
                 div()
-                    .w(px(70.))
+                    .w(px(COL_SIZE_W))
+                    .flex_none()
                     .text_color(if selected {
                         text_color
                     } else {
@@ -2049,7 +2042,8 @@ impl SftpView {
             )
             .child(
                 div()
-                    .w(px(80.))
+                    .w(px(COL_MODE_W))
+                    .flex_none()
                     .text_color(if selected {
                         text_color
                     } else {
@@ -2059,7 +2053,8 @@ impl SftpView {
             )
             .child(
                 div()
-                    .w(px(110.))
+                    .w(px(COL_MTIME_W))
+                    .flex_none()
                     .text_color(if selected {
                         text_color
                     } else {

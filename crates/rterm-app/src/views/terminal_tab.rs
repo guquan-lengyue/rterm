@@ -133,13 +133,9 @@ impl TerminalTabView {
         self.dock_visible = true;
         let existed = self.dock.is_some();
         if self.dock.is_none() {
-            let width = self.dock_width;
             let session_id = self.session_id;
             let dock = cx.new(|cx| SftpView::new_with_mode(cx, SftpDisplayMode::Dock));
-            dock.update(cx, |view, cx| {
-                view.set_dock_width(width, cx);
-                view.connect(session_id, cx);
-            });
+            dock.update(cx, |view, cx| view.connect(session_id, cx));
             self.dock = Some(dock);
         }
         // 已有连接（重复打开侧栏）：立即定位到终端当前 cwd
@@ -216,9 +212,6 @@ impl TerminalTabView {
             return;
         }
         self.dock_width = next;
-        if let Some(dock) = &self.dock {
-            dock.update(cx, |view, cx| view.set_dock_width(next, cx));
-        }
         cx.notify();
     }
 
