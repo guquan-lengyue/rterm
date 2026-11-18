@@ -88,53 +88,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # macOS 端先尝试构建；失败不阻塞 Windows / Linux 的 Release。
-  macos:
-    name: build (macos-aarch64)
-    runs-on: macos-14
-    timeout-minutes: 90
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: aarch64-apple-darwin
-
-      - name: 编译 Release
-        run: cargo build --release --locked --target aarch64-apple-darwin -p rterm-app
-
-      - name: 解析版本号
-        shell: bash
-        run: |
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            echo "VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
-          else
-            echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
-          fi
-
-      - name: 打包（macOS）
-        run: |
-          mkdir -p dist
-          zip -j "dist/rterm-$VERSION-macos-aarch64.zip" \
-            "target/aarch64-apple-darwin/release/rterm-app" README.md
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rterm-macos-aarch64
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 7
-
   release:
     name: 发布 GitHub Release
-    needs: [build, macos]
-    # macOS 允许失败（continue-on-error），但 Windows / Linux 必须成功。
-    if: always() && github.ref_type == 'tag' && needs.build.result == 'success'
+    needs: build
+    # Windows / Linux 均构建成功才发 Release。
+    if: github.ref_type == 'tag' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
