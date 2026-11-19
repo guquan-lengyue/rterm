@@ -89,3 +89,8 @@ node_modules/
 package.json
 package-lock.json
 npm-debug.log*
+
+# ==============================
+# Trae 项目级 MCP 配置（含本机绝对路径，勿提交）
+# ==============================
+.trae/mcp.json

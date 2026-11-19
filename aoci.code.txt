@@ -1,0 +1,157 @@
+#AOCI-CODE-VOLUME: 1
+
+===/<repository>/===
+.gitattributes[FV6T]: F:声明全仓库文本统一以 LF 检出，保证 AOCI 基线跨平台字节一致 | R:- | A:* text=auto eol=lf | S:Windows 默认 autocrlf 会把 CRLF 检出判为 stale；改动此规则会使全部 AOCI 基线失效
+.gitignore[FG5T]: F:声明构建产物、IDE、密钥、截图与机器绑定 MCP 配置的 Git 忽略边界 | R:code:.gitattributes | A:target/, *.key, .screenshots/, .trae/mcp.json | S:AOCI 认知资产（aoci.txt、aoci.meta.txt、aoci.code.txt、AGENTS.md）不得加入忽略，否则 scan 会静默跳过且索引建不起来
+AGENTS.md[SG7S]: F:声明 AOCI 认知层的建立、复用、收尾与安全边界，供 Agent 会话执行 | R:- | A:AOCI 仓库认知, 建立/生成/恢复认知, 任务收尾与认知维护 | S:aoci:begin 与 aoci:end 区块由 aoci init 维护，改写本文件时不得破坏标记或在区块外重复追加
+Cargo.toml[FV7T]: F:定义 9 个 crate 组成的工作区、共享依赖版本与 release 构建参数 | R:code:crates/rterm-app/Cargo.toml | A:workspace, workspace.dependencies, profile.release | S:ssh2 关闭默认特性并启用 vendored-openssl，Windows 构建需 perl/make/C 工具链；gpui 使用 bezel-gpui fork
+README.md[SG4S]: F:介绍 rterm 的 SSH/SFTP/监控能力、快捷键、数据位置与源码构建步骤 | R:- | A:功能一览, 快捷键, 常见问题, 从源码构建 | S:启动后立即退出多为从沙箱或自动化环境启动导致 DPAPI 解密被拒，应引导用户从资源管理器启动
+
+===/<repository>/.github/workflows/===
+release.yml[OV6S]: F:打 v* 标签时构建 Windows 与 Linux 发布包并创建 GitHub Release | R:code:crates/rterm-app/Cargo.toml | A:build, release, softprops/action-gh-release | S:仅 tag 推送创建 Release 且两个平台都构建成功才发布；手动触发只上传 artifact，不创建 Release
+
+===/<repository>/crates/rterm-app/===
+Cargo.toml[FV6T]: F:声明 rterm-app 的依赖、Windows 单实例依赖与 Linux 窗口后端特性 | R:code:crates/rterm-app/src/main.rs | A:dependencies, windows features, gpui_platform x11/wayland | S:Linux 下 gpui_platform 默认不启用窗口后端，必须显式开启 x11/wayland 才能创建窗口
+
+===/<repository>/crates/rterm-app/src/===
+diagnostics.rs[OO5M]: F:导出诊断 zip，包含 diag.txt 摘要与最近 8 份会话日志，刻意排除凭据 | R:code:crates/rterm-app/src/state.rs,code:crates/rterm-app/src/views/main_window.rs | A:export_diagnostics, build_summary, recent_logs, default_export_path | S:诊断包永不包含 sessions.json 或任何凭据，避免泄露主机与密钥信息
+event.rs[CM8M]: F:定义跨模块 AppEvent 事件集与 EventBusHost，供 Service 广播、View 订阅 | R:code:crates/rterm-app/src/state.rs,code:crates/rterm-app/src/views/main_window.rs | A:AppEvent, EventBusHost, MenuCommand, CwdSource | S:gpui 0.3 的 EventEmitter 只能挂在 Entity 上，emit 必须经 update_entity(&event_bus_host) 派发，不能直接调用
+main.rs[EG9L]: F:启动 rterm-app：单实例、加载会话与设置、注册快捷键和窗口、退出与 panic 落盘 | R:code:crates/rterm-app/src/state.rs,code:crates/rterm-app/src/views/main_window.rs,code:crates/rterm-app/src/event.rs,code:crates/rterm-app/src/single_instance.rs,code:crates/rterm-app/src/views/settings.rs | A:main, load_store, install_panic_hook, save_store, install_logger | S:启动加载失败时退出和 panic 都不得写 sessions.json，避免空库覆盖损坏文件；action 派发期间窗口被移出 App.windows，必须用 app.defer 延后处理
+single_instance.rs[RR6T]: F:用命名互斥体保证 Windows 登录会话内只运行一个 rterm 实例 | R:code:crates/rterm-app/src/main.rs | A:acquire, SingleInstanceGuard, CreateMutexW | S:创建互斥体失败时仍继续启动并返回空 guard；非 Windows 平台不限制单实例
+state.rs[CG8M]: F:定义 AppState、Settings 默认值与持久化路径，统一会话和设置落盘及数据目录迁移 | R:code:crates/rterm-app/src/event.rs,code:crates/rterm-app/src/theme.rs,code:crates/rterm-app/src/main.rs,code:crates/rterm-session/src/store.rs | A:AppState, Settings, lock_or_recover, data_dir_for, migrate_data_dir, persist_sessions | S:settings.json 固定放在配置目录，不跟随 data_dir，避免读取 data_dir 前的 bootstrap 循环；data_dir 变更时复制而非移动 sessions.json
+theme.rs[CU7L]: F:定义 Theme trait、4 个内置主题与终端 ANSI 调色板，集中管理全部 UI 颜色 | R:code:crates/rterm-app/src/ui.rs,code:crates/rterm-app/src/state.rs,code:crates/rterm-app/src/views/settings.rs | A:Theme, CatppuccinMocha, all_themes, theme_by_name, terminal_palette, TerminalPalette | S:每个背景层必须配对对应的文字色以保证对比度；未知主题名和缺失的终端调色板都回退 Catppuccin Mocha
+ui.rs[CG4T]: F:从 gpui Context 读取 AppState 中的主题 Arc，供所有 View 统一取色 | R:code:crates/rterm-app/src/state.rs,code:crates/rterm-app/src/theme.rs | A:theme | S:必须 clone Arc 而不是借用主题，避免与 cx.subscribe 或 cx.global 的 &mut 借用冲突
+
+===/<repository>/crates/rterm-app/src/views/===
+command_palette.rs[CU5M]: F:命令面板的可搜索条目模型、模糊评分与选择状态，UI 由 MainWindow 渲染 | R:code:crates/rterm-app/src/views/main_window.rs | A:PaletteState, PaletteItem, PaletteAction, fuzzy_score | S:-
+context_menu.rs[AU6L]: F:定义空白、分组、会话三类右键菜单的动作模型、位置夹取与共享菜单组件 | R:code:crates/rterm-app/src/views/main_window.rs,code:crates/rterm-app/src/views/menu_bar.rs | A:ContextMenuTarget, ContextMenuAction, entries_for, clamp_position, menu_item, render_context_menu | S:本模块只定义目标到动作的映射与视觉组件，动作执行统一由 MainWindow 分派，避免全局功能混入单会话菜单
+group_picker.rs[AU5L]: F:可搜索分组下拉与「移动到分组」弹窗，支持内联新建分组并发出事件 | R:code:crates/rterm-app/src/views/session_dialog.rs,code:crates/rterm-app/src/views/main_window.rs,code:crates/rterm-session/src/lib.rs | A:GroupPicker, GroupPickerDialog, GroupPickerEvent, normalize_folder_path | S:分组数据由 SessionStore 维护，本组件只负责选择与发出新建事件，不直接落库
+icon_picker.rs[AU3T]: F:提供 12 个预设 emoji 图标和 6 列网格渲染，供会话编辑与更改图标复用 | R:code:crates/rterm-app/src/views/session_dialog.rs,code:crates/rterm-app/src/views/main_window.rs | A:PRESET_ICONS, render_icon_grid | S:-
+import_export.rs[AU6L]: F:会话导入导出弹窗：范围与加密选择、OpenSSH 导入、冲突预览与执行报告 | R:code:crates/rterm-app/src/views/main_window.rs,code:crates/rterm-app/src/views/scroll_list.rs,code:crates/rterm-app/src/views/text_input.rs,code:crates/rterm-session/src/export.rs | A:ImportExportDialog, IoMode, default_export_path, render_export_body, render_import_body | S:导出支持 DPAPI 或独立口令两种加密；导入 OpenSSH config 时会缓存解析结果，确认导入时直接复用而不重新解析
+main_window.rs[AU9L]: F:顶层窗口：布局、标签页生命周期、事件分发、右键菜单与弹窗及快捷键编排 | R:code:crates/rterm-app/src/views/session_tree.rs,code:crates/rterm-app/src/views/tab_bar.rs,code:crates/rterm-app/src/views/status_bar.rs,code:crates/rterm-app/src/views/terminal_tab.rs,code:crates/rterm-app/src/event.rs,code:crates/rterm-app/src/state.rs | A:MainWindow, TabEntry, TabContentView, handle_context_action, open_command_palette, close_tab | S:每个终端 Tab 维护 tab_id 到 SyncBridge 的映射；action 派发期间窗口被移出 App.windows，打开弹窗必须用 app.defer 延后
+menu_bar.rs[AU6M]: F:顶部常驻菜单栏（会话、连接、视图、帮助），F10 展开并通过 MenuCommand 分发动作 | R:code:crates/rterm-app/src/event.rs,code:crates/rterm-app/src/views/main_window.rs,code:crates/rterm-app/src/views/context_menu.rs | A:MenuBarView, MenuKind, entries, menu_anchor_x, emit_menu_command | S:下拉菜单由 MainWindow 在根节点渲染；菜单动作统一走 AppEvent::MenuCommand，不在本组件执行
+mod.rs[CG6T]: F:声明视图模块与共享布局尺寸常量，并提供弹窗自适应尺寸计算 | R:code:crates/rterm-app/src/views/main_window.rs,code:crates/rterm-app/src/views/tab_bar.rs,code:crates/rterm-app/src/views/sftp.rs | A:SIDEBAR_W, TAB_BAR_H, CONTEXT_MENU_W, adaptive_dialog_size | S:固定布局尺寸由 MainWindow、TabBar、TerminalView 共用，改动会影响 resize 计算；极小窗口下弹窗尺寸钳到视口内
+monitor.rs[AU7L]: F:远程性能监控 Tab：消费后台采样、实时折线与磁盘饼图、告警和暂停 | R:code:crates/rterm-monitor/src/lib.rs,code:crates/rterm-app/src/event.rs,code:crates/rterm-app/src/views/main_window.rs,code:crates/rterm-ssh/src/lib.rs | A:MonitorView, ResourceSample, MonitorConfig, render_cards, render_disk_chart, paint_chart | S:采集全部在 rterm-monitor 后台线程完成，每个监控 Tab 使用独立 SSH 连接，不占用终端或 SFTP 会话；图表用 Canvas 自绘
+port_forward.rs[AU7L]: F:端口转发 Tab：规则增删改、独立 SSH 转发线程、运行状态与自动启动 | R:code:crates/rterm-forward/src/lib.rs,code:crates/rterm-session/src/model.rs,code:crates/rterm-app/src/views/main_window.rs | A:PortForwardView, RuleEditor, parse_port, start_rule, stop_rule, commit_rule | S:规则持久化在 Session.port_forwards，每条规则使用独立 SSH 连接；非回环地址绑定前要求二次确认
+prompt.rs[AU4M]: F:通用单行文本输入弹窗，用于新建或重命名分组并回传校验结果 | R:code:crates/rterm-app/src/views/text_input.rs,code:crates/rterm-app/src/views/main_window.rs | A:TextPromptDialog, PromptAction, new_folder, rename_folder | S:-
+scroll_list.rs[CG5M]: F:自绘定高虚拟滚动列表：ScrollMetrics 纯几何状态加 scroll_list 渲染 | R:code:crates/rterm-app/src/views/settings.rs,code:crates/rterm-app/src/views/import_export.rs | A:ScrollMetrics, scroll_list, SCROLL_TRACK_W, visible, thumb | S:ScrollMetrics 不依赖 gpui 可单测；每帧只渲染可视行，行数增加不影响布局成本
+session_dialog.rs[AU7L]: F:会话编辑弹窗：基础、认证、高级三页表单，分组、图标、跳板代理、测试连接与校验 | R:code:crates/rterm-app/src/views/group_picker.rs,code:crates/rterm-app/src/views/icon_picker.rs,code:crates/rterm-session/src/model.rs,code:crates/rterm-app/src/views/main_window.rs | A:SessionEditDialog, DialogTab, AuthType, validate_session_form, PASSWORD_SENTINEL, test_connection | S:密码框掩码 ******** 是哨兵，保存时内容等于该串则保留原密码；新建密码以 version=0 明文暂存，退出时由 crypto_bridge 统一 DPAPI 加密
+session_tree.rs[AU7L]: F:左侧会话树：显式分组与会话派生路径合并、连接状态徽标、右键三态与选中广播 | R:code:crates/rterm-app/src/views/context_menu.rs,code:crates/rterm-app/src/event.rs,code:crates/rterm-session/src/model.rs,code:crates/rterm-app/src/views/main_window.rs | A:SessionTreeView, TreeNode, ConnectionBadge, build, render_node, select | S:行内右键必须 stop_propagation，避免误弹空白菜单；选中态通过 SessionTreeSelectionChanged 广播给顶部菜单栏
+settings.rs[AC6L]: F:全局设置弹窗：7 个分页表单、输入校验、主题与字号即时生效及持久化 | R:code:crates/rterm-app/src/state.rs,code:crates/rterm-app/src/theme.rs,code:crates/rterm-app/src/views/scroll_list.rs,code:crates/rterm-app/src/views/text_input.rs,code:crates/rterm-app/src/event.rs | A:SettingsView, SettingsTab, apply_inputs, save, merge_font_choices, OpenSettings | S:保存顺序固定为解析校验、写 settings.json、更新 AppState.settings 与 theme、广播 AppSettingsChanged；data_dir 变更会迁移 sessions.json
+sftp.rs[AN7L]: F:双栏 SFTP 文件管理：本地与远端浏览、拖拽传输、传输队列和文件操作菜单 | R:code:crates/rterm-sftp/src/service.rs,code:crates/rterm-sftp/src/queue.rs,code:crates/rterm-app/src/views/text_input.rs,code:crates/rterm-app/src/event.rs,code:crates/rterm-ssh/src/lib.rs | A:SftpView, Pane, TransferQueue, SftpDisplayMode, navigate, handle_transfer_event | S:远端 I/O 已后台化，但本地文件系统操作仍在 UI 线程同步执行；每个 SFTP Tab 使用独立 SSH 连接
+status_bar.rs[AU5M]: F:底部状态栏：临时消息、活动主机、连接延迟、重连次数与每秒时钟 | R:code:crates/rterm-app/src/event.rs,code:crates/rterm-app/src/views/main_window.rs | A:StatusBar, set_active_session, READY_MESSAGE | S:duration_ms 为 0 表示持久消息；临时消息复用每秒时钟循环检查过期，不额外开线程
+tab_bar.rs[AU6M]: F:标签栏：图标、标题、关闭按钮、横向滚动与右键批量关闭菜单 | R:code:crates/rterm-app/src/views/main_window.rs,code:crates/rterm-app/src/event.rs,code:crates/rterm-app/src/state.rs | A:TabBar, TabMenu, render_tab, set_tabs, TAB_MAX_W | S:TabBar 是纯展示 View，Tab 生命周期由 MainWindow 管理；右键菜单用 deferred 绘制以盖住内容区
+terminal.rs[AU8L]: F:终端 Tab：PTY 字节流渲染、光标与滚动、选区复制粘贴、主机密钥确认、重连和路径同步 | R:code:crates/rterm-terminal/src/engine.rs,code:crates/rterm-ssh/src/pty.rs,code:crates/rterm-ssh/src/lib.rs,code:crates/rterm-sync/src/lib.rs,code:crates/rterm-app/src/event.rs,code:crates/rterm-app/src/views/terminal_tab.rs | A:TerminalView, Snapshot, build_snapshot, on_key, run_connection, HostKeyPromptState | S:PTY 输出使用容量 256 的有界队列做背压；resize 必须同时更新 TerminalEngine 的 cols/rows 与 PTY；Canvas 按 Cell 自绘
+terminal_tab.rs[AU7M]: F:终端与右侧 SFTP 侧栏的组合视图：布局、拖拽分隔条、显隐与路径跟随 | R:code:crates/rterm-app/src/views/terminal.rs,code:crates/rterm-app/src/views/sftp.rs,code:crates/rterm-app/src/event.rs,code:crates/rterm-sync/src/lib.rs,code:crates/rterm-app/src/state.rs | A:TerminalTabView, show_dock, toggle_dock, on_terminal_cwd, navigate_dock, dock_max_width | S:驱动侧栏导航前必须 expect_sftp_navigation 登记期望事件，防止 SftpNavigated 反向注入 cd 形成回环；侧栏最大宽度占内容区 45%
+text_input.rs[CU7L]: F:可复用单行文本输入：IME、光标与选区编辑、粘贴、密码掩码和鼠标定位 | R:code:crates/rterm-app/src/main.rs,code:crates/rterm-app/src/views/settings.rs,code:crates/rterm-app/src/views/import_export.rs,code:crates/rterm-app/src/views/session_dialog.rs,code:crates/rterm-app/src/views/command_palette.rs | A:TextInput, TextInputEvent, EntityInputHandler, Backspace, PASSWORD_MASK, on_mouse_down | S:EntityInputHandler 只处理 IME 文本，Backspace/Delete/方向键必须通过 action 加 App::bind_keys 绑定；密码模式的显示偏移必须与明文偏移互转
+
+===/<repository>/crates/rterm-crypto/===
+Cargo.toml[FV4T]: F:声明 rterm-crypto 的 AES-GCM/PBKDF2 依赖与 Windows DPAPI 依赖 | R:code:crates/rterm-crypto/src/lib.rs | A:aes-gcm, hmac, sha2, windows Win32_Security_Cryptography | S:-
+
+===/<repository>/crates/rterm-crypto/src/===
+lib.rs[CS8S]: F:提供 DPAPI 本地加解密与 PBKDF2-HMAC-SHA256 派生的 AES-256-GCM 导出加解密 | R:code:crates/rterm-session/src/crypto_bridge.rs,code:crates/rterm-session/src/export.rs | A:dpapi_encrypt, dpapi_decrypt, derive_key, aesgcm_encrypt, aesgcm_decrypt | S:DPAPI 输出由 LocalAlloc 分配，复制后必须 LocalFree；AES-GCM 打包格式为 salt(16)+nonce(12)+ciphertext+tag，PBKDF2 迭代 600000；非 Windows 平台 DPAPI 必须失败并回退 AES-GCM
+
+===/<repository>/crates/rterm-forward/===
+Cargo.toml[FV3T]: F:声明 rterm-forward 的 ssh2/futures 依赖与 rterm-session、rterm-ssh 依赖 | R:code:crates/rterm-forward/src/lib.rs | A:ssh2, rterm-session, rterm-ssh | S:-
+
+===/<repository>/crates/rterm-forward/src/===
+lib.rs[IN7L]: F:SSH 端口转发运行时：本地 -L、远程 -R、动态 -D SOCKS5，每条规则独立 SSH 连接 | R:code:crates/rterm-session/src/model.rs,code:crates/rterm-ssh/src/lib.rs,code:crates/rterm-app/src/views/port_forward.rs | A:start_forward, ForwardHandle, ForwardStatus, ForwardEvent, run_local, run_dynamic | S:每条规则独占 SSH 连接，规避 libssh2 并发限制；停止时先断 SSH 唤醒 accept 再 join 线程，确保端口释放；Drop 等价 stop
+
+===/<repository>/crates/rterm-monitor/===
+Cargo.toml[FV3T]: F:声明 rterm-monitor 的 anyhow/futures/log/ssh2 与 rterm-ssh 依赖 | R:code:crates/rterm-monitor/src/lib.rs | A:ssh2, rterm-ssh, futures | S:-
+
+===/<repository>/crates/rterm-monitor/src/===
+alerts.rs[KO5S]: F:阈值告警闸门（95% 滞回、一次超限只报一次）与固定窗口滑动平均 | R:code:crates/rterm-monitor/src/types.rs,code:crates/rterm-monitor/src/collector.rs | A:AlertGate, evaluate, RollingAverage, push, average | S:告警使用 95% 滞回：只有回落到阈值 95% 以下才重新布防，避免阈值附近抖动造成告警风暴
+cache.rs[CP4S]: F:目录扫描结果的 TTL 内存缓存，最多 64 条，写入时清理过期项 | R:code:crates/rterm-monitor/src/types.rs,code:crates/rterm-monitor/src/collector.rs | A:DiskScanCache, get_at, insert_at, normalize_path, MAX_ENTRIES | S:路径末尾斜杠会被归一化，/var 与 /var/ 命中同一条缓存；容量上限 64，超出按最旧淘汰
+collector.rs[IO7M]: F:监控后台采集线程：独立 SSH、串行采样、系统探测、目录扫描与命令事件通道 | R:code:crates/rterm-monitor/src/parse.rs,code:crates/rterm-monitor/src/scripts.rs,code:crates/rterm-monitor/src/alerts.rs,code:crates/rterm-monitor/src/cache.rs,code:crates/rterm-monitor/src/types.rs,code:crates/rterm-ssh/src/lib.rs | A:spawn, MonitorHandle, run, tick, scan_disk, detect_os | S:命令输出上限 512 KiB；目录扫描读取超时放宽到 120 秒；Handle Drop 只置停止位不 join，线程可能阻塞在 SSH 读取，UI 线程不能等待
+lib.rs[LO5T]: F:rterm-monitor crate 入口：导出数据模型、解析、告警、缓存与采集线程 API | R:code:crates/rterm-monitor/src/types.rs,code:crates/rterm-monitor/src/parse.rs,code:crates/rterm-monitor/src/alerts.rs,code:crates/rterm-monitor/src/collector.rs,code:crates/rterm-monitor/src/cache.rs,code:crates/rterm-monitor/src/scripts.rs | A:alerts, cache, collector, parse, scripts, types | S:-
+parse.rs[KO7L]: F:解析 Linux /proc 与 macOS sysctl 的监控输出，计算 CPU、内存、网络速率与磁盘占用 | R:code:crates/rterm-monitor/src/types.rs,code:crates/rterm-monitor/src/scripts.rs,code:crates/rterm-monitor/src/collector.rs | A:parse_linux, parse_macos, ParseState, parse_disk_usage, disk_usage, parse_loadavg | S:CPU 与网络依赖相邻两次采样的增量，ParseState 必须在同一采集线程串行复用；CPU 计数器回绕按 0 处理；网络解析忽略 loopback
+scripts.rs[FO4T]: F:定义 Linux 与 macOS 监控脚本、段落标记和防注入的目录扫描脚本 | R:code:crates/rterm-monitor/src/collector.rs,code:crates/rterm-monitor/src/parse.rs | A:LINUX_SCRIPT, MACOS_SCRIPT, PROBE_SCRIPT, MARKER_PREFIX, disk_scan_script, shell_quote | S:脚本用 @@RT_ 标记分段落，一次 exec 输出全部指标以减少往返；路径必须经 shell_quote 单引号转义防注入
+types.rs[DO6M]: F:监控纯数据模型：资源采样、指标枚举、磁盘占用、告警与采集配置命令事件 | R:code:crates/rterm-monitor/src/parse.rs,code:crates/rterm-monitor/src/collector.rs,code:crates/rterm-app/src/views/monitor.rs | A:ResourceSample, Metric, DiskUsage, MonitorAlert, MonitorConfig, MonitorEvent | S:百分比统一 0 到 100，网络速率 KiB/s，磁盘容量字节；MonitorConfig::sanitized 会把间隔夹到 0.5 至 60 秒、阈值夹到 0 至 100
+
+===/<repository>/crates/rterm-session/===
+Cargo.toml[FV4T]: F:声明 rterm-session 的 serde/chrono/uuid 依赖与 rterm-crypto 依赖 | R:code:crates/rterm-session/src/lib.rs | A:serde, chrono, base64, rterm-crypto | S:-
+
+===/<repository>/crates/rterm-session/src/===
+backup.rs[RR6M]: F:会话文件自动备份：24 小时节流、最多保留 7 份、按时间戳字典序轮转 | R:code:crates/rterm-app/src/main.rs,code:crates/rterm-app/src/state.rs | A:ensure_daily_backup, backup_now, list_backups, prune_backups, BACKUP_INTERVAL, MAX_BACKUPS | S:备份命名 sessions.json 加时间戳加 .bak，字典序即时间序；目录不存在或源文件缺失时静默跳过
+crypto_bridge.rs[IS8S]: F:Session 与 rterm-crypto 的桥：DPAPI 本地存储加解密与 AES-GCM 导出加解密 | R:code:crates/rterm-crypto/src/lib.rs,code:crates/rterm-session/src/model.rs,code:crates/rterm-session/src/store.rs,code:crates/rterm-session/src/export.rs | A:encrypt_session_dpapi, decrypt_session_dpapi, encrypt_session_aesgcm, decrypt_session_aesgcm, encrypt_auth_dpapi | S:EncryptedString.version 语义为 0 明文、1 DPAPI、2 AES-GCM；加密只处理 version=0，解密只处理对应版本；代理跳板嵌套必须递归处理
+export.rs[DD7L]: F:会话导出导入：schema v2、范围选择、DPAPI 或 AES-GCM、冲突策略与预览报告 | R:code:crates/rterm-session/src/model.rs,code:crates/rterm-session/src/crypto_bridge.rs,code:crates/rterm-session/src/store.rs,code:crates/rterm-app/src/views/import_export.rs | A:export_json, preview_import, import_json, merge_sessions, ExportScope, ConflictPolicy | S:导出 passphrase 为空时保留 DPAPI 密文，只有本机本用户可解；v2 新增 folders 字段，v1 文件缺该字段按空列表读取
+lib.rs[LD6T]: F:rterm-session crate 入口：导出 Session 模型、Store、导入导出、OpenSSH 解析与代理链 API | R:code:crates/rterm-session/src/model.rs,code:crates/rterm-session/src/store.rs,code:crates/rterm-session/src/export.rs,code:crates/rterm-session/src/openssh.rs,code:crates/rterm-session/src/proxy.rs,code:crates/rterm-session/src/crypto_bridge.rs | A:Session, SessionStore, ExportScope, ConflictPolicy, build_chain, normalize_folder_path | S:本 crate 不依赖 gpui，是纯数据层，可独立测试
+model.rs[DD8M]: F:Session 领域模型：认证方式、加密字符串、端口转发规则、跳板代理与校验 | R:code:crates/rterm-session/src/crypto_bridge.rs,code:crates/rterm-session/src/store.rs,code:crates/rterm-session/src/export.rs,code:crates/rterm-app/src/views/session_dialog.rs | A:Session, AuthMethod, EncryptedString, PortForward, ForwardKind, validate_port_forwards | S:所有字段 serde(default) 保证旧 JSON 可反序列化；EncryptedString version=0 为明文仅供迁移；PortForward 默认只绑定 127.0.0.1 避免暴露局域网
+openssh.rs[II6L]: F:解析 OpenSSH config 为 Session 列表，支持 Host、Include、ProxyJump 与静态 Match | R:code:crates/rterm-session/src/model.rs,code:crates/rterm-app/src/views/import_export.rs | A:parse_openssh_config, parse_openssh_str, split_into_host_blocks, match_block_applies, parse_proxy_jump, MAX_INCLUDE_DEPTH | S:Include 最多递归 2 层（同时防循环）；同一 Host 块重复关键字取第一个值；exec 与 localnetwork 等运行期 Match 条件按不生效处理
+proxy.rs[DN7M]: F:SSH 跳板链构建、环路检测、最大跳数限制与代理链展示 | R:code:crates/rterm-session/src/model.rs,code:crates/rterm-app/src/views/session_dialog.rs | A:build_chain, can_be_proxy_of, selection_forms_cycle, describe_chain, MAX_JUMPS | S:环路检测以 Session.id 为准（复制跳板保留 id）；最多 5 跳，超过或成环一律拒绝；候选自身已有环或超深时不可选
+store.rs[DD8L]: F:SessionStore：会话 CRUD、分组增删改、JSON 持久化与容错加载 | R:code:crates/rterm-session/src/model.rs,code:crates/rterm-session/src/crypto_bridge.rs,code:crates/rterm-app/src/state.rs | A:SessionStore, upsert, move_session, save, load_lossy, normalize_folder_path | S:文件版本 FILE_VERSION 为 2；load_lossy 单条会话解密失败只记 LoadIssue 不算整体失败；分组路径必须以斜杠分隔且禁止自嵌套
+
+===/<repository>/crates/rterm-sftp/===
+Cargo.toml[FV3T]: F:声明 rterm-sftp 的 ssh2/futures/uuid 依赖 | R:code:crates/rterm-sftp/src/lib.rs | A:ssh2, futures, uuid | S:-
+
+===/<repository>/crates/rterm-sftp/src/===
+lib.rs[LN5T]: F:rterm-sftp crate 入口：导出传输队列与 SFTP 服务 API | R:code:crates/rterm-sftp/src/queue.rs,code:crates/rterm-sftp/src/service.rs | A:TransferQueue, SftpService, FileEntry, TransferDirection, SortKey | S:-
+queue.rs[DN7L]: F:SFTP 传输队列：上传下载任务、断点临时文件、进度事件、暂停继续取消与重试 | R:code:crates/rterm-sftp/src/service.rs,code:crates/rterm-app/src/views/sftp.rs,code:crates/rterm-app/src/event.rs | A:TransferQueue, TransferSnapshot, TransferState, TransferEvent, CHUNK_SIZE, MAX_ATTEMPTS | S:分块 64 KiB、最多重试 3 次；先写 .part 临时文件再 finalize，避免半截文件覆盖目标；worker 线程串行执行任务
+service.rs[IN7M]: F:SFTP 服务封装：列目录、stat、mkdir、删除、重命名、chmod 与排序格式化辅助 | R:code:crates/rterm-sftp/src/queue.rs,code:crates/rterm-app/src/views/sftp.rs,code:crates/rterm-ssh/src/lib.rs | A:SftpService, FileEntry, listdir, stat, sort_entries, format_mode | S:目录列表先保序（目录在前）再排序；远程路径拼接必须用 remote_join 与 remote_parent，不能直接用本地 PathBuf
+
+===/<repository>/crates/rterm-ssh/===
+Cargo.toml[FV4T]: F:声明 rterm-ssh 的 ssh2/sha1/sha2/hmac 依赖与 rterm-session 依赖 | R:code:crates/rterm-ssh/src/lib.rs | A:ssh2, sha2, sha1, hmac, rterm-session | S:-
+
+===/<repository>/crates/rterm-ssh/src/===
+auth.rs[IS6T]: F:依次尝试密码、私钥、Agent 三种 SSH 认证方式 | R:code:crates/rterm-session/src/model.rs,code:crates/rterm-ssh/src/errors.rs | A:authenticate, plaintext | S:传入的 Session 必须是已解密状态（EncryptedString.version 为 0），遇到密文直接报错而不是尝试解密
+errors.rs[CR6M]: F:把 libssh2 原始错误码与 IO 错误归一为可读类别，并提供中文文案 | R:code:crates/rterm-ssh/src/lib.rs,code:crates/rterm-ssh/src/reconnect.rs,code:crates/rterm-app/src/views/terminal.rs | A:SshErrorKind, classify, classify_message, describe | S:分类必须沿 anyhow 错误链逐层 downcast，不能只看最外层；未知类别保留原始错误详情供排障
+keepalive.rs[RR5T]: F:SSH 心跳计时器：按间隔判断是否应发送 keepalive，0 表示关闭 | R:code:crates/rterm-ssh/src/pty.rs | A:KeepAliveTimer, new, is_enabled, due, mark_sent | S:interval_secs 为 0 时禁用心跳；计时器由 PTY IO 线程驱动，不单独起线程
+known_hosts.rs[IS8L]: F:known_hosts 校验与写入：明文与哈希主机匹配、指纹计算、原子替换与并发写 | R:code:crates/rterm-ssh/src/lib.rs,code:crates/rterm-app/src/views/terminal.rs,code:crates/rterm-ssh/src/auth.rs | A:HostKeyPolicy, HostKeyDecision, HostKeyInfo, verify_host_key, check_and_record, stored_fingerprint | S:支持 hashed known_hosts（HMAC-SHA1）匹配；写入用临时文件原子替换并保留并发写入的其他主机行；主机密钥变更必须拒绝并交由用户确认
+lib.rs[LN8M]: F:rterm-ssh 入口：TCP 握手认证、known_hosts、PTY、keepalive、重连与跳板链承载 | R:code:crates/rterm-ssh/src/auth.rs,code:crates/rterm-ssh/src/errors.rs,code:crates/rterm-ssh/src/known_hosts.rs,code:crates/rterm-ssh/src/pty.rs,code:crates/rterm-ssh/src/proxy.rs,code:crates/rterm-ssh/src/reconnect.rs | A:SshSession, ConnectionState, HostKeyVerifier, connect, session_clone | S:所有阻塞调用必须由调用方放到后台线程；跳板链的中间 Session 与 Relay 必须在目标会话存续期间保持连接；ssh2 只接受真实 socket
+proxy.rs[IN7S]: F:跳板链路的本地回环中继：把上一跳直连通道桥接成本地 TCP 端口 | R:code:crates/rterm-ssh/src/lib.rs | A:Relay, start, local_port, run_relay, pump | S:ssh2 不能把上一条 Channel 直接交给下一跳 Session，必须经 127.0.0.1 随机端口中继；中继线程只占用上一跳 Channel，避免与该跳其他调用并发
+pty.rs[RN8M]: F:打开远程 shell 并轮询 PTY 读写、resize、keepalive 与主机密钥确认 | R:code:crates/rterm-ssh/src/keepalive.rs,code:crates/rterm-ssh/src/known_hosts.rs,code:crates/rterm-app/src/views/terminal.rs | A:PtyCommand, PtyEvent, send_event, open_shell, idle_poll_interval | S:ssh2 blocking read 会锁住整个 Session，shell 打开后必须切换 non-blocking 单线程轮询；事件队列满时阻塞重试做背压，不能丢弃 Data
+reconnect.rs[RR5T]: F:指数退避重连策略：1、2、4、8、16 秒，最多 5 次 | R:code:crates/rterm-ssh/src/lib.rs | A:ReconnectPolicy, delay, should_retry | S:attempt 从 1 开始；退避位移上限 4，之后保持 16 秒
+
+===/<repository>/crates/rterm-sync/===
+Cargo.toml[FV3T]: F:声明 rterm-sync 的 anyhow/log 依赖 | R:code:crates/rterm-sync/src/lib.rs | A:anyhow, log | S:-
+
+===/<repository>/crates/rterm-sync/src/===
+lib.rs[DW8L]: F:终端与 SFTP 路径同步状态机：PS1 解析、cd 注入、双向防回环与 pwd 兜底 | R:code:crates/rterm-app/src/views/terminal.rs,code:crates/rterm-app/src/views/terminal_tab.rs,code:crates/rterm-app/src/views/sftp.rs,code:crates/rterm-app/src/state.rs | A:SyncBridge, SyncMode, DetectedCwd, CwdSource, observe_output, expect_sftp_navigation | S:纯状态机不持有 PTY、SFTP 或 UI 句柄；ignore FIFO 上限 10、tail 上限 4096、路径上限 1024；pending SFTP nav 计数防止回环注入
+
+===/<repository>/crates/rterm-terminal/===
+Cargo.toml[FV3T]: F:声明 rterm-terminal 的 alacritty_terminal/anyhow/log 依赖 | R:code:crates/rterm-terminal/src/lib.rs | A:alacritty_terminal, anyhow, log | S:-
+
+===/<repository>/crates/rterm-terminal/src/===
+engine.rs[LU8L]: F:alacritty_terminal 封装：字节流喂 VT 解析、Grid 光标颜色读取与按键字节映射 | R:code:crates/rterm-app/src/views/terminal.rs,code:crates/rterm-terminal/src/session_log.rs | A:TerminalEngine, TerminalKey, ViMove, SizeInfo, EventProxy, input_key | S:Term 是 !Send + !Sync，只能在 gpui 主线程创建和使用；PtyWrite 查询应答需写回 PTY，OSC 52 剪贴板事件经共享队列交给 View
+lib.rs[LU4T]: F:rterm-terminal crate 入口：导出 TerminalEngine、SizeInfo、TerminalKey 与会话日志 | R:code:crates/rterm-terminal/src/engine.rs,code:crates/rterm-terminal/src/session_log.rs | A:TerminalEngine, SizeInfo, TerminalKey, ViMove, SessionLog | S:-
+session_log.rs[RO5S]: F:会话日志写入器：把 PTY 原始输出追加到文件，可选行首时间戳 | R:code:crates/rterm-app/src/views/terminal.rs | A:SessionLog, create, write, flush, utc_clock | S:保留 ANSI 转义序列以便原样回放；时间戳只在行首补一次；写入失败只告警不影响终端使用
+
+===/<repository>/docs/===
+README.md[SG5S]: F:面向 AI 开发者的开工手册：必读顺序、项目快照、构建命令与开发纪律 | R:code:docs/planning/README.md,code:docs/architecture/architecture.md,code:docs/product/overview.md,code:README.md | A:立即要读的 3 份, 项目快照, 开发纪律 | S:docs 是给 AI 的施工图而非用户文档；开工先读 planning/README 与 architecture.md，避免重复实现已完成功能
+
+===/<repository>/docs/architecture/===
+README.md[SG4T]: F:技术设计文档索引：architecture.md 与 decisions.md 的用途和快速查找表 | R:code:docs/architecture/architecture.md,code:docs/architecture/decisions.md | A:文件, 快速查找, 变更规则 | S:架构调整必须同步修改 architecture.md 并追加 ADR；旧 ADR 只追加不删除
+architecture.md[SG7L]: F:总体分层、crate 职责、五个子系统数据流、核心数据模型与 AppEvent 全量说明 | R:code:docs/architecture/decisions.md,code:docs/architecture/ui-prototypes.md,code:Cargo.toml,code:crates/rterm-app/src/event.rs | A:总体分层, crate 划分, 终端数据流, SyncBridge 设计, 事件总线, 存储路径 | S:本文描述的目标架构以现有 crate 为准；修改数据流或事件枚举时必须同步更新对应章节，否则文档会与代码脱节
+decisions.md[SG6S]: F:10 条 ADR 技术决策记录：UI 框架、SSH、终端仿真、加密与异步线程模型等 | R:code:docs/architecture/architecture.md,code:Cargo.toml | A:ADR-001 bezel-gpui, ADR-002 ssh2, ADR-003 alacritty_terminal, ADR-005 加密, ADR-007 异步线程模型 | S:ADR 只追加不删除，历史决策保留；新技术选型必须新增 ADR 而不是改写旧条目
+ui-prototypes.md[SG6L]: F:各 View 的 ASCII 线框原型：尺寸标注、控件列表、交互说明与数据流 | R:code:docs/architecture/architecture.md,code:crates/rterm-app/src/views/main_window.rs,code:crates/rterm-app/src/views/session_tree.rs | A:全局尺寸约定, MainWindow, SessionTree, SessionEditDialog, 存储路径 | S:原型是给 AI 的布局蓝图而非视觉稿；实现以实际 View 为准，改布局时需同步尺寸常量
+
+===/<repository>/docs/planning/===
+CHANGELOG.md[SG5L]: F:Sprint 完成记录：状态、commit、交付清单、验证、踩坑与遗留 | R:code:docs/planning/README.md,code:docs/planning/roadmap.md | A:Sprint 10, 交付清单, 验证, 遗留 | S:每个 Sprint 完成后按固定格式追加，不重写历史条目
+README.md[SG7S]: F:开发规划索引：Sprint 状态总览、依赖图与执行纪律 | R:code:docs/planning/roadmap.md,code:docs/planning/CHANGELOG.md | A:当前状态总览, 依赖图, 执行纪律 | S:Sprint 状态表是开工入口；开始新 Sprint 前先读对应 sprint 文件，不要凭记忆实现
+roadmap.md[SG5M]: F:里程碑概览（P0 到 P9）与各 Phase 的高层任务分类 | R:code:docs/planning/README.md | A:里程碑概览, Phase 0, P7 打磨发布, P9 会话体验 | S:本文是高层路线图，更细任务与当前状态以 planning/README.md 为准
+sprint-01-infrastructure.md[SG3T]: F:Sprint 1 计划：rterm-crypto、EventBus、AppState 与主窗口壳 | R:code:docs/planning/README.md,code:crates/rterm-crypto/src/lib.rs | A:1.1 DPAPI, 1.2 AES-GCM | S:-
+sprint-02-session-data.md[SG3T]: F:Sprint 2 计划：Session 模型、SessionStore CRUD、JSON 持久化与导入导出 | R:code:docs/planning/README.md,code:crates/rterm-session/src/model.rs,code:crates/rterm-session/src/store.rs | A:2.1 Session 模型, 2.2 SessionStore CRUD | S:-
+sprint-03-session-tree.md[SG3S]: F:Sprint 3 记录：会话树、编辑对话框、启动加载与退出保存 | R:code:docs/planning/README.md,code:crates/rterm-app/src/views/session_tree.rs,code:crates/rterm-app/src/views/session_dialog.rs | A:实现偏差说明, EventBus API, UI 原型 | S:本 Sprint 未接 SSH，打开终端只发事件
+sprint-04-settings-io.md[SG3T]: F:Sprint 4 记录：SettingsView 七个分页、导入导出对话框与设置持久化 | R:code:docs/planning/README.md,code:crates/rterm-app/src/views/settings.rs,code:crates/rterm-app/src/views/import_export.rs | A:实现说明, 7 个 Tab, Ctrl+, | S:取消设置需还原已保存主题
+sprint-05-ssh-terminal.md[SG3T]: F:Sprint 5 记录：rterm-ssh 封装、重连、PTY 与 TerminalEngine | R:code:docs/planning/README.md,code:crates/rterm-ssh/src/lib.rs,code:crates/rterm-terminal/src/engine.rs | A:PTY IO, KeepAlive, ssh2 openssl-on-win32 | S:Windows 必须启用 openssl-on-win32
+sprint-06-terminal-render.md[SG3T]: F:Sprint 6 记录：gpui Canvas 逐 Cell 渲染、主题、复制粘贴与标签页 | R:code:docs/planning/README.md,code:crates/rterm-app/src/views/terminal.rs | A:Canvas 渲染, TerminalPalette, 标签页 | S:-
+sprint-07-sftp.md[SG3T]: F:Sprint 7 记录：SftpService、双栏 View 与传输队列 | R:code:docs/planning/README.md,code:crates/rterm-sftp/src/service.rs,code:crates/rterm-app/src/views/sftp.rs | A:SftpService, 双栏 View, 传输队列 | S:-
+sprint-07.5-tech-debt.md[SG4S]: F:Sprint 7.5 记录：数据可靠性、线程阻塞、交互正确性与主机密钥安全收口 | R:code:docs/planning/README.md,code:docs/planning/sprint-07-sftp.md,code:docs/planning/sprint-08-sync.md | A:7.5.1 P0, 7.5.2 P1, 7.5.3 P2, 7.5.4 主机密钥 | S:本 Sprint 不新增功能、不改视觉，只清技术债；是 S8 的强制前置
+sprint-08-sync.md[SG3T]: F:Sprint 8 记录：SyncBridge、PS1 解析、防回环与真实 GUI E2E | R:code:docs/planning/README.md,code:crates/rterm-sync/src/lib.rs | A:SyncBridge, PS1 解析, E2E | S:-
+sprint-09-monitor.md[SG3T]: F:Sprint 9 计划：监控采集、Canvas 折线图、Top 进程与 Kill | R:code:docs/planning/README.md,code:crates/rterm-monitor/src/lib.rs,code:crates/rterm-app/src/views/monitor.rs | A:8.1 MonitorCollector | S:-
+sprint-10-stability.md[SG3T]: F:Sprint 10 记录：主机密钥、错误映射、命令面板、快捷键、日志与备份 | R:code:docs/planning/README.md,code:crates/rterm-ssh/src/known_hosts.rs,code:crates/rterm-app/src/views/command_palette.rs | A:9.1b known_hosts, 9.3 命令面板, 9.11 诊断包 | S:-
+sprint-11-release.md[SG3T]: F:Sprint 11 计划：全量回归、Release 构建、安装包与文档定稿 | R:code:docs/planning/README.md,code:installer/rterm.iss,code:README.md | A:11.1 全量回归, 11.3 Release 构建, 11.4 安装包 | S:-
+sprint-12-terminal-sftp-dock.md[SG4S]: F:Sprint 12 记录：终端内嵌 SFTP 侧栏、路径跟随、防回环与持久化 | R:code:docs/planning/README.md,code:crates/rterm-app/src/views/terminal_tab.rs,code:crates/rterm-app/src/views/sftp.rs | A:12.1 SftpDisplayMode, 12.3 TerminalTabView, 12.4 路径跟随, 12.7 持久化 | S:侧栏宽度 280 到 720，拖拽结束才落盘；Ctrl+Shift+S 不再转发远端
+sprint-13-session-management-proxy.md[SG5M]: F:Sprint 13 计划：分组图标菜单、顶部菜单栏、SSH 跳板代理与端口转发 | R:code:docs/planning/README.md,code:crates/rterm-session/src/proxy.rs,code:crates/rterm-app/src/views/menu_bar.rs,code:crates/rterm-forward/src/lib.rs | A:R1 跳板机, R2 导入导出, R6 菜单职责, R7 顶部菜单栏 | S:与 S12 并行时注意 main_window.rs 的菜单与事件冲突；会话文件升级 v2 并保持旧数据可读
+
+===/<repository>/docs/product/===
+README.md[SG3T]: F:产品功能索引：定义做什么与不做什么，并提供功能取舍判断流程 | R:code:docs/product/overview.md,code:docs/architecture/decisions.md | A:文件, 快速判断, 快速跳转 | S:-
+overview.md[SG5S]: F:项目定位、MVP 功能范围、明确不做清单、M1 到 M6 功能列表与对标比对 | R:code:docs/product/README.md,code:README.md,code:docs/planning/roadmap.md | A:项目定位, 明确不做, M1 SSH 会话管理, M2 远程终端, M3 SFTP | S:MVP 明确不做 X11 转发、Telnet 与 RDP、云同步；新增范围外功能需先提 ADR
+
+===/<repository>/installer/===
+rterm.iss[OV4T]: F:Inno Setup 6 安装包脚本：固定 AppId、安装到 Program Files、可选桌面快捷方式 | R:code:README.md | A:Setup, AppId, AppVersion, Files, Icons, Run | S:AppId 固定以保证升级复用同一卸载项；安装包需先 cargo build --release 再用 iscc 生成
+
+===/<repository>/scripts/===
+check.ps1[XQ5T]: F:本地质量门禁：cargo fmt 检查、clippy 与 workspace 测试，按退出码判定 | R:code:scripts/msvc-env.ps1 | A:steps, cargo fmt, cargo clippy, cargo test | S:不自动加载 msvc-env.ps1，避免切换 VS 环境导致 vendored OpenSSL 全量重编译
+msvc-env.ps1[XV4T]: F:在当前 PowerShell 会话加载 MSVC 与 Windows SDK 环境变量，供 cargo 构建 | R:code:scripts/check.ps1 | A:vsInstallDir, toolBin, INCLUDE, LIB, Strawberry Perl | S:必须 dot-source 才能把 PATH 与 INCLUDE/LIB 写回当前 shell；vendored-openssl 构建需要 Strawberry Perl
