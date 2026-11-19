@@ -1,6 +1,6 @@
 # Sprint 13 — 会话管理增强 + SSH 跳板代理 / 端口转发（v1.2）
 
-> **状态**：🚧 编码完成（2026-11-19，待真实远端手工 smoke）
+> **状态**：✅ 编码完成 + Ubuntu 实机 smoke 通过（2026-11-19，跳板链待第二台主机）
 > **前置**：[S2](./sprint-02-session-data.md) ✅（Session / SessionStore）+ [S3](./sprint-03-session-tree.md) ✅（会话树 / 编辑对话框）+
 > [S4](./sprint-04-settings-io.md) ✅（导入导出）+ [S5](./sprint-05-ssh-terminal.md) ✅（SSH 连接）；
 > 与 [S12](./sprint-12-terminal-sftp-dock.md) 并行时注意 `main_window.rs` 菜单/事件冲突
@@ -239,8 +239,13 @@ connect(session)
 - [x] 会话支持预设图标修改并持久化，导出 / 导入保留图标、分组、代理、端口转发
 - [x] 导入导出统一入口，OpenSSH config 可在 UI 中导入
 - [x] `cargo fmt --check` / `cargo clippy --workspace --all-targets`（0 warning）/ `cargo test --workspace` 全绿
-- [ ] 真实验证：经跳板连接 Ubuntu 主机，打开终端 / SFTP / 监控；本地与远程转发各验证一次；
-  空分组重启保留；图标、菜单、分组重命名回归通过
+- [x] 真实验证（2026-11-19，Ubuntu 26.04.1 @ 192.168.1.103）：
+  直接 SSH 终端 / SFTP（内嵌侧栏 + 独立 Tab）/ 监控均正常；
+  本地转发 `127.0.0.1:13306 → 127.0.0.1:22` 回读 SSH banner；
+  远程转发 `远端 127.0.0.1:18080 → 本地 127.0.0.1:13306` 回环回读 SSH banner；
+  空分组 `test/empty` 重启保留；顶部菜单、会话/空白右键、图标、模式切换回归通过；
+  期间发现并修复「模态弹窗打开时 `focus_pending` 抢回终端焦点」缺陷
+- [ ] 跳板链真实验证：需第二台可达跳板主机；链路顺序 / 环路 / 5 跳上限已由单元测试覆盖
 
 ---
 
