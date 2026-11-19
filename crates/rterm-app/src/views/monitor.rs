@@ -5,25 +5,28 @@
 //! - 每个 Monitor Tab 独立 SSH 连接，不占用终端 / SFTP 的会话
 //! - 图表使用 gpui Canvas 直接绘制，避免引入额外依赖
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::time::Duration;
 
 use futures::channel::mpsc::unbounded;
 use futures::StreamExt;
 use gpui::prelude::*;
 use gpui::{
-    canvas, div, point, px, size, AnyElement, Bounds, ClickEvent, Context, FocusHandle, Focusable,
-    Hsla, IntoElement, MouseButton, MouseDownEvent, Pixels, Render, Rgba, ScrollWheelEvent, Window,
+    canvas, div, point, px, AnyElement, Bounds, ClickEvent, Context, FocusHandle, Focusable, Hsla,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Path, PathBuilder, Pixels, Point,
+    Render, Rgba, Window,
 };
 use uuid::Uuid;
 
 use rterm_monitor::{
-    spawn, KillSignal, Metric, MonitorAlert, MonitorCommand, MonitorConfig, MonitorEvent,
-    MonitorHandle, MonitorTick, ResourceSample, TopProcess,
+    spawn, DiskEntry, DiskUsage, Metric, MonitorAlert, MonitorCommand, MonitorConfig, MonitorEvent,
+    MonitorHandle, ResourceSample,
 };
+use rterm_sftp::format_size;
 use rterm_ssh::SshSession;
 
-use super::{CONTENT_BORDER_W, MENU_ITEM_H, SIDEBAR_W, TAB_BAR_H, TOOLBAR_H};
 use crate::event::{AppEvent, EventBusHost};
 use crate::state::{lock_or_recover, AppState};
 use crate::ui::theme;
@@ -31,9 +34,12 @@ use crate::ui::theme;
 /// 图表窗口长度（60 点 × 2s ≈ 2 分钟）。
 const MAX_SAMPLES: usize = 60;
 const CARD_H: f32 = 146.0;
-const PROCESS_ROW_H: f32 = 24.0;
-const PROCESS_HEADER_H: f32 = 24.0;
-const KILL_MENU_W: f32 = 200.0;
+/// 磁盘占用分析饼图直径。
+const DISK_CHART_SIZE: f32 = 240.0;
+/// 图例单项宽度。
+const LEGEND_ITEM_W: f32 = 264.0;
+/// 磁盘使用率进入告警配色的阈值。
+const DISK_DANGER_PCT: f32 = 90.0;
 
 // ---------------------------------------------------------------------------
 // 展示状态
@@ -44,40 +50,6 @@ enum MonitorStatus {
     Connecting,
     Connected,
     Failed,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TopSortKey {
-    Pid,
-    User,
-    Cpu,
-    Mem,
-    Command,
-}
-
-impl TopSortKey {
-    fn value(self, process: &TopProcess) -> String {
-        match self {
-            Self::Pid => format!("{:010}", process.pid),
-            Self::User => process.user.clone(),
-            Self::Cpu => format!("{:08.2}", process.cpu_pct),
-            Self::Mem => format!("{:08.2}", process.mem_pct),
-            Self::Command => process.command.clone(),
-        }
-    }
-}
-
-struct KillMenu {
-    pid: u32,
-    command: String,
-    x: f32,
-    y: f32,
-}
-
-struct PendingKill {
-    pid: u32,
-    command: String,
-    signal: KillSignal,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,19 +65,22 @@ pub struct MonitorView {
     handle: Option<MonitorHandle>,
     samples: VecDeque<ResourceSample>,
     latest: Option<ResourceSample>,
-    top: Vec<TopProcess>,
-    sort_key: TopSortKey,
-    sort_ascending: bool,
-    selected_pid: Option<u32>,
-    scroll: usize,
-    /// 进程表可视行数（每帧按窗口高度更新，用于虚拟化与滚动上限）
-    visible_rows: usize,
     paused: bool,
     error: Option<String>,
     alert: Option<MonitorAlert>,
-    kill_menu: Option<KillMenu>,
-    pending_kill: Option<PendingKill>,
     generation: u64,
+    /// 当前查看的目录（也是最近一次扫描请求的路径）。
+    disk_path: String,
+    /// 最近一次扫描结果。
+    disk_usage: Option<DiskUsage>,
+    /// 等待中的扫描请求 id（用于丢弃过期结果）。
+    disk_request: Option<u64>,
+    disk_seq: u64,
+    disk_error: Option<String>,
+    /// 悬停的饼图扇区 / 图例下标。
+    disk_hover: Option<usize>,
+    /// 饼图绘制区域（窗口坐标），供鼠标命中测试使用。
+    disk_chart_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
 }
 
 impl MonitorView {
@@ -130,18 +105,17 @@ impl MonitorView {
             handle: None,
             samples: VecDeque::new(),
             latest: None,
-            top: Vec::new(),
-            sort_key: TopSortKey::Cpu,
-            sort_ascending: false,
-            selected_pid: None,
-            scroll: 0,
-            visible_rows: 12,
             paused: false,
             error: None,
             alert: None,
-            kill_menu: None,
-            pending_kill: None,
             generation: 0,
+            disk_path: "/".to_string(),
+            disk_usage: None,
+            disk_request: None,
+            disk_seq: 0,
+            disk_error: None,
+            disk_hover: None,
+            disk_chart_bounds: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -151,11 +125,6 @@ impl MonitorView {
 
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
-    }
-
-    /// Kill 确认卡片打开时屏蔽全局快捷键。
-    pub fn has_modal_dialog(&self) -> bool {
-        self.pending_kill.is_some()
     }
 
     // -----------------------------------------------------------------------
@@ -260,6 +229,7 @@ impl MonitorView {
         self.status = MonitorStatus::Connected;
         self.status_text = "已连接 · 等待首帧采样".to_string();
         self.error = None;
+        self.request_disk_scan("/".to_string(), false, cx);
 
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
@@ -290,7 +260,9 @@ impl MonitorView {
     pub fn shutdown(&mut self, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
         self.handle = None; // Drop 置停止位
-        self.top.clear();
+        self.disk_usage = None;
+        self.disk_request = None;
+        self.disk_hover = None;
         self.status = MonitorStatus::Failed;
         self.status_text = "已断开".to_string();
         self.emit(
@@ -318,46 +290,109 @@ impl MonitorView {
             return;
         }
         match event {
-            MonitorEvent::Tick(tick) => self.apply_tick(tick, cx),
+            MonitorEvent::Tick(sample) => self.apply_tick(sample, cx),
             MonitorEvent::Alert(alert) => self.apply_alert(alert, cx),
+            MonitorEvent::DiskScan { request_id, result } => {
+                self.apply_disk_scan(request_id, result, cx)
+            }
             MonitorEvent::Error(message) => {
                 self.error = Some(message);
-                cx.notify();
-            }
-            MonitorEvent::KillResult { pid, ok, message } => {
-                if ok {
-                    self.status_text = format!("已连接 · {message}");
-                    if self.selected_pid == Some(pid) {
-                        self.selected_pid = None;
-                    }
-                } else {
-                    self.error = Some(message.clone());
-                }
-                self.emit_status(message, cx);
                 cx.notify();
             }
         }
     }
 
-    fn apply_tick(&mut self, tick: MonitorTick, cx: &mut Context<Self>) {
+    /// 请求扫描目录占用；`force = false` 时由采集线程复用 30 秒缓存。
+    fn request_disk_scan(&mut self, path: String, force: bool, cx: &mut Context<Self>) {
+        let Some(handle) = &self.handle else {
+            return;
+        };
+        self.disk_seq = self.disk_seq.wrapping_add(1);
+        let request_id = self.disk_seq;
+        if handle.send(MonitorCommand::ScanDisk {
+            request_id,
+            path: path.clone(),
+            force,
+        }) {
+            self.disk_path = path.clone();
+            self.disk_request = Some(request_id);
+            self.disk_error = None;
+            self.disk_hover = None;
+            if self.status == MonitorStatus::Connected {
+                self.status_text = format!("已连接 · 扫描 {path}…");
+            }
+        } else {
+            self.disk_error = Some("采集线程已退出，无法扫描目录".into());
+        }
+        cx.notify();
+    }
+
+    fn apply_disk_scan(
+        &mut self,
+        request_id: u64,
+        result: Result<DiskUsage, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.disk_request != Some(request_id) {
+            return;
+        }
+        self.disk_request = None;
+        self.disk_hover = None;
+        match result {
+            Ok(usage) => {
+                self.disk_path = usage.path.clone();
+                self.disk_usage = Some(usage);
+                self.disk_error = None;
+                if self.status == MonitorStatus::Connected {
+                    self.status_text = if self.paused {
+                        "已连接 · 已暂停".to_string()
+                    } else {
+                        "已连接 · 实时采集中".to_string()
+                    };
+                }
+            }
+            Err(message) => {
+                self.disk_error = Some(message);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 进入子目录 / 面包屑跳转（仅目录可导航，命中缓存时无需等待扫描）。
+    fn navigate_disk(&mut self, path: String, cx: &mut Context<Self>) {
+        self.request_disk_scan(path, false, cx);
+    }
+
+    fn disk_go_up(&mut self, cx: &mut Context<Self>) {
+        if let Some(parent) = parent_path(&self.disk_path) {
+            self.request_disk_scan(parent, false, cx);
+        }
+    }
+
+    /// 鼠标当前落在哪个扇区。
+    fn disk_hit_test(&self, position: Point<Pixels>) -> Option<usize> {
+        let bounds = self.disk_chart_bounds.borrow().clone()?;
+        let entries = self.disk_usage.as_ref()?;
+        let values: Vec<u64> = entries.entries.iter().map(|entry| entry.bytes).collect();
+        hit_test_pie(bounds, position, &values)
+    }
+
+    fn apply_tick(&mut self, sample: ResourceSample, cx: &mut Context<Self>) {
         self.status_text = "已连接 · 实时采集中".to_string();
         self.error = None;
-        self.samples.push_back(tick.sample.clone());
-        while self.samples.len() > MAX_SAMPLES {
-            self.samples.pop_front();
-        }
-        self.latest = Some(tick.sample.clone());
-        self.top = tick.top;
-        self.sort_top();
-        self.clamp_scroll();
 
         // 指标恢复后自动收起告警条。
         if let Some(alert) = &self.alert {
-            let value = tick.sample.metric(alert.metric);
-            if value < alert.threshold * 0.95 {
+            if sample.metric(alert.metric) < alert.threshold * 0.95 {
                 self.alert = None;
             }
         }
+
+        self.samples.push_back(sample.clone());
+        while self.samples.len() > MAX_SAMPLES {
+            self.samples.pop_front();
+        }
+        self.latest = Some(sample);
         cx.notify();
     }
 
@@ -412,110 +447,6 @@ impl MonitorView {
         self.latest = None;
         self.alert = None;
         self.error = None;
-        cx.notify();
-    }
-
-    fn set_sort(&mut self, key: TopSortKey, cx: &mut Context<Self>) {
-        if self.sort_key == key {
-            self.sort_ascending = !self.sort_ascending;
-        } else {
-            self.sort_key = key;
-            // CPU / 内存默认降序，其余升序。
-            self.sort_ascending = matches!(
-                key,
-                TopSortKey::Pid | TopSortKey::User | TopSortKey::Command
-            );
-        }
-        self.sort_top();
-        cx.notify();
-    }
-
-    fn sort_top(&mut self) {
-        let key = self.sort_key;
-        let ascending = self.sort_ascending;
-        self.top.sort_by(|a, b| {
-            let ordering = key.value(a).cmp(&key.value(b));
-            if ascending {
-                ordering
-            } else {
-                ordering.reverse()
-            }
-        });
-    }
-
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let delta = event.delta.pixel_delta(px(PROCESS_ROW_H));
-        let dy = f32::from(delta.y);
-        let lines = if event.delta.precise() {
-            (dy / PROCESS_ROW_H).round() as i32
-        } else if dy.abs() > 0.1 {
-            3 * dy.signum() as i32
-        } else {
-            0
-        };
-        if lines == 0 {
-            return;
-        }
-        let next = (self.scroll as i32 - lines).max(0) as usize;
-        self.scroll = next.min(self.max_scroll());
-        cx.notify();
-    }
-
-    /// 最大滚动偏移：只允许滚到「最后一行贴底」。
-    fn max_scroll(&self) -> usize {
-        self.top.len().saturating_sub(self.visible_rows.max(1))
-    }
-
-    fn clamp_scroll(&mut self) {
-        self.scroll = self.scroll.min(self.max_scroll());
-    }
-
-    fn open_kill_menu(
-        &mut self,
-        pid: u32,
-        command: String,
-        x: f32,
-        y: f32,
-        cx: &mut Context<Self>,
-    ) {
-        self.selected_pid = Some(pid);
-        self.kill_menu = Some(KillMenu {
-            pid,
-            command,
-            x: x.max(0.0),
-            y: y.max(0.0),
-        });
-        cx.notify();
-    }
-
-    fn request_kill(
-        &mut self,
-        pid: u32,
-        command: String,
-        signal: KillSignal,
-        cx: &mut Context<Self>,
-    ) {
-        self.kill_menu = None;
-        self.pending_kill = Some(PendingKill {
-            pid,
-            command,
-            signal,
-        });
-        cx.notify();
-    }
-
-    fn confirm_kill(&mut self, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_kill.take() else {
-            return;
-        };
-        if let Some(handle) = &self.handle {
-            if !handle.send(MonitorCommand::Kill {
-                pid: pending.pid,
-                signal: pending.signal,
-            }) {
-                self.error = Some("采集线程已退出，无法终止进程".into());
-            }
-        }
         cx.notify();
     }
 
@@ -619,7 +550,6 @@ impl MonitorView {
         let cpu_values = self.series(|sample| sample.cpu_pct);
         let mem_values = self.series(|sample| sample.mem_pct);
         let swap_values = self.series(|sample| sample.swap_pct);
-        let disk_values = self.series(|sample| sample.disk_pct);
         let rx_values = self.series(|sample| sample.net_rx_kbps);
         let tx_values = self.series(|sample| sample.net_tx_kbps);
         let load_values = self.series(|sample| sample.load_1);
@@ -673,17 +603,6 @@ impl MonitorView {
             normal,
             cx,
         );
-        let disk_card = self.render_card(
-            "monitor-card-disk",
-            "磁盘 /",
-            format!("{:.0}%", latest.disk_pct),
-            disk_values,
-            0.0,
-            100.0,
-            false,
-            normal,
-            cx,
-        );
         let net_card = self.render_dual_card(
             "monitor-card-net",
             "网络",
@@ -727,9 +646,521 @@ impl MonitorView {
                     .w_full()
                     .flex()
                     .gap_2()
-                    .child(disk_card)
                     .child(net_card)
                     .child(load_card),
+            )
+            .into_any_element()
+    }
+
+    // -----------------------------------------------------------------------
+    // 磁盘占用分析
+    // -----------------------------------------------------------------------
+
+    /// 交互式磁盘占用：饼图按目录/文件分段，悬停高亮，点击目录下钻。
+    fn render_disk_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let entries = self
+            .disk_usage
+            .as_ref()
+            .map(|usage| usage.entries.as_slice())
+            .unwrap_or(&[]);
+        let scanned_total = self
+            .disk_usage
+            .as_ref()
+            .map(|usage| usage.total_bytes)
+            .unwrap_or(0);
+        let palette = t.chart_palette();
+
+        let (status_text, status_color) = if let Some(error) = &self.disk_error {
+            (error.clone(), t.danger())
+        } else if self.disk_request.is_some() {
+            ("扫描中…".to_string(), t.primary())
+        } else if let Some(usage) = &self.disk_usage {
+            (
+                format!(
+                    "{} 项 · 合计 {}",
+                    usage.entries.len(),
+                    format_size(usage.total_bytes)
+                ),
+                t.text_subtle(),
+            )
+        } else {
+            ("等待扫描".to_string(), t.text_subtle())
+        };
+
+        let capacity_total = self.latest.as_ref().map(|s| s.disk_total_bytes).unwrap_or(0);
+        let capacity_used = self.latest.as_ref().map(|s| s.disk_used_bytes).unwrap_or(0);
+        let capacity_pct = disk_ratio(capacity_used, capacity_total) * 100.0;
+        let has_capacity = capacity_total > 0;
+        let value_color = t.text_on_card_bg();
+        let pct_color = if capacity_pct >= DISK_DANGER_PCT {
+            t.danger()
+        } else {
+            value_color
+        };
+
+        div()
+            .w_full()
+            .flex_1()
+            .min_h(px(0.))
+            .bg(t.card_bg())
+            .border_1()
+            .border_color(t.border_subtle())
+            .rounded_md()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(t.text_subtle())
+                            .child("磁盘占用分析"),
+                    )
+                    .child(self.render_disk_breadcrumb(cx))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(status_color)
+                            .child(status_text),
+                    )
+                    .child(self.render_disk_up_button(cx))
+                    .child(self.render_disk_refresh_button(cx)),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_8()
+                    .child(self.render_disk_chart(entries, scanned_total, &palette, cx))
+                    .child(self.render_disk_legend(entries, scanned_total, &palette, cx)),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_8()
+                    .child(self.render_disk_stat(
+                        "总容量",
+                        if has_capacity {
+                            format_size(capacity_total)
+                        } else {
+                            "—".into()
+                        },
+                        value_color,
+                        cx,
+                    ))
+                    .child(self.render_disk_stat(
+                        "已用",
+                        if has_capacity {
+                            format_size(capacity_used)
+                        } else {
+                            "—".into()
+                        },
+                        value_color,
+                        cx,
+                    ))
+                    .child(self.render_disk_stat(
+                        "可用",
+                        if has_capacity {
+                            format_size(capacity_total.saturating_sub(capacity_used))
+                        } else {
+                            "—".into()
+                        },
+                        value_color,
+                        cx,
+                    ))
+                    .child(self.render_disk_stat(
+                        "使用率",
+                        if has_capacity {
+                            format!("{capacity_pct:.0}%")
+                        } else {
+                            "—".into()
+                        },
+                        pct_color,
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// 面包屑：根 `/` 及当前路径的每一级都可点击跳转。
+    fn render_disk_breadcrumb(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let hint = t.text_subtle();
+        let mut items: Vec<AnyElement> = Vec::new();
+        let mut accumulated = String::new();
+        items.push(self.render_crumb("/", "/".to_string(), cx));
+        for part in self.disk_path.split('/').filter(|part| !part.is_empty()) {
+            accumulated.push('/');
+            accumulated.push_str(part);
+            items.push(
+                div()
+                    .text_size(px(10.))
+                    .text_color(hint)
+                    .child("›")
+                    .into_any_element(),
+            );
+            items.push(self.render_crumb(part, accumulated.clone(), cx));
+        }
+        div().flex().items_center().gap_1().children(items).into_any_element()
+    }
+
+    fn render_crumb(&self, label: &str, target: String, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let hover = t.row_hover_bg();
+        let text = label.to_string();
+        div()
+            .id(format!("monitor-crumb-{target}"))
+            .px_1()
+            .h(px(20.))
+            .rounded_sm()
+            .flex()
+            .items_center()
+            .text_size(px(10.))
+            .text_color(t.text_on_card_bg())
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover))
+            .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                this.navigate_disk(target.clone(), cx);
+            }))
+            .child(text)
+            .into_any_element()
+    }
+
+    fn render_disk_up_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let enabled = parent_path(&self.disk_path).is_some();
+        let hover = t.secondary_btn_hover();
+        let mut button = div()
+            .id("monitor-disk-up")
+            .h(px(22.))
+            .px_2()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .text_size(px(10.))
+            .bg(if enabled {
+                t.secondary_btn_bg()
+            } else {
+                t.card_bg()
+            })
+            .text_color(if enabled {
+                t.text_on_secondary_btn()
+            } else {
+                t.text_subtle()
+            });
+        if enabled {
+            button = button
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(|this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                    this.disk_go_up(cx);
+                }));
+        }
+        button.child("← 上级").into_any_element()
+    }
+
+    fn render_disk_refresh_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let enabled = self.disk_request.is_none();
+        let hover = t.secondary_btn_hover();
+        let mut button = div()
+            .id("monitor-disk-refresh")
+            .h(px(22.))
+            .px_2()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .text_size(px(10.))
+            .bg(if enabled {
+                t.secondary_btn_bg()
+            } else {
+                t.card_bg()
+            })
+            .text_color(if enabled {
+                t.text_on_secondary_btn()
+            } else {
+                t.text_subtle()
+            });
+        if enabled {
+            button = button
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover))
+                .on_click(cx.listener(|this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                    let path = this.disk_path.clone();
+                    // 刷新按钮跳过缓存，强制重新扫描。
+                    this.request_disk_scan(path, true, cx);
+                }));
+        }
+        button.child("⟳ 刷新").into_any_element()
+    }
+
+    fn render_disk_chart(
+        &self,
+        entries: &[DiskEntry],
+        total: u64,
+        palette: &[Rgba; 8],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let hover = self.disk_hover;
+        let fractions = pie_fractions(entries.iter().map(|entry| entry.bytes));
+        let colors: Vec<Rgba> = (0..entries.len())
+            .map(|index| palette[index % palette.len()])
+            .collect();
+        let targets: Vec<(String, bool)> = entries
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.is_dir))
+            .collect();
+
+        let base_color = t.secondary_btn_bg();
+        let hole_color = t.card_bg();
+        let bounds_paint = self.disk_chart_bounds.clone();
+
+        let (center_main, center_sub) = match hover.and_then(|index| entries.get(index)) {
+            Some(entry) => (truncate_label(&entry.name, 14), format_size(entry.bytes)),
+            None if self.disk_request.is_some() => ("扫描中…".to_string(), self.disk_path.clone()),
+            None if total > 0 => (format_size(total), "当前目录".to_string()),
+            None => ("—".to_string(), "当前目录".to_string()),
+        };
+
+        div()
+            .relative()
+            .w(px(DISK_CHART_SIZE))
+            .h(px(DISK_CHART_SIZE))
+            .child(
+                canvas(
+                    move |_bounds, _window, _cx| {},
+                    move |bounds, _state, window, _cx| {
+                        *bounds_paint.borrow_mut() = Some(bounds);
+                        paint_disk_breakdown(
+                            bounds,
+                            &fractions,
+                            &colors,
+                            base_color,
+                            hole_color,
+                            hover,
+                            window,
+                        );
+                    },
+                )
+                .size_full(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(if hover.is_some() { 15. } else { 20. }))
+                            .text_color(t.text_on_card_bg())
+                            .child(center_main),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .truncate()
+                            .text_size(px(10.))
+                            .text_color(t.text_subtle())
+                            .child(center_sub),
+                    ),
+            )
+            .on_mouse_move(cx.listener(|this: &mut Self, event: &MouseMoveEvent, _w, cx| {
+                let next = this.disk_hit_test(event.position);
+                if this.disk_hover != next {
+                    this.disk_hover = next;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this: &mut Self, event: &MouseDownEvent, _w, cx| {
+                    let Some(index) = this.disk_hit_test(event.position) else {
+                        return;
+                    };
+                    let Some((path, is_dir)) = targets.get(index).cloned() else {
+                        return;
+                    };
+                    if is_dir {
+                        this.navigate_disk(path, cx);
+                    }
+                }),
+            )
+            .on_mouse_exit(cx.listener(|this: &mut Self, _ev, _w, cx| {
+                if this.disk_hover.is_some() {
+                    this.disk_hover = None;
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
+    }
+
+    fn render_disk_legend(
+        &self,
+        entries: &[DiskEntry],
+        total: u64,
+        palette: &[Rgba; 8],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        if entries.is_empty() {
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(11.))
+                .text_color(t.text_subtle())
+                .child(if self.disk_request.is_some() {
+                    "正在扫描目录占用…"
+                } else {
+                    "该目录下没有可统计的内容"
+                })
+                .into_any_element();
+        }
+
+        let rows = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let color = palette[index % palette.len()];
+                let hovered = self.disk_hover == Some(index);
+                let row_bg = if hovered {
+                    t.row_hover_bg()
+                } else {
+                    t.card_bg()
+                };
+                let pct = if total > 0 {
+                    (entry.bytes as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
+                let label = if entry.is_dir {
+                    format!("{}/", entry.name)
+                } else {
+                    entry.name.clone()
+                };
+                let path = entry.path.clone();
+                let is_dir = entry.is_dir;
+
+                let mut row = div()
+                    .id(format!("monitor-legend-{index}"))
+                    .w(px(LEGEND_ITEM_W))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(row_bg)
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .on_hover(cx.listener(
+                        move |this: &mut Self, hovered: &bool, _w, cx| {
+                            let next = if *hovered {
+                                Some(index)
+                            } else if this.disk_hover == Some(index) {
+                                None
+                            } else {
+                                return;
+                            };
+                            if this.disk_hover != next {
+                                this.disk_hover = next;
+                                cx.notify();
+                            }
+                        },
+                    ))
+                    .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_size(px(10.))
+                            .text_color(t.text_on_card_bg())
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(t.text_subtle())
+                            .child(format_size(entry.bytes)),
+                    )
+                    .child(
+                        div()
+                            .w(px(44.))
+                            .text_size(px(9.))
+                            .text_color(t.text_subtle())
+                            .child(format!("{pct:.1}%")),
+                    );
+                if is_dir {
+                    row = row
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                            this.navigate_disk(path.clone(), cx);
+                        }));
+                }
+                row.into_any_element()
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
+    fn render_disk_stat(
+        &self,
+        label: &'static str,
+        value: String,
+        value_color: Rgba,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(t.text_subtle())
+                    .child(label),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(value_color)
+                    .child(value),
             )
             .into_any_element()
     }
@@ -882,342 +1313,6 @@ impl MonitorView {
         )
     }
 
-    fn render_table(&self, cx: &mut Context<Self>) -> AnyElement {
-        let t = theme(cx);
-        let header = div()
-            .w_full()
-            .h(px(PROCESS_HEADER_H))
-            .bg(t.card_header_bg())
-            .border_b_1()
-            .border_color(t.border_subtle())
-            .flex()
-            .items_center()
-            .px_2()
-            .text_size(px(10.))
-            .text_color(t.text_subtle())
-            .child(self.render_sort_header("PID", TopSortKey::Pid, 70.0, cx))
-            .child(self.render_sort_header("用户", TopSortKey::User, 100.0, cx))
-            .child(self.render_sort_header("CPU", TopSortKey::Cpu, 70.0, cx))
-            .child(self.render_sort_header("内存", TopSortKey::Mem, 70.0, cx))
-            .child(self.render_sort_header("命令", TopSortKey::Command, 0.0, cx));
-
-        let rows: Vec<AnyElement> = self
-            .top
-            .iter()
-            .skip(self.scroll)
-            .take(self.visible_rows)
-            .map(|process| self.render_process_row(process, cx))
-            .collect();
-
-        div()
-            .w_full()
-            .flex_1()
-            .bg(t.card_bg())
-            .border_1()
-            .border_color(t.border_subtle())
-            .rounded_md()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .on_scroll_wheel(
-                cx.listener(|this: &mut Self, event: &ScrollWheelEvent, _w, cx| {
-                    this.on_scroll(event, cx);
-                }),
-            )
-            .child(header)
-            .child(
-                div()
-                    .w_full()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_hidden()
-                    .flex()
-                    .flex_col()
-                    .children(rows),
-            )
-            .into_any_element()
-    }
-
-    fn render_sort_header(
-        &self,
-        label: &'static str,
-        key: TopSortKey,
-        width: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = theme(cx);
-        let active = self.sort_key == key;
-        let arrow = if active {
-            if self.sort_ascending {
-                " ↑"
-            } else {
-                " ↓"
-            }
-        } else {
-            ""
-        };
-        let text = format!("{label}{arrow}");
-        let color = if active {
-            t.text_on_card_bg()
-        } else {
-            t.text_subtle()
-        };
-        let hover = t.row_hover_bg();
-
-        let mut header = div()
-            .id(format!("monitor-sort-{}", key as u8))
-            .h_full()
-            .flex()
-            .items_center()
-            .cursor_pointer()
-            .text_color(color)
-            .hover(move |s| s.bg(hover))
-            .on_click(
-                cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                    this.set_sort(key, cx);
-                }),
-            )
-            .child(text);
-        if width > 0.0 {
-            header = header.w(px(width));
-        } else {
-            header = header.flex_1();
-        }
-        header.into_any_element()
-    }
-
-    fn render_process_row(&self, process: &TopProcess, cx: &mut Context<Self>) -> AnyElement {
-        let t = theme(cx);
-        let selected = self.selected_pid == Some(process.pid);
-        let bg = if selected {
-            t.row_selected_bg()
-        } else {
-            t.card_bg()
-        };
-        let text_color = if selected {
-            t.text_on_row_selected_bg()
-        } else {
-            t.text_on_card_bg()
-        };
-        let hover = t.row_hover_bg();
-        let pid = process.pid;
-        let command = process.command.clone();
-
-        div()
-            .id(format!("monitor-proc-{pid}"))
-            .w_full()
-            .h(px(PROCESS_ROW_H))
-            .bg(bg)
-            .flex()
-            .items_center()
-            .px_2()
-            .text_size(px(10.))
-            .text_color(text_color)
-            .cursor_pointer()
-            .hover(move |s| s.bg(hover))
-            .on_click(
-                cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                    this.selected_pid = Some(pid);
-                    cx.notify();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _w, cx| {
-                    let x = f32::from(event.position.x) - SIDEBAR_W - CONTENT_BORDER_W;
-                    let y = f32::from(event.position.y) - TOOLBAR_H - TAB_BAR_H;
-                    this.open_kill_menu(pid, command.clone(), x, y, cx);
-                }),
-            )
-            .child(div().w(px(70.)).child(pid.to_string()))
-            .child(div().w(px(100.)).truncate().child(process.user.clone()))
-            .child(div().w(px(70.)).child(format!("{:.1}", process.cpu_pct)))
-            .child(div().w(px(70.)).child(format!("{:.1}", process.mem_pct)))
-            .child(div().flex_1().truncate().child(process.command.clone()))
-            .into_any_element()
-    }
-
-    fn render_kill_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let menu = self.kill_menu.as_ref()?;
-        let t = theme(cx);
-        let hover = t.row_hover_bg();
-        let pid = menu.pid;
-        let command = menu.command.clone();
-
-        Some(
-            div()
-                .absolute()
-                .left(px(menu.x))
-                .top(px(menu.y))
-                .w(px(KILL_MENU_W))
-                .py_1()
-                .bg(t.card_bg())
-                .border_1()
-                .border_color(t.border_medium())
-                .rounded_md()
-                .flex()
-                .flex_col()
-                .id("monitor-kill-menu")
-                .on_mouse_down_out(
-                    cx.listener(|this: &mut Self, _ev: &MouseDownEvent, _w, cx| {
-                        this.kill_menu = None;
-                        cx.notify();
-                    }),
-                )
-                .child(self.render_menu_item(
-                    "monitor-kill-term",
-                    "🛑 终止 (SIGTERM)",
-                    pid,
-                    command.clone(),
-                    KillSignal::Term,
-                    hover,
-                    cx,
-                ))
-                .child(self.render_menu_item(
-                    "monitor-kill-kill",
-                    "☠ 强制终止 (SIGKILL)",
-                    pid,
-                    command,
-                    KillSignal::Kill,
-                    hover,
-                    cx,
-                ))
-                .into_any_element(),
-        )
-    }
-
-    fn render_menu_item(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        pid: u32,
-        command: String,
-        signal: KillSignal,
-        hover: Rgba,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = theme(cx);
-        div()
-            .w_full()
-            .h(px(MENU_ITEM_H))
-            .px_3()
-            .flex()
-            .items_center()
-            .text_size(px(11.))
-            .text_color(if signal == KillSignal::Kill {
-                t.danger()
-            } else {
-                t.text_on_card_bg()
-            })
-            .cursor_pointer()
-            .id(id)
-            .hover(move |s| s.bg(hover))
-            .on_click(
-                cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                    this.request_kill(pid, command.clone(), signal, cx);
-                }),
-            )
-            .child(label)
-            .into_any_element()
-    }
-
-    fn render_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let pending = self.pending_kill.as_ref()?;
-        let t = theme(cx);
-        let message = format!(
-            "确定向 PID {}（{}）发送 {}？",
-            pending.pid,
-            truncate_command(&pending.command, 40),
-            signal_label(pending.signal)
-        );
-        let cancel_hover = t.secondary_btn_hover();
-
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .bg(t.modal_overlay())
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .w(px(420.))
-                        .bg(t.card_bg())
-                        .border_1()
-                        .border_color(t.border_medium())
-                        .rounded_lg()
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .w_full()
-                                .text_center()
-                                .text_size(px(13.))
-                                .text_color(t.text_on_card_bg())
-                                .child(message),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .text_center()
-                                .text_size(px(11.))
-                                .text_color(t.text_subtle())
-                                .child("该操作会立即结束远端进程，未保存的数据可能丢失"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .justify_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id("monitor-kill-cancel")
-                                        .px_3()
-                                        .h(px(26.))
-                                        .rounded_md()
-                                        .bg(t.secondary_btn_bg())
-                                        .text_size(px(11.))
-                                        .text_color(t.text_on_secondary_btn())
-                                        .flex()
-                                        .items_center()
-                                        .cursor_pointer()
-                                        .hover(move |s| s.bg(cancel_hover))
-                                        .on_click(cx.listener(
-                                            |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                                                this.pending_kill = None;
-                                                cx.notify();
-                                            },
-                                        ))
-                                        .child("取消"),
-                                )
-                                .child(
-                                    div()
-                                        .id("monitor-kill-confirm")
-                                        .px_3()
-                                        .h(px(26.))
-                                        .rounded_md()
-                                        .bg(t.danger())
-                                        .text_size(px(11.))
-                                        .text_color(t.text_on_primary_btn())
-                                        .flex()
-                                        .items_center()
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(
-                                            |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                                                this.confirm_kill(cx);
-                                            },
-                                        ))
-                                        .child("终止"),
-                                ),
-                        ),
-                )
-                .into_any_element(),
-        )
-    }
-
     fn render_alert_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let alert = self.alert.as_ref()?;
         let t = theme(cx);
@@ -1248,17 +1343,12 @@ impl Focusable for MonitorView {
 }
 
 impl Render for MonitorView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        // 进程表可视行数：窗口高度扣除页面头部 / 概览 / 图表等固定区域
-        let viewport_h = f32::from(window.viewport_size().height);
-        self.visible_rows = (((viewport_h - 320.0) / PROCESS_ROW_H).floor() as usize).max(1);
-        self.clamp_scroll();
         let mut root = div()
             .size_full()
             .bg(t.app_bg())
             .track_focus(&self.focus_handle)
-            .relative()
             .flex()
             .flex_col()
             .p_3()
@@ -1273,19 +1363,9 @@ impl Render for MonitorView {
             root = root.child(error);
         }
 
-        root = root.child(self.render_table(cx));
-
-        if let Some(menu) = self.render_kill_menu(cx) {
-            root = root.child(menu);
-        }
-        if let Some(confirm) = self.render_confirm(cx) {
-            root = root.child(confirm);
-        }
-        root
+        root.child(self.render_disk_panel(cx))
     }
 }
-
-// 删掉 BISECT 遗留的 simple_card 辅助方法
 
 // ---------------------------------------------------------------------------
 // 图表绘制（纯函数，便于理解与复用）
@@ -1316,7 +1396,7 @@ fn paint_chart(
     for step in 1..=4 {
         let y = bounds.top() + px(height * step as f32 / 5.0);
         window.paint_quad(gpui::fill(
-            Bounds::new(point(bounds.left(), y), size(bounds.size.width, px(1.0))),
+            Bounds::new(point(bounds.left(), y), gpui::size(bounds.size.width, px(1.0))),
             grid,
         ));
     }
@@ -1349,9 +1429,201 @@ fn paint_chart(
     }
 }
 
+/// 目录占比环形图：按 `fractions` 依次绘制扇区，悬停扇区放大高亮。
+fn paint_disk_breakdown(
+    bounds: Bounds<Pixels>,
+    fractions: &[f32],
+    colors: &[Rgba],
+    base_color: Rgba,
+    hole_color: Rgba,
+    hover: Option<usize>,
+    window: &mut Window,
+) {
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let diameter = width.min(height);
+    if diameter <= 8.0 {
+        return;
+    }
+
+    let center = point(
+        bounds.left() + px(width / 2.0),
+        bounds.top() + px(height / 2.0),
+    );
+    let radius = diameter / 2.0 - 1.0;
+
+    if let Some(path) = circle_path(center, radius) {
+        let color: Hsla = base_color.into();
+        window.paint_path(path, color);
+    }
+
+    // 先累加出每个扇区的角度区间，保证悬停放大时角度与命中测试一致。
+    let mut spans = Vec::with_capacity(fractions.len());
+    let mut cumulative = 0.0_f32;
+    for fraction in fractions {
+        let start = cumulative;
+        cumulative = (cumulative + fraction.max(0.0)).min(1.0);
+        spans.push((start, cumulative));
+    }
+
+    let paint_slice = |index: usize, slice_radius: f32, window: &mut Window| {
+        let (start, end) = spans[index];
+        let start_deg = -90.0 + start * 360.0;
+        let end_deg = -90.0 + end * 360.0;
+        if end_deg - start_deg < 0.05 {
+            return;
+        }
+        if let Some(path) = pie_slice_path(center, slice_radius, start_deg, end_deg) {
+            let color: Hsla = colors[index].into();
+            window.paint_path(path, color);
+        }
+    };
+
+    for index in 0..spans.len() {
+        if hover != Some(index) {
+            paint_slice(index, radius, window);
+        }
+    }
+    if let Some(index) = hover {
+        if index < spans.len() {
+            paint_slice(index, radius + 6.0, window);
+        }
+    }
+
+    if let Some(path) = circle_path(center, radius * 0.6) {
+        let color: Hsla = hole_color.into();
+        window.paint_path(path, color);
+    }
+}
+
+/// 整圆（由两段半圆弧拼接，避免起终点重合导致路径退化）。
+fn circle_path(center: Point<Pixels>, radius: f32) -> Option<Path<Pixels>> {
+    let top = point(center.x, center.y - px(radius));
+    let bottom = point(center.x, center.y + px(radius));
+    let radii = point(px(radius), px(radius));
+
+    let mut builder = PathBuilder::fill();
+    builder.move_to(top);
+    builder.arc_to(radii, px(0.0), false, true, bottom);
+    builder.arc_to(radii, px(0.0), false, true, top);
+    builder.close();
+    builder.build().ok()
+}
+
+/// 从 `start_deg` 顺时针扫到 `end_deg` 的扇形（角度以 12 点方向为 -90°）。
+fn pie_slice_path(
+    center: Point<Pixels>,
+    radius: f32,
+    start_deg: f32,
+    end_deg: f32,
+) -> Option<Path<Pixels>> {
+    let sweep = end_deg - start_deg;
+    if sweep >= 359.99 {
+        return circle_path(center, radius);
+    }
+
+    let start = polar_point(center, radius, start_deg);
+    let end = polar_point(center, radius, end_deg);
+
+    let mut builder = PathBuilder::fill();
+    builder.move_to(center);
+    builder.line_to(start);
+    builder.arc_to(
+        point(px(radius), px(radius)),
+        px(0.0),
+        sweep > 180.0,
+        true,
+        end,
+    );
+    builder.close();
+    builder.build().ok()
+}
+
+/// 角度以 12 点方向为 -90°、屏幕坐标顺时针为正。
+fn polar_point(center: Point<Pixels>, radius: f32, degrees: f32) -> Point<Pixels> {
+    let radians = degrees.to_radians();
+    point(
+        center.x + px(radius * radians.cos()),
+        center.y + px(radius * radians.sin()),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------------------
+
+/// 每段占比 `0..=1`；全部为 0（空目录）时返回等长 0 向量。
+fn pie_fractions(sizes: impl Iterator<Item = u64>) -> Vec<f32> {
+    let values: Vec<u64> = sizes.collect();
+    let total: u64 = values.iter().sum();
+    if total == 0 {
+        return vec![0.0; values.len()];
+    }
+    values
+        .iter()
+        .map(|value| *value as f32 / total as f32)
+        .collect()
+}
+
+/// 饼图命中测试：角度以 12 点为 0°、顺时针递增。
+fn hit_test_pie(
+    bounds: Bounds<Pixels>,
+    position: Point<Pixels>,
+    values: &[u64],
+) -> Option<usize> {
+    let total: u64 = values.iter().sum();
+    if total == 0 {
+        return None;
+    }
+
+    let width = f32::from(bounds.size.width);
+    let height = f32::from(bounds.size.height);
+    let center_x = f32::from(bounds.left()) + width / 2.0;
+    let center_y = f32::from(bounds.top()) + height / 2.0;
+    let dx = f32::from(position.x) - center_x;
+    let dy = f32::from(position.y) - center_y;
+    let distance = (dx * dx + dy * dy).sqrt();
+    let radius = width.min(height) / 2.0 - 1.0;
+
+    // 只响应圆环区域（悬停放大预留 8px）。
+    if distance < radius * 0.6 || distance > radius + 8.0 {
+        return None;
+    }
+
+    let fraction = (dy.atan2(dx).to_degrees() + 90.0).rem_euclid(360.0) / 360.0;
+    let mut cumulative = 0.0_f32;
+    for (index, value) in values.iter().enumerate() {
+        cumulative += *value as f32 / total as f32;
+        if fraction <= cumulative {
+            return Some(index);
+        }
+    }
+    Some(values.len() - 1)
+}
+
+/// 上一级目录；根目录返回 `None`。
+fn parent_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.rfind('/') {
+        Some(0) => Some("/".to_string()),
+        Some(index) => Some(trimmed[..index].to_string()),
+        None => None,
+    }
+}
+
+/// 饼图中心文字截断（按字符而非字节）。
+fn truncate_label(label: &str, max_chars: usize) -> String {
+    let mut chars = label.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
 
 fn monitor_config(cx: &mut Context<MonitorView>) -> MonitorConfig {
     let settings = &cx.global::<AppState>().settings;
@@ -1363,24 +1635,70 @@ fn monitor_config(cx: &mut Context<MonitorView>) -> MonitorConfig {
     .sanitized()
 }
 
+/// 已用容量占比 `0..=1`；总容量未知时返回 0。
+fn disk_ratio(used_bytes: u64, total_bytes: u64) -> f32 {
+    if total_bytes == 0 {
+        0.0
+    } else {
+        (used_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0) as f32
+    }
+}
+
 fn auto_max(values: impl Iterator<Item = f32>, floor: f32) -> f32 {
     let max = values.fold(0.0_f32, f32::max);
     (max * 1.15).max(floor)
 }
 
-fn signal_label(signal: KillSignal) -> &'static str {
-    match signal {
-        KillSignal::Term => "SIGTERM",
-        KillSignal::Kill => "SIGKILL",
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::size;
 
-fn truncate_command(command: &str, max: usize) -> String {
-    let mut chars = command.chars();
-    let prefix: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        format!("{prefix}…")
-    } else {
-        prefix
+    #[test]
+    fn disk_ratio_is_clamped() {
+        assert_eq!(disk_ratio(0, 0), 0.0);
+        assert_eq!(disk_ratio(50, 100), 0.5);
+        assert_eq!(disk_ratio(200, 100), 1.0);
+    }
+
+    #[test]
+    fn parent_path_walks_up() {
+        assert_eq!(parent_path("/"), None);
+        assert_eq!(parent_path("/var"), Some("/".to_string()));
+        assert_eq!(parent_path("/var/log"), Some("/var".to_string()));
+        assert_eq!(parent_path("/var/log/"), Some("/var".to_string()));
+    }
+
+    #[test]
+    fn pie_fractions_normalize() {
+        assert_eq!(pie_fractions([1_u64, 3].into_iter()), vec![0.25, 0.75]);
+        assert_eq!(pie_fractions([0_u64, 0].into_iter()), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn hit_test_maps_angles_to_slices() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(240.), px(240.)));
+        // 12 点方向 → 第一段
+        assert_eq!(
+            hit_test_pie(bounds, point(px(120.), px(30.)), &[1, 3]),
+            Some(0)
+        );
+        // 6 点方向（累计 75%）→ 第二段
+        assert_eq!(
+            hit_test_pie(bounds, point(px(120.), px(210.)), &[1, 3]),
+            Some(1)
+        );
+        // 圆环内部 / 圆外 → 未命中
+        assert_eq!(hit_test_pie(bounds, point(px(120.), px(120.)), &[1, 3]), None);
+        assert_eq!(hit_test_pie(bounds, point(px(0.), px(0.)), &[1, 3]), None);
+        // 空目录不响应
+        assert_eq!(hit_test_pie(bounds, point(px(120.), px(30.)), &[0, 0]), None);
+    }
+
+    #[test]
+    fn label_truncation_counts_chars() {
+        assert_eq!(truncate_label("abcdef", 3), "abc…");
+        assert_eq!(truncate_label("目录", 4), "目录");
+        assert_eq!(truncate_label("目录名称过长", 2), "目录…");
     }
 }

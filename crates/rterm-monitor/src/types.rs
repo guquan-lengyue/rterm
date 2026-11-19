@@ -4,13 +4,17 @@ use std::time::{Duration, SystemTime};
 
 /// 一次采样得到的资源指标快照。
 ///
-/// 百分比统一使用 `0..=100`；网络速率单位 KiB/s。
+/// 百分比统一使用 `0..=100`；网络速率单位 KiB/s；磁盘容量单位字节。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResourceSample {
     pub cpu_pct: f32,
     pub mem_pct: f32,
     pub swap_pct: f32,
     pub disk_pct: f32,
+    /// 根文件系统总容量（字节）。
+    pub disk_total_bytes: u64,
+    /// 根文件系统已用容量（字节）。
+    pub disk_used_bytes: u64,
     pub net_rx_kbps: f32,
     pub net_tx_kbps: f32,
     pub load_1: f32,
@@ -25,6 +29,8 @@ impl Default for ResourceSample {
             mem_pct: 0.0,
             swap_pct: 0.0,
             disk_pct: 0.0,
+            disk_total_bytes: 0,
+            disk_used_bytes: 0,
             net_rx_kbps: 0.0,
             net_tx_kbps: 0.0,
             load_1: 0.0,
@@ -84,21 +90,24 @@ impl Metric {
     }
 }
 
-/// Top 进程行。
+/// 目录占用扫描中的一个条目（目录或文件）。
 #[derive(Clone, Debug, PartialEq)]
-pub struct TopProcess {
-    pub pid: u32,
-    pub user: String,
-    pub cpu_pct: f32,
-    pub mem_pct: f32,
-    pub command: String,
+pub struct DiskEntry {
+    pub name: String,
+    pub path: String,
+    pub bytes: u64,
+    pub is_dir: bool,
 }
 
-/// 一次采集的完整结果。
-#[derive(Clone, Debug)]
-pub struct MonitorTick {
-    pub sample: ResourceSample,
-    pub top: Vec<TopProcess>,
+/// 一次目录占用扫描的结果。
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiskUsage {
+    /// 被扫描的目录（绝对路径）。
+    pub path: String,
+    /// 该目录内所有内容合计（`du` 汇总值）。
+    pub total_bytes: u64,
+    /// 直接子项，按占用从大到小排序。
+    pub entries: Vec<DiskEntry>,
 }
 
 /// 阈值告警（同一指标一次超限只报一次，回落后重新布防）。
@@ -139,29 +148,17 @@ impl MonitorConfig {
     }
 }
 
-/// 终止进程时使用的信号。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KillSignal {
-    Term,
-    Kill,
-}
-
-impl KillSignal {
-    pub(crate) fn flag(self) -> &'static str {
-        match self {
-            Self::Term => "TERM",
-            Self::Kill => "KILL",
-        }
-    }
-}
-
 /// 采集线程推给 UI 的事件。
 #[derive(Debug)]
 pub enum MonitorEvent {
-    Tick(MonitorTick),
+    Tick(ResourceSample),
     Alert(MonitorAlert),
+    /// 目录占用扫描结果；`request_id` 用于丢弃过期的导航请求。
+    DiskScan {
+        request_id: u64,
+        result: Result<DiskUsage, String>,
+    },
     Error(String),
-    KillResult { pid: u32, ok: bool, message: String },
 }
 
 /// UI → 采集线程的命令（同一线程串行执行，避免并发操作 SSH Session）。
@@ -169,13 +166,13 @@ pub enum MonitorCommand {
     Pause,
     Resume,
     SetConfig(MonitorConfig),
-    Kill { pid: u32, signal: KillSignal },
-}
-
-impl KillSignal {
-    pub(crate) fn command(self, pid: u32) -> String {
-        format!("kill -{} {} 2>&1 || echo RT_KILL_FAIL", self.flag(), pid)
-    }
+    /// 扫描指定目录的直接子项占用（会暂停一次采样）。
+    /// `force = false` 时优先复用 30 秒内的扫描缓存。
+    ScanDisk {
+        request_id: u64,
+        path: String,
+        force: bool,
+    },
 }
 
 #[cfg(test)]
@@ -196,24 +193,14 @@ mod tests {
     }
 
     #[test]
-    fn kill_commands_are_well_formed() {
-        assert_eq!(
-            KillSignal::Term.command(42),
-            "kill -TERM 42 2>&1 || echo RT_KILL_FAIL"
-        );
-        assert_eq!(
-            KillSignal::Kill.command(7),
-            "kill -KILL 7 2>&1 || echo RT_KILL_FAIL"
-        );
-    }
-
-    #[test]
     fn sample_metric_lookup() {
         let sample = ResourceSample {
             cpu_pct: 10.0,
             mem_pct: 20.0,
             swap_pct: 30.0,
             disk_pct: 40.0,
+            disk_total_bytes: 2_000,
+            disk_used_bytes: 800,
             net_rx_kbps: 50.0,
             net_tx_kbps: 60.0,
             load_1: 1.5,
@@ -222,7 +209,15 @@ mod tests {
         };
         assert_eq!(sample.metric(Metric::Cpu), 10.0);
         assert_eq!(sample.metric(Metric::Mem), 20.0);
+        assert_eq!(sample.metric(Metric::Disk), 40.0);
         assert_eq!(sample.metric(Metric::NetTx), 60.0);
         assert_eq!(sample.metric(Metric::Load1), 1.5);
+    }
+
+    #[test]
+    fn zeroed_sample_has_empty_disk() {
+        let sample = ResourceSample::zeroed(SystemTime::UNIX_EPOCH);
+        assert_eq!(sample.disk_total_bytes, 0);
+        assert_eq!(sample.disk_used_bytes, 0);
     }
 }

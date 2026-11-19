@@ -152,7 +152,7 @@ impl TabContentView {
         match self {
             Self::Terminal(view) => view.read(cx).blocks_global_shortcuts(cx),
             Self::Sftp(view) => view.read(cx).has_modal_dialog(),
-            Self::Monitor(view) => view.read(cx).has_modal_dialog(),
+            Self::Monitor(_) => false,
         }
     }
 

@@ -2,21 +2,19 @@
 //!
 //! 解析器只依赖纯文本，便于在 Windows 开发机上用固定样本做单元测试。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
 
 use crate::scripts::MARKER_PREFIX;
-use crate::types::{MonitorTick, ResourceSample, TopProcess};
+use crate::types::{DiskEntry, DiskUsage, ResourceSample};
 
-/// 跨采样保留的增量计数（CPU 时间片 / 网卡字节数 / 进程 tick）。
+/// 跨采样保留的增量计数（CPU 时间片 / 网卡字节数）。
 #[derive(Debug, Default)]
 pub struct ParseState {
     prev_cpu: Option<(u64, u64)>,
     prev_net: Option<(u64, u64)>,
-    /// pid → (utime + stime) 时间片，用于进程级 CPU% 增量。
-    prev_proc_ticks: HashMap<u32, u64>,
 }
 
 impl ParseState {
@@ -31,29 +29,23 @@ pub fn parse_linux(
     output: &str,
     elapsed: Duration,
     now: SystemTime,
-) -> Result<MonitorTick> {
+) -> Result<ResourceSample> {
     let sections = split_sections(output);
 
-    // STAT 段：首行是聚合 `cpu`，其后每行一个 `cpuN` → 计数即逻辑核数。
-    let stat_lines = sections.get("STAT").map(Vec::as_slice).unwrap_or(&[]);
-    let stat = stat_lines
-        .first()
+    // STAT 段：首行是聚合 `cpu`，其后每行一个 `cpuN`。
+    let stat = sections
+        .get("STAT")
+        .and_then(|lines| lines.first())
         .copied()
         .context("采集输出缺少 /proc/stat")?;
-    let ncpu = stat_lines.len().saturating_sub(1).max(1) as f32;
     let (busy, total) = parse_cpu_stat(stat);
-    let (cpu_pct, total_delta) = cpu_delta_pct(state, busy, total);
+    let cpu_pct = cpu_delta_pct(state, busy, total);
 
     let mem_lines = sections.get("MEM").map(Vec::as_slice).unwrap_or(&[]);
     let mem_pct = memory_pct(mem_lines).context("解析 /proc/meminfo 失败")?;
     let swap_pct = swap_pct(mem_lines);
-    let mem_total_kb = meminfo_kb(mem_lines, "MemTotal:").unwrap_or(0.0);
 
-    let disk_pct = sections
-        .get("DISK")
-        .and_then(|lines| lines.first())
-        .and_then(|line| df_capacity(line))
-        .unwrap_or(0.0);
+    let disk = disk_usage(&sections);
 
     let (rx, tx) = sections
         .get("NET")
@@ -67,24 +59,18 @@ pub fn parse_linux(
         .map(|line| parse_loadavg(line))
         .unwrap_or((0.0, 0.0));
 
-    let top = sections
-        .get("PS")
-        .map(|lines| parse_linux_processes(state, lines, total_delta, ncpu, mem_total_kb))
-        .unwrap_or_default();
-
-    Ok(MonitorTick {
-        sample: ResourceSample {
-            cpu_pct,
-            mem_pct,
-            swap_pct,
-            disk_pct,
-            net_rx_kbps,
-            net_tx_kbps,
-            load_1,
-            load_5,
-            timestamp: now,
-        },
-        top,
+    Ok(ResourceSample {
+        cpu_pct,
+        mem_pct,
+        swap_pct,
+        disk_pct: disk.pct(),
+        disk_total_bytes: disk.total_bytes,
+        disk_used_bytes: disk.used_bytes,
+        net_rx_kbps,
+        net_tx_kbps,
+        load_1,
+        load_5,
+        timestamp: now,
     })
 }
 
@@ -94,7 +80,7 @@ pub fn parse_macos(
     output: &str,
     elapsed: Duration,
     now: SystemTime,
-) -> Result<MonitorTick> {
+) -> Result<ResourceSample> {
     let sections = split_sections(output);
 
     let cpu_lines = sections.get("CPU").map(Vec::as_slice).unwrap_or(&[]);
@@ -103,11 +89,7 @@ pub fn parse_macos(
     let mem_lines = sections.get("MEM").map(Vec::as_slice).unwrap_or(&[]);
     let (mem_pct, swap_pct) = parse_macos_memory(mem_lines)?;
 
-    let disk_pct = sections
-        .get("DISK")
-        .and_then(|lines| lines.first())
-        .and_then(|line| df_capacity(line))
-        .unwrap_or(0.0);
+    let disk = disk_usage(&sections);
 
     let (rx, tx) = sections
         .get("NET")
@@ -129,24 +111,18 @@ pub fn parse_macos(
         .map(|line| parse_loadavg(line))
         .unwrap_or((0.0, 0.0));
 
-    let top = sections
-        .get("PS")
-        .map(|lines| parse_top_processes(lines))
-        .unwrap_or_default();
-
-    Ok(MonitorTick {
-        sample: ResourceSample {
-            cpu_pct,
-            mem_pct,
-            swap_pct,
-            disk_pct,
-            net_rx_kbps,
-            net_tx_kbps,
-            load_1,
-            load_5,
-            timestamp: now,
-        },
-        top,
+    Ok(ResourceSample {
+        cpu_pct,
+        mem_pct,
+        swap_pct,
+        disk_pct: disk.pct(),
+        disk_total_bytes: disk.total_bytes,
+        disk_used_bytes: disk.used_bytes,
+        net_rx_kbps,
+        net_tx_kbps,
+        load_1,
+        load_5,
+        timestamp: now,
     })
 }
 
@@ -197,25 +173,19 @@ fn parse_cpu_stat(line: &str) -> (u64, u64) {
     (total.saturating_sub(idle_total), total)
 }
 
-/// 返回 (整机 CPU 使用率, 本帧 total 时间片增量)。
-///
-/// `total_delta` 供进程级 CPU% 复用：进程 utime/stime 与 `/proc/stat`
-/// 同源同刻度，用同一个 tick 增量做分母可避免墙钟漂移。
-fn cpu_delta_pct(state: &mut ParseState, busy: u64, total: u64) -> (f32, Option<u64>) {
-    let result = match state.prev_cpu {
+/// 用相邻两帧的时间片增量计算整机 CPU 使用率。
+fn cpu_delta_pct(state: &mut ParseState, busy: u64, total: u64) -> f32 {
+    let pct = match state.prev_cpu {
         Some((prev_busy, prev_total)) if total > prev_total => {
             let busy_delta = busy.saturating_sub(prev_busy);
             let total_delta = total - prev_total;
-            (
-                (busy_delta as f32 / total_delta as f32 * 100.0).clamp(0.0, 100.0),
-                Some(total_delta),
-            )
+            (busy_delta as f32 / total_delta as f32 * 100.0).clamp(0.0, 100.0)
         }
         // 首帧没有增量基线，先给 0，下一帧即可得到真实值。
-        _ => (0.0, None),
+        _ => 0.0,
     };
     state.prev_cpu = Some((busy, total));
-    result
+    pct
 }
 
 fn net_rates(state: &mut ParseState, rx: u64, tx: u64, elapsed: Duration) -> (f32, f32) {
@@ -261,9 +231,128 @@ fn meminfo_kb(lines: &[&str], key: &str) -> Option<f32> {
     })
 }
 
-fn df_capacity(line: &str) -> Option<f32> {
-    let raw = line.split_whitespace().nth(4)?;
-    raw.trim_end_matches('%').parse::<f32>().ok()
+// ---------------------------------------------------------------------------
+// 磁盘
+// ---------------------------------------------------------------------------
+
+/// 根文件系统容量（字节）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FilesystemUsage {
+    total_bytes: u64,
+    used_bytes: u64,
+}
+
+impl FilesystemUsage {
+    /// 已用占比 `0..=100`；总容量为 0 时返回 0。
+    fn pct(self) -> f32 {
+        if self.total_bytes == 0 {
+            0.0
+        } else {
+            (self.used_bytes as f64 / self.total_bytes as f64 * 100.0).clamp(0.0, 100.0) as f32
+        }
+    }
+}
+
+/// 从段落中取 `df -Pk` 首行，缺失或格式异常时返回全 0。
+fn disk_usage(sections: &BTreeMap<&str, Vec<&str>>) -> FilesystemUsage {
+    sections
+        .get("DISK")
+        .and_then(|lines| lines.first())
+        .and_then(|line| df_usage(line))
+        .unwrap_or_default()
+}
+
+/// `df -Pk` 行 → 容量。
+///
+/// 列格式：`Filesystem 1024-blocks Used Available Capacity Mounted`，
+/// 块单位固定为 1 KiB。
+fn df_usage(line: &str) -> Option<FilesystemUsage> {
+    let mut parts = line.split_whitespace();
+    parts.next()?; // Filesystem
+    let total_kb = parts.next()?.parse::<u64>().ok()?;
+    let used_kb = parts.next()?.parse::<u64>().ok()?;
+    Some(FilesystemUsage {
+        total_bytes: total_kb.saturating_mul(1024),
+        used_bytes: used_kb.saturating_mul(1024),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 目录占用扫描
+// ---------------------------------------------------------------------------
+
+/// 解析 [`crate::scripts::disk_scan_script`] 的输出。
+///
+/// 条目按占用降序排列；`du` 缺失总计时用子项之和兜底。
+pub fn parse_disk_usage(root: &str, output: &str) -> Result<DiskUsage> {
+    let sections = split_sections(output);
+    let lines = sections.get("DU").map(Vec::as_slice).unwrap_or(&[]);
+    if lines.is_empty() {
+        bail!("目录扫描没有输出（目录不存在或无访问权限）");
+    }
+
+    let root = normalize_dir(root);
+    let mut total_bytes = 0_u64;
+    let mut entries = Vec::with_capacity(lines.len().saturating_sub(1));
+
+    for line in lines {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(kind), Some(size_kb), Some(path)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let Ok(size_kb) = size_kb.trim().parse::<u64>() else {
+            continue;
+        };
+        let bytes = size_kb.saturating_mul(1024);
+        let path = path.trim_end_matches('/');
+        let path = if path.is_empty() { "/" } else { path };
+
+        if path == root {
+            total_bytes = bytes;
+            continue;
+        }
+        let Some(name) = entry_name(path) else {
+            continue;
+        };
+        entries.push(DiskEntry {
+            name: name.to_string(),
+            path: path.to_string(),
+            bytes,
+            is_dir: kind.trim() == "d",
+        });
+    }
+
+    if total_bytes == 0 {
+        total_bytes = entries.iter().map(|entry| entry.bytes).sum();
+    }
+    entries.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    Ok(DiskUsage {
+        path: root.to_string(),
+        total_bytes,
+        entries,
+    })
+}
+
+/// 去掉末尾 `/`（根目录保持 `/`）。
+fn normalize_dir(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/"
+    } else {
+        trimmed
+    }
+}
+
+fn entry_name(path: &str) -> Option<&str> {
+    path.rsplit('/').find(|part| !part.is_empty())
 }
 
 fn parse_loadavg(line: &str) -> (f32, f32) {
@@ -300,113 +389,6 @@ fn parse_linux_net(lines: &[&str]) -> (u64, u64) {
         tx += fields[8].parse::<u64>().unwrap_or(0);
     }
     (rx, tx)
-}
-
-/// 单帧保留的 Top 进程数量。
-const TOP_N: usize = 20;
-
-/// 解析 Linux `/proc` 进程行：`pid \t user \t utime \t stime \t rss_kb \t comm`。
-///
-/// CPU% 用 tick 增量计算，与 `top` 语义一致（单核跑满 = 100%，多线程可超过 100%）：
-///
-/// ```text
-/// proc% = Δproc_ticks / Δtotal_ticks × ncpu × 100
-/// ```
-///
-/// 首帧没有基线 → 全部为 0；进程消失后 `prev_proc_ticks` 自然淘汰。
-fn parse_linux_processes(
-    state: &mut ParseState,
-    lines: &[&str],
-    total_delta: Option<u64>,
-    ncpu: f32,
-    mem_total_kb: f32,
-) -> Vec<TopProcess> {
-    let mut next_ticks = HashMap::with_capacity(lines.len());
-    let mut rows = Vec::with_capacity(lines.len());
-
-    for line in lines {
-        let mut parts = line.split('\t');
-        let (Some(pid), Some(user)) = (
-            parts.next().and_then(|v| v.parse::<u32>().ok()),
-            parts.next(),
-        ) else {
-            continue;
-        };
-        let (Some(utime), Some(stime), Some(rss_kb)) = (
-            parts.next().and_then(|v| v.parse::<u64>().ok()),
-            parts.next().and_then(|v| v.parse::<u64>().ok()),
-            parts.next().and_then(|v| v.parse::<f32>().ok()),
-        ) else {
-            continue;
-        };
-        let Some(command) = parts.next().filter(|c| !c.is_empty()) else {
-            continue;
-        };
-
-        let ticks = utime.saturating_add(stime);
-        let cpu_pct = match (total_delta, state.prev_proc_ticks.get(&pid)) {
-            (Some(delta), Some(previous)) if delta > 0 => {
-                let used = ticks.saturating_sub(*previous) as f32;
-                (used / delta as f32 * ncpu * 100.0).clamp(0.0, ncpu * 100.0)
-            }
-            _ => 0.0,
-        };
-        next_ticks.insert(pid, ticks);
-
-        let mem_pct = if mem_total_kb > 0.0 {
-            (rss_kb / mem_total_kb * 100.0).clamp(0.0, 100.0)
-        } else {
-            0.0
-        };
-
-        rows.push(TopProcess {
-            pid,
-            user: user.to_string(),
-            cpu_pct,
-            mem_pct,
-            command: command.to_string(),
-        });
-    }
-
-    state.prev_proc_ticks = next_ticks;
-
-    rows.sort_by(|a, b| {
-        b.cpu_pct
-            .partial_cmp(&a.cpu_pct)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.mem_pct
-                    .partial_cmp(&a.mem_pct)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-    });
-    rows.truncate(TOP_N);
-    rows
-}
-
-/// 解析 macOS `ps -Ao pid=,user=,%cpu=,%mem=,comm=` 输出。
-fn parse_top_processes(lines: &[&str]) -> Vec<TopProcess> {
-    lines
-        .iter()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let pid = parts.next()?.parse::<u32>().ok()?;
-            let user = parts.next()?.to_string();
-            let cpu_pct = parts.next()?.parse::<f32>().ok()?;
-            let mem_pct = parts.next()?.parse::<f32>().ok()?;
-            let command = parts.collect::<Vec<_>>().join(" ");
-            if command.is_empty() {
-                return None;
-            }
-            Some(TopProcess {
-                pid,
-                user,
-                cpu_pct,
-                mem_pct,
-                command,
-            })
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -516,21 +498,13 @@ fn parse_size_mb(raw: &str) -> Option<f32> {
 mod tests {
     use super::*;
 
-    /// `/proc/stat` 聚合行 + 一条 `cpu0`（ncpu = 1）。
-    fn linux_fixture(cpu_line: &str, net_rx: u64, ps: &str) -> String {
+    /// `/proc/stat` 聚合行 + 一条 `cpu0`。
+    fn linux_fixture(cpu_line: &str, net_rx: u64) -> String {
         format!(
-            "@@RT_STAT@@\n{cpu_line}\ncpu0 {cpu_line_rest}\n@@RT_MEM@@\nMemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 200 kB\nSwapFree: 50 kB\n@@RT_DISK@@\n/dev/sda1 1000 600 400 60% /\n@@RT_NET@@\nInter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 999999 0 0 0 0 0 0 0 999999 0 0 0 0 0 0 0\n  eth0: {net_rx} 10 0 0 0 0 0 0 2048 0 0 0 0 0 0 0\n@@RT_LOAD@@\n1.50 0.75 0.50 1/100 12345\n@@RT_PS@@\n{ps}",
+            "@@RT_STAT@@\n{cpu_line}\ncpu0 {cpu_line_rest}\n@@RT_MEM@@\nMemTotal: 1000 kB\nMemAvailable: 400 kB\nSwapTotal: 200 kB\nSwapFree: 50 kB\n@@RT_DISK@@\n/dev/sda1 1000 600 400 60% /\n@@RT_NET@@\nInter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n    lo: 999999 0 0 0 0 0 0 0 999999 0 0 0 0 0 0 0\n  eth0: {net_rx} 10 0 0 0 0 0 0 2048 0 0 0 0 0 0 0\n@@RT_LOAD@@\n1.50 0.75 0.50 1/100 12345\n",
             cpu_line_rest = cpu_line.trim_start_matches("cpu"),
         )
     }
-
-    /// 首帧进程：pid 120 已用 150 ticks，pid 121 已用 15 ticks。
-    const PS_FIRST: &str =
-        "120\troot\t100\t50\t600\tnginx: worker process\n121\tubuntu\t10\t5\t300\tbash\n";
-
-    /// 次帧进程：120 → 300 ticks（Δ150），121 → 45 ticks（Δ30），新增 122。
-    const PS_SECOND: &str =
-        "120\troot\t200\t100\t600\tnginx: worker process\n121\tubuntu\t30\t15\t300\tbash\n122\troot\t0\t0\t100\tnewproc\n";
 
     fn approx(actual: f32, expected: f32) {
         assert!(
@@ -545,94 +519,32 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         let first = parse_linux(
             &mut state,
-            &linux_fixture("cpu 100 0 100 800 0 0 0 0", 1024, PS_FIRST),
+            &linux_fixture("cpu 100 0 100 800 0 0 0 0", 1024),
             Duration::from_secs(2),
             now,
         )
         .unwrap();
-        assert_eq!(first.sample.cpu_pct, 0.0, "首帧没有增量基线");
-        approx(first.sample.mem_pct, 60.0);
-        approx(first.sample.swap_pct, 75.0);
-        approx(first.sample.disk_pct, 60.0);
-        assert_eq!(first.sample.net_rx_kbps, 0.0);
-        approx(first.sample.load_1, 1.5);
-        approx(first.sample.load_5, 0.75);
-        assert_eq!(first.top.len(), 2);
-        assert_eq!(first.top[0].command, "nginx: worker process");
-        assert_eq!(first.top[0].pid, 120);
-        assert_eq!(first.top[0].cpu_pct, 0.0, "首帧没有进程 tick 基线");
-        approx(first.top[0].mem_pct, 60.0);
+        assert_eq!(first.cpu_pct, 0.0, "首帧没有增量基线");
+        approx(first.mem_pct, 60.0);
+        approx(first.swap_pct, 75.0);
+        approx(first.disk_pct, 60.0);
+        assert_eq!(first.disk_total_bytes, 1000 * 1024);
+        assert_eq!(first.disk_used_bytes, 600 * 1024);
+        assert_eq!(first.net_rx_kbps, 0.0);
+        approx(first.load_1, 1.5);
+        approx(first.load_5, 0.75);
 
         // 第二帧：CPU busy 增量 200 / total 增量 400 → 50%；网卡 +2048 B/2s → 1 KiB/s
         let second = parse_linux(
             &mut state,
-            &linux_fixture("cpu 200 0 200 1000 0 0 0 0", 3072, PS_SECOND),
+            &linux_fixture("cpu 200 0 200 1000 0 0 0 0", 3072),
             Duration::from_secs(2),
             now,
         )
         .unwrap();
-        assert_eq!(second.sample.cpu_pct, 50.0);
-        assert_eq!(second.sample.net_rx_kbps, 1.0);
-        assert_eq!(second.sample.net_tx_kbps, 0.0);
-        // Δproc 150 / Δtotal 400 × ncpu 1 × 100 = 37.5%
-        assert_eq!(second.top.len(), 3);
-        assert_eq!(second.top[0].pid, 120);
-        approx(second.top[0].cpu_pct, 37.5);
-        // Δproc 30 / Δtotal 400 × 100 = 7.5%
-        assert_eq!(second.top[1].pid, 121);
-        approx(second.top[1].cpu_pct, 7.5);
-        // 新进程没有基线 → 0%
-        assert_eq!(second.top[2].pid, 122);
-        assert_eq!(second.top[2].cpu_pct, 0.0);
-        approx(second.top[2].mem_pct, 10.0);
-    }
-
-    #[test]
-    fn linux_process_ticks_prune_dead_pids() {
-        let mut state = ParseState::new();
-        let now = SystemTime::UNIX_EPOCH;
-        parse_linux(
-            &mut state,
-            &linux_fixture("cpu 100 0 100 800 0 0 0 0", 0, PS_FIRST),
-            Duration::from_secs(1),
-            now,
-        )
-        .unwrap();
-        // 次帧只剩 pid 120：121 已退出，基线不应残留
-        let tick = parse_linux(
-            &mut state,
-            &linux_fixture(
-                "cpu 150 0 150 900 0 0 0 0",
-                0,
-                "120\troot\t200\t100\t600\tnginx: worker process\n",
-            ),
-            Duration::from_secs(1),
-            now,
-        )
-        .unwrap();
-        assert_eq!(tick.top.len(), 1);
-        // Δtotal = 200，Δproc = 150 → 75%
-        approx(tick.top[0].cpu_pct, 75.0);
-        assert_eq!(state.prev_proc_ticks.len(), 1, "已退出进程的基线被淘汰");
-    }
-
-    #[test]
-    fn linux_process_rows_skip_malformed() {
-        let mut rows_state = ParseState::new();
-        let rows = parse_linux_processes(
-            &mut rows_state,
-            &[
-                "not-a-pid\troot\t1\t1\t10\tbad",
-                "7\troot\tnot-a-number\t1\t10\tbad",
-                "8\troot\t1\t1\t10\t", // 命令为空 → 丢弃
-                "9\troot\t1\t1\t10\tok",
-            ],
-            Some(100),
-            1.0,
-            1000.0,
-        );
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].pid, 9);
+        assert_eq!(second.cpu_pct, 50.0);
+        assert_eq!(second.net_rx_kbps, 1.0);
+        assert_eq!(second.net_tx_kbps, 0.0);
     }
 
     #[test]
@@ -641,19 +553,19 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         parse_linux(
             &mut state,
-            &linux_fixture("cpu 500 0 500 1000 0 0 0 0", 0, PS_FIRST),
+            &linux_fixture("cpu 500 0 500 1000 0 0 0 0", 0),
             Duration::from_secs(2),
             now,
         )
         .unwrap();
-        let tick = parse_linux(
+        let sample = parse_linux(
             &mut state,
-            &linux_fixture("cpu 10 0 10 20 0 0 0 0", 0, PS_FIRST),
+            &linux_fixture("cpu 10 0 10 20 0 0 0 0", 0),
             Duration::from_secs(2),
             now,
         )
         .unwrap();
-        assert_eq!(tick.sample.cpu_pct, 0.0, "计数器回绕不应出现负值/异常值");
+        assert_eq!(sample.cpu_pct, 0.0, "计数器回绕不应出现负值/异常值");
     }
 
     #[test]
@@ -674,35 +586,67 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         parse_linux(
             &mut state,
-            &linux_fixture("cpu 1 0 1 8 0 0 0 0", 0, PS_FIRST),
+            &linux_fixture("cpu 1 0 1 8 0 0 0 0", 0),
             Duration::from_secs(1),
             now,
         )
         .unwrap();
-        let tick = parse_linux(
+        let sample = parse_linux(
             &mut state,
-            &linux_fixture("cpu 2 0 2 16 0 0 0 0", 0, PS_FIRST),
+            &linux_fixture("cpu 2 0 2 16 0 0 0 0", 0),
             Duration::from_secs(1),
             now,
         )
         .unwrap();
-        assert_eq!(tick.sample.net_rx_kbps, 0.0);
+        assert_eq!(sample.net_rx_kbps, 0.0);
     }
 
     #[test]
-    fn top_process_command_keeps_spaces() {
-        let rows = parse_top_processes(&[
-            "  42 root 1.0 2.0 /usr/bin/python3 worker.py",
-            "not-a-process line",
-        ]);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].command, "/usr/bin/python3 worker.py");
+    fn parses_df_usage() {
+        let disk = df_usage("/dev/x 2048 1024 1024 50% /").unwrap();
+        assert_eq!(disk.total_bytes, 2048 * 1024);
+        assert_eq!(disk.used_bytes, 1024 * 1024);
+        approx(disk.pct(), 50.0);
+        assert_eq!(df_usage("garbage"), None);
+        assert_eq!(FilesystemUsage::default().pct(), 0.0);
     }
 
     #[test]
-    fn parses_df_percentage() {
-        assert_eq!(df_capacity("/dev/x 10 9 1 90% /"), Some(90.0));
-        assert_eq!(df_capacity("garbage"), None);
+    fn parses_disk_usage_sorted_and_flags_dirs() {
+        let output = "@@RT_DU@@\nd\t4096\t/var\nf\t512\t/swap.img\nd\t1024\t/usr\nd\t4096\t/\n";
+        let usage = parse_disk_usage("/", output).unwrap();
+        assert_eq!(usage.path, "/");
+        assert_eq!(usage.total_bytes, 4096 * 1024);
+        assert_eq!(usage.entries.len(), 3);
+        assert_eq!(usage.entries[0].name, "var");
+        assert!(usage.entries[0].is_dir);
+        assert_eq!(usage.entries[1].name, "usr");
+        assert_eq!(usage.entries[2].name, "swap.img");
+        assert!(!usage.entries[2].is_dir);
+    }
+
+    #[test]
+    fn disk_usage_without_total_sums_entries() {
+        let output = "@@RT_DU@@\nd\t100\t/var\nf\t20\t/a.log\n";
+        let usage = parse_disk_usage("/", output).unwrap();
+        assert_eq!(usage.total_bytes, 120 * 1024);
+        assert_eq!(usage.entries.len(), 2);
+    }
+
+    #[test]
+    fn disk_usage_normalizes_trailing_slash_and_root_entry() {
+        let output = "@@RT_DU@@\nd\t100\t/var/log\nd\t300\t/var\n";
+        let usage = parse_disk_usage("/var/", output).unwrap();
+        assert_eq!(usage.path, "/var");
+        assert_eq!(usage.total_bytes, 300 * 1024);
+        assert_eq!(usage.entries.len(), 1);
+        assert_eq!(usage.entries[0].path, "/var/log");
+    }
+
+    #[test]
+    fn disk_usage_empty_output_is_error() {
+        assert!(parse_disk_usage("/", "").is_err());
+        assert!(parse_disk_usage("/", "@@RT_DU@@\n").is_err());
     }
 
     #[test]
@@ -727,23 +671,22 @@ total = 2048.00M  used = 512.00M  free = 1536.00M
 4096 8192
 @@RT_LOAD@@
 { 1.23 4.56 7.89 }
-@@RT_PS@@
-  501 root 25.0 5.0 /usr/libexec/foo
 "#;
         let mut state = ParseState::new();
         let now = SystemTime::UNIX_EPOCH;
         let first = parse_macos(&mut state, output, Duration::from_secs(2), now).unwrap();
-        assert!((first.sample.cpu_pct - 15.425).abs() < 0.01);
+        assert!((first.cpu_pct - 15.425).abs() < 0.01);
         // (200000 + 100000 + 50000) * 16384 / 17179869184 * 100 ≈ 33.36
-        assert!((first.sample.mem_pct - 33.36).abs() < 0.05);
-        assert!((first.sample.swap_pct - 25.0).abs() < 0.01);
-        assert_eq!(first.sample.disk_pct, 55.0);
-        assert_eq!(first.sample.load_1, 1.23);
-        assert_eq!(first.sample.load_5, 4.56);
-        assert_eq!(first.top[0].pid, 501);
+        assert!((first.mem_pct - 33.36).abs() < 0.05);
+        assert!((first.swap_pct - 25.0).abs() < 0.01);
+        approx(first.disk_pct, 50.0);
+        assert_eq!(first.disk_total_bytes, 100 * 1024);
+        assert_eq!(first.disk_used_bytes, 50 * 1024);
+        assert_eq!(first.load_1, 1.23);
+        assert_eq!(first.load_5, 4.56);
 
         let second = parse_macos(&mut state, output, Duration::from_secs(2), now).unwrap();
-        assert_eq!(second.sample.net_rx_kbps, 0.0);
+        assert_eq!(second.net_rx_kbps, 0.0);
     }
 
     #[test]

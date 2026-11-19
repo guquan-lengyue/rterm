@@ -71,6 +71,8 @@ pub trait Theme: 'static + Send + Sync {
     fn danger(&self) -> Rgba;
     /// 成功状态色（测试连接通过等）
     fn success(&self) -> Rgba;
+    /// 饼图 / 分类占比的离散配色（超出长度后循环使用）。
+    fn chart_palette(&self) -> [Rgba; 8];
 
     // --- 文本选区 ---
 
@@ -187,6 +189,18 @@ impl Theme for CatppuccinMocha {
     fn success(&self) -> Rgba {
         rgb(0xa6e3a1)
     }
+    fn chart_palette(&self) -> [Rgba; 8] {
+        [
+            rgb(0x89b4fa),
+            rgb(0xa6e3a1),
+            rgb(0xf9e2af),
+            rgb(0xfab387),
+            rgb(0xcba6f7),
+            rgb(0x94e2d5),
+            rgb(0xf5c2e7),
+            rgb(0xf38ba8),
+        ]
+    }
 
     // Modal
     fn modal_overlay(&self) -> Rgba {
@@ -292,6 +306,18 @@ impl Theme for WindowsLight {
     fn success(&self) -> Rgba {
         rgb(0x0f7b0f)
     }
+    fn chart_palette(&self) -> [Rgba; 8] {
+        [
+            rgb(0x0078d4),
+            rgb(0x0f7b0f),
+            rgb(0xc19c00),
+            rgb(0xd13438),
+            rgb(0x8764b8),
+            rgb(0x008b8b),
+            rgb(0xc239b3),
+            rgb(0x767676),
+        ]
+    }
 
     fn modal_overlay(&self) -> Rgba {
         rgb(0x66000000)
@@ -396,6 +422,18 @@ impl Theme for Dracula {
     fn success(&self) -> Rgba {
         rgb(0x50fa7b)
     }
+    fn chart_palette(&self) -> [Rgba; 8] {
+        [
+            rgb(0xbd93f9),
+            rgb(0x50fa7b),
+            rgb(0xf1fa8c),
+            rgb(0xffb86c),
+            rgb(0xff79c6),
+            rgb(0x8be9fd),
+            rgb(0xff5555),
+            rgb(0x6272a4),
+        ]
+    }
 
     fn modal_overlay(&self) -> Rgba {
         rgb(0x66000000)
@@ -499,6 +537,18 @@ impl Theme for OneDark {
     }
     fn success(&self) -> Rgba {
         rgb(0x98c379)
+    }
+    fn chart_palette(&self) -> [Rgba; 8] {
+        [
+            rgb(0x61afef),
+            rgb(0x98c379),
+            rgb(0xe5c07b),
+            rgb(0xc678dd),
+            rgb(0x56b6c2),
+            rgb(0xe06c75),
+            rgb(0xd19a66),
+            rgb(0xabb2bf),
+        ]
     }
 
     fn modal_overlay(&self) -> Rgba {
@@ -684,6 +734,23 @@ mod tests {
             let palette = terminal_palette(theme.name());
             assert_ne!(palette.fg, palette.bg, "{} fg/bg 不应相同", theme.name());
             assert_eq!(palette.ansi16.len(), 16);
+        }
+    }
+
+    #[test]
+    fn every_chart_palette_has_distinct_colors() {
+        for theme in all_themes() {
+            let palette = theme.chart_palette();
+            for left in 0..palette.len() {
+                for right in (left + 1)..palette.len() {
+                    assert_ne!(
+                        palette[left],
+                        palette[right],
+                        "{} 图表配色存在重复",
+                        theme.name()
+                    );
+                }
+            }
         }
     }
 

@@ -1,4 +1,4 @@
-//! 后台采集线程 — 独占一条独立 SSH 连接，串行执行采样与进程操作。
+//! 后台采集线程 — 独占一条独立 SSH 连接，串行执行采样。
 //!
 //! 线程模型与 S7.5 一致：std::thread + futures unbounded channel，
 //! UI 侧只通过 `MonitorHandle` 发命令、从事件通道收结果。
@@ -15,12 +15,17 @@ use futures::channel::mpsc::UnboundedSender;
 use rterm_ssh::SshSession;
 
 use crate::alerts::{AlertGate, RollingAverage};
-use crate::parse::{parse_linux, parse_macos, ParseState};
-use crate::scripts::{LINUX_SCRIPT, MACOS_SCRIPT, PROBE_SCRIPT};
-use crate::types::{KillSignal, MonitorCommand, MonitorConfig, MonitorEvent, MonitorTick};
+use crate::cache::DiskScanCache;
+use crate::parse::{parse_disk_usage, parse_linux, parse_macos, ParseState};
+use crate::scripts::{disk_scan_script, LINUX_SCRIPT, MACOS_SCRIPT, PROBE_SCRIPT};
+use crate::types::{DiskUsage, MonitorCommand, MonitorConfig, MonitorEvent};
 
 /// 单次命令输出上限，防止异常脚本把内存打满。
 const MAX_OUTPUT_BYTES: usize = 512 * 1024;
+/// 目录扫描可能远超采样命令耗时，临时放宽会话读取超时（2 分钟）。
+const SCAN_TIMEOUT_MS: u32 = 120_000;
+/// 目录扫描结果缓存时长。
+const DISK_CACHE_TTL: Duration = Duration::from_secs(30);
 /// 事件发送失败（UI 已关闭）时线程尽快退出。
 const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -96,6 +101,7 @@ fn run(
     let mut cpu_avg = RollingAverage::new(5);
     let mut mem_avg = RollingAverage::new(5);
     let mut gate = AlertGate::new();
+    let mut disk_cache = DiskScanCache::new(DISK_CACHE_TTL);
     let mut last_tick: Option<Instant> = None;
     let mut paused = false;
     let mut next_tick = Instant::now();
@@ -142,10 +148,32 @@ fn run(
                 next_tick = Instant::now();
                 log::info!("[monitor] config updated: {:?}", config);
             }
-            Ok(MonitorCommand::Kill { pid, signal }) => {
-                let _ = events.unbounded_send(handle_kill(&session, pid, signal));
-                // 立即补一帧，让 UI 尽快看到进程消失后的指标。
-                next_tick = Instant::now() + Duration::from_millis(600);
+            Ok(MonitorCommand::ScanDisk {
+                request_id,
+                path,
+                force,
+            }) => {
+                // 导航优先复用 30 秒缓存；刷新（force）才真正重新扫描。
+                let cached = if force { None } else { disk_cache.get(&path) };
+                let from_cache = cached.is_some();
+                let result = match cached {
+                    Some(usage) => {
+                        log::info!("[monitor] disk scan cache hit: {path}");
+                        Ok(usage)
+                    }
+                    None => scan_disk(&session, &path)
+                        .map(|usage| {
+                            disk_cache.insert(usage.clone());
+                            usage
+                        })
+                        .map_err(|error| format!("{error:#}")),
+                };
+                let _ = events.unbounded_send(MonitorEvent::DiskScan { request_id, result });
+                if !from_cache {
+                    // 扫描期间无法采样，恢复后重新建立 CPU / 网络增量基线。
+                    last_tick = None;
+                    next_tick = Instant::now();
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -190,8 +218,8 @@ fn tick(
         RemoteOs::Linux => parse_linux(state, &output, elapsed, SystemTime::now()),
         RemoteOs::Macos => parse_macos(state, &output, elapsed, SystemTime::now()),
     };
-    let tick: MonitorTick = match parsed {
-        Ok(tick) => tick,
+    let sample = match parsed {
+        Ok(sample) => sample,
         Err(error) => {
             let _ =
                 events.unbounded_send(MonitorEvent::Error(format!("解析采集结果失败: {error:#}")));
@@ -199,8 +227,8 @@ fn tick(
         }
     };
 
-    let cpu_avg_value = cpu_avg.push(tick.sample.cpu_pct);
-    let mem_avg_value = mem_avg.push(tick.sample.mem_pct);
+    let cpu_avg_value = cpu_avg.push(sample.cpu_pct);
+    let mem_avg_value = mem_avg.push(sample.mem_pct);
     let alerts = [
         gate.evaluate(
             crate::types::Metric::Cpu,
@@ -214,7 +242,7 @@ fn tick(
         ),
     ];
 
-    let _ = events.unbounded_send(MonitorEvent::Tick(tick));
+    let _ = events.unbounded_send(MonitorEvent::Tick(sample));
     for alert in alerts.into_iter().flatten() {
         log::warn!(
             "[monitor] alert {} = {:.1}% (threshold {:.1}%)",
@@ -226,39 +254,26 @@ fn tick(
     }
 }
 
-fn handle_kill(session: &ssh2::Session, pid: u32, signal: KillSignal) -> MonitorEvent {
-    if pid == 0 {
-        return MonitorEvent::KillResult {
-            pid,
-            ok: false,
-            message: "无效 PID".into(),
-        };
+fn scan_disk(session: &ssh2::Session, path: &str) -> Result<DiskUsage> {
+    if !path.starts_with('/') || path.contains('\0') {
+        return Err(anyhow!("目录路径必须是绝对路径: {path}"));
     }
-    match exec_capture(session, &signal.command(pid)) {
-        Ok(output) if !output.contains("RT_KILL_FAIL") => MonitorEvent::KillResult {
-            pid,
-            ok: true,
-            message: format!("已向 PID {pid} 发送 SIG{}", signal.flag()),
-        },
-        Ok(output) => {
-            let detail = output.replace("RT_KILL_FAIL", "");
-            let detail = detail.trim();
-            MonitorEvent::KillResult {
-                pid,
-                ok: false,
-                message: if detail.is_empty() {
-                    format!("终止 PID {pid} 失败")
-                } else {
-                    format!("终止 PID {pid} 失败: {detail}")
-                },
-            }
-        }
-        Err(error) => MonitorEvent::KillResult {
-            pid,
-            ok: false,
-            message: format!("终止 PID {pid} 失败: {error:#}"),
-        },
-    }
+    let started = Instant::now();
+    // 大目录递归统计可能超过采样连接的读取超时，扫描期间临时放宽。
+    let previous_timeout = session.timeout();
+    session.set_timeout(SCAN_TIMEOUT_MS);
+    let output = exec_capture(session, &disk_scan_script(path));
+    session.set_timeout(previous_timeout);
+    let output = output.context("目录扫描命令执行失败")?;
+    let usage = parse_disk_usage(path, &output)?;
+    log::info!(
+        "[monitor] scanned {} ({} entries, {:.1} MB) in {:?}",
+        usage.path,
+        usage.entries.len(),
+        usage.total_bytes as f64 / 1024.0 / 1024.0,
+        started.elapsed()
+    );
+    Ok(usage)
 }
 
 fn detect_os(session: &ssh2::Session) -> RemoteOs {
