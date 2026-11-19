@@ -122,4 +122,11 @@ crates/
 
 ## 许可证
 
-MIT
+本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE) 发布，属于「源码可用」（source-available）许可，**不是** OSI 开源许可：
+
+- **个人非商业使用免费**：个人学习、研究、实验、业余项目，以及教育 / 慈善 / 公共研究等非商业机构的使用，可免费使用、修改与再分发。
+- **商业使用需授权**：任何商业目的的使用（包括集成进商业产品或服务、经营性内部使用、商业分发）都必须先取得作者的书面商业授权，许可条款本身不授予该权利。
+- **再分发义务**：再分发时必须随附本许可全文，并保留 `Required Notice: Copyright 2026 guquan-lengyue`。
+- **免责**：软件按「现状」提供，不附带任何担保，作者不对使用产生的后果承担责任。
+
+完整条款见 [LICENSE](LICENSE)。商业授权请联系仓库作者（GitHub：[@guquan-lengyue](https://github.com/guquan-lengyue)）。
