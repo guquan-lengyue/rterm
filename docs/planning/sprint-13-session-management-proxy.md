@@ -1,6 +1,6 @@
 # Sprint 13 — 会话管理增强 + SSH 跳板代理 / 端口转发（v1.2）
 
-> **状态**：✅ 编码完成 + Ubuntu 实机 smoke 通过（2026-11-19，跳板链待第二台主机）
+> **状态**：✅ 全部完成（编码 + Ubuntu 实机 smoke + 跳板链 / SOCKS5 实机验证，2026-11-19）
 > **前置**：[S2](./sprint-02-session-data.md) ✅（Session / SessionStore）+ [S3](./sprint-03-session-tree.md) ✅（会话树 / 编辑对话框）+
 > [S4](./sprint-04-settings-io.md) ✅（导入导出）+ [S5](./sprint-05-ssh-terminal.md) ✅（SSH 连接）；
 > 与 [S12](./sprint-12-terminal-sftp-dock.md) 并行时注意 `main_window.rs` 菜单/事件冲突
@@ -245,7 +245,11 @@ connect(session)
   远程转发 `远端 127.0.0.1:18080 → 本地 127.0.0.1:13306` 回环回读 SSH banner；
   空分组 `test/empty` 重启保留；顶部菜单、会话/空白右键、图标、模式切换回归通过；
   期间发现并修复「模态弹窗打开时 `focus_pending` 抢回终端焦点」缺陷
-- [ ] 跳板链真实验证：需第二台可达跳板主机；链路顺序 / 环路 / 5 跳上限已由单元测试覆盖
+- [x] 跳板链与 SOCKS5 实机验证：
+  - `live_proxy`（新增 ignored 测试）：自跳板 192.168.1.103 → 跳板机自身 `127.0.0.1:22`，
+    目标 `$SSH_CONNECTION` 客户端地址为 `127.0.0.1`，证明第二跳由跳板机发起
+  - `live_socks5`（新增 ignored 测试）：`-D` 规则 + SOCKS5 CONNECT 远端 `127.0.0.1:22`，
+    读取 `SSH-2.0` banner；停止后端口释放
 
 ---
 
@@ -255,6 +259,8 @@ connect(session)
   无法直接传入上一跳的 `Channel`。`rterm-ssh` 采用「本地回环中继」：上一跳
   `channel_direct_tcpip` → `127.0.0.1:临时端口` → 下一跳 `TcpStream`；跳板 Session 与中继线程
   由 `SshSession` 持有，断开时目标先断、跳板逆序释放。
+  **关键修正**：libssh2 阻塞读会长期持有 session 锁，双线程同时读写同一 Channel 会导致
+  反方向握手数据饥饿超时；中继改为建立通道后把跳板 Session 切非阻塞、单线程轮询双向搬运。
 - **schema v2**：`SessionFile.folders` + `Session.icon` + `Session.port_forwards`；
   v1 文件直接加载（`serde(default)`），首次保存写 v2；保存前沿用 S10 的 24h 备份策略。
 - **分组**：不引入 Group ID，路径即唯一键；新建自动补父路径，重命名同步前缀，删除仅限空分组。
@@ -262,6 +268,7 @@ connect(session)
 - **右键 / 菜单栏**：`views/context_menu.rs` 统一三态目标、动作枚举、菜单项 / 分隔线 / 分区与位置夹取；
   顶部菜单栏动作经 `AppEvent::MenuCommand` 分发，菜单展开时屏蔽全局快捷键，Esc / 点击外部关闭。
 - **端口转发**：`rterm-forward` 每条规则独立 SSH 连接（支持跳板链）；本地 / 动态监听非阻塞轮询，
+  Windows 上显式把 accept 出的 socket 恢复阻塞模式（否则 SOCKS5 握手读到 `WouldBlock`）；
   远程 `-R` 用 500ms 超时轮询停止位；`-D` 实现最小 SOCKS5（无认证 + CONNECT）。
 - **自动启动**：会话首次打开终端时，若存在 `auto_start` 规则且尚无转发 Tab，则在后台创建转发 Tab
   （不抢焦点）并启动规则；关闭最后一个相关 Tab / 应用退出时 stop_all。

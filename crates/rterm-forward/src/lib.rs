@@ -189,6 +189,9 @@ fn run_local(
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // Windows 上非阻塞 listener accept 出的 socket 可能继承非阻塞，
+                // 显式恢复阻塞模式，保证 SOCKS5 握手与字节泵可用。
+                let _ = stream.set_nonblocking(false);
                 let session = session.clone();
                 let target_host = target_host.clone();
                 workers.push(std::thread::spawn(move || {
@@ -296,10 +299,11 @@ fn run_dynamic(
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                let _ = stream.set_nonblocking(false);
                 let session = session.clone();
                 std::thread::spawn(move || {
                     if let Err(error) = socks5_connect(&session, &mut stream) {
-                        log::debug!("[forward] {rule_id} SOCKS5 连接失败: {error}");
+                        log::debug!("[forward] {rule_id} SOCKS5 连接失败: {error:#}");
                     }
                 });
             }

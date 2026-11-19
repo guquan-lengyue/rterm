@@ -5,6 +5,9 @@
 //   只用来承载 EventEmitter<AppEvent>。所有 View subscribe 它；
 //   emit 必须通过 app.update_entity(&host, |_, cx| cx.emit(event))
 
+// libssh2-sys 静态 OpenSSL 的 PDB 缺失属于依赖产物，不影响链接；抑制该链接器噪声。
+#![allow(linker_messages)]
+
 pub mod diagnostics;
 pub mod event;
 pub mod single_instance;

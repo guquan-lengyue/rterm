@@ -22,7 +22,7 @@
 | **S10** | 稳定性收尾 | [sprint-10-stability.md](./sprint-10-stability.md) | ✅ 代码任务完成（2026-11-17，待 9.12.1 手工 smoke → S11 11.1） | S6 ✅–S9 ✅ + S7.5 ✅ |
 | **S11** | v1.0 打磨 & 发布 | [sprint-11-release.md](./sprint-11-release.md) | 🚧 就绪（先跑 S10 9.12.1 手工 smoke） | S10 ✅ |
 | **S12** | 终端内嵌 SFTP 侧栏（v1.1） | [sprint-12-terminal-sftp-dock.md](./sprint-12-terminal-sftp-dock.md) | 📋 待开始（不阻塞 v1.0） | S8 ✅ + S10 ✅ + S11 |
-| **S13** | 会话管理增强 + SSH 跳板代理/端口转发 + 顶部菜单栏（v1.2） | [sprint-13-session-management-proxy.md](./sprint-13-session-management-proxy.md) | ✅ 完成（2026-11-19 Ubuntu 实机 smoke 通过；跳板链待第二台主机） | S2 ✅ + S3 ✅ + S4 ✅ + S5 ✅ |
+| **S13** | 会话管理增强 + SSH 跳板代理/端口转发 + 顶部菜单栏（v1.2） | [sprint-13-session-management-proxy.md](./sprint-13-session-management-proxy.md) | ✅ 全部完成（2026-11-19，含跳板链 / SOCKS5 实机验证） | S2 ✅ + S3 ✅ + S4 ✅ + S5 ✅ |
 
 ---
 
@@ -61,8 +61,8 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 - S12 已立项（v1.1）：终端 Tab 右侧停靠 SFTP 侧栏并跟随终端 cwd，复用 S8 的 `TerminalCwdHint`，不阻塞 v1.0
 - S13 已完成（v1.2）：会话文件 schema v2（icon / folders / port_forwards）、代理链与逐跳中继、
   端口转发（-L / -R / -D）、分组 CRUD 与可搜索下拉、图标选择、三类右键菜单、顶部菜单栏、导入导出 v2；
-  workspace 测试全绿、clippy 0 warning、fmt 通过；Ubuntu 实机验证终端 / SFTP / 监控 / 本地与远程转发 / 空分组重启保留；
-  跳板链真实验证待第二台可达主机（期间修复模态弹窗焦点抢占缺陷）
+  workspace 测试全绿、clippy 0 warning、fmt 通过；Ubuntu 实机验证终端 / SFTP / 监控 / 本地与远程转发 /
+  空分组重启保留；跳板链（自跳板）与 SOCKS5 `-D` 通过新增 ignored live 测试实机验证
 
 ---
 
@@ -99,6 +99,9 @@ S2 ✅ 会话数据 ────┼──▶ S3 ✅ 会话树 + 编辑对话框 
 
 ## 变更记录
 
+- **2026-11-19** v4.8：S13 全部完成——新增 `live_proxy` / `live_socks5` 实机测试，验证自跳板链与
+  SOCKS5 `-D`；修复 libssh2 阻塞读写导致的跳板中继饥饿（改为单线程非阻塞泵）与 Windows accept
+  非阻塞继承导致的 SOCKS5 握手失败
 - **2026-11-19** v4.7：S13 Ubuntu 实机 smoke 通过（终端 / SFTP / 监控 / `-L` / `-R` / 空分组重启保留）；
   修复模态弹窗打开时焦点被终端抢回的缺陷；跳板链真实验证待第二台主机
 - **2026-11-19** v4.6：S13 代码完成（会话 schema v2 / 跳板代理 / 端口转发 / 分组与图标 / 三类右键菜单 /

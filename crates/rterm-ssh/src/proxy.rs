@@ -11,13 +11,20 @@
 //!                        上一跳 Session.channel_direct_tcpip(next_host, next_port)
 //! ```
 //!
-//! 中继线程只占用上一跳的 Channel，不与该跳的其他 libssh2 调用并发，
-//! 生命周期由 `SshSession` 持有的 `Relay` 句柄决定（断开时随 Session 关闭而退出）。
+//! 关键约束：libssh2 的阻塞式读会长期持有 session 锁，双线程同时读写同一
+//! Channel 会让另一方向饥饿（握手超时）。因此 Relay 在建立通道后把上一跳
+//! Session 切到非阻塞模式，由**单线程轮询**双向搬运字节，任何时刻只有一个
+//! libssh2 调用在途。
 
-use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+
+const BUFFER_SIZE: usize = 16 * 1024;
+const MAX_PENDING: usize = 256 * 1024;
+const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 /// 一条本地回环中继。Drop 后线程会随通道关闭自然退出。
 pub(crate) struct Relay {
@@ -32,6 +39,10 @@ impl Relay {
         let channel = parent
             .channel_direct_tcpip(target_host, target_port, None)
             .with_context(|| format!("经跳板打开到 {target_host}:{target_port} 的直连通道失败"))?;
+
+        // 通道建立后再切非阻塞：之后的字节搬运全部由单线程轮询完成，
+        // 避免阻塞读长期占用 session 锁导致反方向握手数据饿死。
+        parent.set_blocking(false);
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).context("创建本地中继监听失败")?;
         let local_port = listener
@@ -65,36 +76,90 @@ fn run_relay(channel: ssh2::Channel, listener: TcpListener) {
         }
     };
     let _ = stream.set_nodelay(true);
+    let _ = stream.set_nonblocking(true);
     pump(channel, stream);
 }
 
-/// 双向字节泵：任一方向关闭时一并结束，避免线程泄漏。
+/// 单线程双向泵：非阻塞轮询 TCP 与 SSH Channel，任一方向 EOF 时结束。
 fn pump(channel: ssh2::Channel, stream: TcpStream) {
-    let mut download_stream = match stream.try_clone() {
-        Ok(stream) => stream,
-        Err(error) => {
-            log::warn!("[ssh] relay 复制 socket 失败: {error}");
-            return;
-        }
-    };
-    let mut upload_stream = stream;
-    let mut upload_channel = channel.clone();
-    let mut download_channel = channel;
+    let mut channel = channel;
+    let mut tcp = stream;
+    let mut to_channel: Vec<u8> = Vec::new();
+    let mut to_tcp: Vec<u8> = Vec::new();
+    let mut tcp_open = true;
+    let mut channel_open = true;
+    let mut buffer = vec![0u8; BUFFER_SIZE];
 
-    let upload = std::thread::Builder::new()
-        .name("rterm-ssh-relay-up".into())
-        .spawn(move || {
-            if let Err(error) = io::copy(&mut upload_stream, &mut upload_channel) {
-                log::debug!("[ssh] relay 上行结束: {error}");
+    while (tcp_open || !to_channel.is_empty()) && (channel_open || !to_tcp.is_empty()) {
+        let mut progressed = false;
+
+        // TCP → 待发送缓冲
+        if tcp_open && to_channel.len() < MAX_PENDING {
+            match tcp.read(&mut buffer) {
+                Ok(0) => {
+                    tcp_open = false;
+                    let _ = channel.send_eof();
+                }
+                Ok(read) => {
+                    to_channel.extend_from_slice(&buffer[..read]);
+                    progressed = true;
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(_) => {
+                    tcp_open = false;
+                    let _ = channel.send_eof();
+                }
             }
-            let _ = upload_channel.send_eof();
-        });
+        }
 
-    if let Err(error) = io::copy(&mut download_channel, &mut download_stream) {
-        log::debug!("[ssh] relay 下行结束: {error}");
+        // 待发送缓冲 → SSH Channel
+        if !to_channel.is_empty() {
+            match channel.write(&to_channel) {
+                Ok(written) => {
+                    to_channel.drain(..written);
+                    progressed = true;
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(_) => {
+                    channel_open = false;
+                    to_channel.clear();
+                }
+            }
+        }
+
+        // SSH Channel → 待发送缓冲
+        if channel_open {
+            match channel.read(&mut buffer) {
+                Ok(0) => channel_open = false,
+                Ok(read) => {
+                    to_tcp.extend_from_slice(&buffer[..read]);
+                    progressed = true;
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(_) => channel_open = false,
+            }
+        }
+
+        // 待发送缓冲 → TCP
+        if !to_tcp.is_empty() {
+            match tcp.write(&to_tcp) {
+                Ok(written) => {
+                    to_tcp.drain(..written);
+                    progressed = true;
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(_) => {
+                    channel_open = false;
+                    to_tcp.clear();
+                }
+            }
+        }
+
+        if !progressed {
+            std::thread::sleep(POLL_INTERVAL);
+        }
     }
-    let _ = download_stream.shutdown(std::net::Shutdown::Both);
-    if let Ok(handle) = upload {
-        let _ = handle.join();
-    }
+
+    let _ = tcp.shutdown(Shutdown::Both);
+    let _ = channel.close();
 }

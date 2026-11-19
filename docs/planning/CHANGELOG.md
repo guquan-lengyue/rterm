@@ -6,7 +6,7 @@
 
 ## Sprint 13 — 会话管理增强 + SSH 跳板代理 / 端口转发（v1.2）
 
-**状态**：✅ 编码完成 + Ubuntu 实机 smoke 通过（跳板链待第二台主机） | **时间**：2026-11-19
+**状态**：✅ 完成（编码 + Ubuntu 实机 smoke + 跳板链 / SOCKS5 实机验证，2026-11-19） | **时间**：2026-11-19
 **前置**：S2 ✅ + S3 ✅ + S4 ✅ + S5 ✅
 
 ### 交付清单
@@ -29,7 +29,9 @@
 | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 0 warning / 0 error |
 | `cargo test --workspace` | ✅ 全部通过（live_ssh 1 ignored，需真实主机） |
 | 数据层单测 | ✅ schema v1→v2 加载 / 保存往返、分组 CRUD / 重命名冲突 / 删除非空、代理环路与 5 跳、端口校验与冲突、导出 v2 与 v1 兼容 |
-| 真实远端 smoke | ✅ 2026-11-19 Ubuntu 26.04.1：终端 / SFTP（侧栏 + Tab）/ 监控；本地 `-L` 与远程 `-R` 回读 SSH banner；空分组重启保留；菜单与图标回归（跳板链待第二台主机） |
+| 真实远端 smoke | ✅ 2026-11-19 Ubuntu 26.04.1：终端 / SFTP（侧栏 + Tab）/ 监控；本地 `-L` 与远程 `-R` 回读 SSH banner；空分组重启保留；菜单与图标回归 |
+| 跳板链 live 测试 | ✅ `live_proxy`（ignored）：自跳板 192.168.1.103 → 跳板机自身 `127.0.0.1:22`，目标 `$SSH_CONNECTION` 客户端地址为 `127.0.0.1`（第二跳由跳板机发起） |
+| SOCKS5 live 测试 | ✅ `live_socks5`（ignored）：`-D` 规则 + SOCKS5 CONNECT 远端 `127.0.0.1:22` 读取 `SSH-2.0` banner；停止后端口释放 |
 
 ### 已知限制
 
