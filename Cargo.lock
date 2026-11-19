@@ -4922,7 +4922,7 @@ dependencies = [
 
 [[package]]
 name = "rterm-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4952,7 +4952,7 @@ dependencies = [
 
 [[package]]
 name = "rterm-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4964,7 +4964,7 @@ dependencies = [
 
 [[package]]
 name = "rterm-forward"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -4977,7 +4977,7 @@ dependencies = [
 
 [[package]]
 name = "rterm-monitor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -4988,7 +4988,7 @@ dependencies = [
 
 [[package]]
 name = "rterm-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -5002,7 +5002,7 @@ dependencies = [
 
 [[package]]
 name = "rterm-sftp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -5013,7 +5013,7 @@ dependencies = [
 
 [[package]]
 name = "rterm-ssh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -5028,7 +5028,7 @@ dependencies = [
 
 [[package]]
 name = "rterm-sync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "log",
@@ -5036,7 +5036,7 @@ dependencies = [
 
 [[package]]
 name = "rterm-terminal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
