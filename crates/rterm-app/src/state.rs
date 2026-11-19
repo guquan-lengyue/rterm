@@ -61,6 +61,9 @@ pub struct Settings {
     // 路径
     pub terminal_log_dir: Option<String>,
     pub data_dir: Option<String>,
+
+    /// 会话侧栏是否可见（视图菜单可切换，随设置持久化）。
+    pub sidebar_visible: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -94,6 +97,7 @@ impl Default for Settings {
 
             terminal_log_dir: None,
             data_dir: None,
+            sidebar_visible: true,
         }
     }
 }
@@ -248,6 +252,7 @@ pub enum TabKind {
     Terminal,
     Sftp,
     Monitor,
+    PortForward,
 }
 
 pub struct TabInfo {
@@ -334,10 +339,14 @@ mod tests {
         std::fs::create_dir_all(&old_dir).expect("建旧目录");
         std::fs::write(old_dir.join("sessions.json"), "{\"sessions\":[]}").expect("写旧会话");
 
-        let mut old_settings = Settings::default();
-        old_settings.data_dir = Some(old_dir.to_string_lossy().into_owned());
-        let mut new_settings = Settings::default();
-        new_settings.data_dir = Some(new_dir.to_string_lossy().into_owned());
+        let old_settings = Settings {
+            data_dir: Some(old_dir.to_string_lossy().into_owned()),
+            ..Settings::default()
+        };
+        let new_settings = Settings {
+            data_dir: Some(new_dir.to_string_lossy().into_owned()),
+            ..Settings::default()
+        };
 
         migrate_data_dir(&old_settings, &new_settings).expect("迁移成功");
         assert_eq!(

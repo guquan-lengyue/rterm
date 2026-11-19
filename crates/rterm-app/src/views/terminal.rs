@@ -1883,7 +1883,7 @@ impl Render for TerminalView {
             let canvas_element = canvas(
                 move |bounds, window, _cx| {
                     let mut metrics = metrics.borrow_mut();
-                    let size_changed = metrics.bounds.map_or(true, |old| {
+                    let size_changed = metrics.bounds.is_none_or(|old| {
                         old.size.width != bounds.size.width || old.size.height != bounds.size.height
                     });
                     metrics.bounds = Some(bounds);

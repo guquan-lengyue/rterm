@@ -5,9 +5,15 @@
 //! 已知例外：SFTP 本地文件系统操作仍在 UI 线程同步执行（远端 I/O 已后台化）。
 
 pub mod command_palette;
+pub mod context_menu;
+pub mod group_picker;
+pub mod icon_picker;
 pub mod import_export;
 pub mod main_window;
+pub mod menu_bar;
 pub mod monitor;
+pub mod port_forward;
+pub mod prompt;
 pub mod scroll_list;
 pub mod session_dialog;
 pub mod session_tree;
@@ -31,9 +37,7 @@ pub(crate) const STATUS_BAR_H: f32 = 28.0;
 pub(crate) const TAB_BAR_H: f32 = 30.0;
 pub(crate) const TERMINAL_HEADER_H: f32 = 26.0;
 
-// 右键菜单（MainWindow 会话菜单 / TabBar 标签菜单 / SFTP 菜单，数值保持原样）
-pub(crate) const CONTEXT_MENU_W: f32 = 170.0;
-pub(crate) const CONTEXT_MENU_ITEM_H: f32 = 30.0;
+// 右键菜单（TabBar / SFTP 菜单，数值保持原样）
 pub(crate) const TAB_MENU_W: f32 = 150.0;
 pub(crate) const SFTP_MENU_W: f32 = 190.0;
 /// TabBar / SFTP 右键菜单行高

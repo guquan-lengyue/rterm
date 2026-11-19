@@ -162,9 +162,8 @@ fn run(
                         Ok(usage)
                     }
                     None => scan_disk(&session, &path)
-                        .map(|usage| {
+                        .inspect(|usage| {
                             disk_cache.insert(usage.clone());
-                            usage
                         })
                         .map_err(|error| format!("{error:#}")),
                 };

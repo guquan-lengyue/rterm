@@ -8,10 +8,17 @@ pub mod crypto_bridge;
 pub mod export;
 pub mod model;
 pub mod openssh;
+pub mod proxy;
 pub mod store;
 
 pub use export::{
     ConflictPolicy, ExportScope, ImportPreviewItem, ImportPreviewStatus, ImportReport,
 };
-pub use model::{default_now, AuthMethod, EncryptedString, Session};
-pub use store::{LoadIssue, SessionStore, UpsertResult};
+pub use model::{
+    default_now, validate_port_forwards, AuthMethod, EncryptedString, ForwardKind, PortForward,
+    Session, DEFAULT_SESSION_ICON,
+};
+pub use proxy::{
+    build_chain, can_be_proxy_of, chain_labels, describe_chain, selection_forms_cycle, MAX_JUMPS,
+};
+pub use store::{normalize_folder_path, LoadIssue, SessionStore, UpsertResult};

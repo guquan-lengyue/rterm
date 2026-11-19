@@ -4935,6 +4935,7 @@ dependencies = [
  "log",
  "rfd",
  "rterm-crypto",
+ "rterm-forward",
  "rterm-monitor",
  "rterm-session",
  "rterm-sftp",
@@ -4958,6 +4959,19 @@ dependencies = [
  "rand 0.8.8",
  "sha2",
  "windows 0.58.0",
+]
+
+[[package]]
+name = "rterm-forward"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "log",
+ "rterm-session",
+ "rterm-ssh",
+ "ssh2",
+ "uuid",
 ]
 
 [[package]]

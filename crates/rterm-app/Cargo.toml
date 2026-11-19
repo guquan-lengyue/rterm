@@ -18,6 +18,7 @@ rterm-terminal.workspace = true
 rterm-sftp = { path = "../rterm-sftp" }
 rterm-sync = { path = "../rterm-sync" }
 rterm-monitor.workspace = true
+rterm-forward.workspace = true
 alacritty_terminal.workspace = true
 chrono.workspace = true
 serde.workspace = true

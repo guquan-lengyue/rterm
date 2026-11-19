@@ -16,7 +16,7 @@ use gpui::{
 use rterm_sync::SyncMode;
 use uuid::Uuid;
 
-use crate::event::{AppEvent, EventBusHost};
+use crate::event::AppEvent;
 use crate::state::{lock_or_recover, AppState};
 use crate::ui::theme;
 

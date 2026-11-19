@@ -297,8 +297,7 @@ pub fn parse_disk_usage(root: &str, output: &str) -> Result<DiskUsage> {
 
     for line in lines {
         let mut parts = line.splitn(3, '\t');
-        let (Some(kind), Some(size_kb), Some(path)) =
-            (parts.next(), parts.next(), parts.next())
+        let (Some(kind), Some(size_kb), Some(path)) = (parts.next(), parts.next(), parts.next())
         else {
             continue;
         };

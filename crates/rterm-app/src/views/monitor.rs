@@ -371,7 +371,7 @@ impl MonitorView {
 
     /// 鼠标当前落在哪个扇区。
     fn disk_hit_test(&self, position: Point<Pixels>) -> Option<usize> {
-        let bounds = self.disk_chart_bounds.borrow().clone()?;
+        let bounds = (*self.disk_chart_bounds.borrow())?;
         let entries = self.disk_usage.as_ref()?;
         let values: Vec<u64> = entries.entries.iter().map(|entry| entry.bytes).collect();
         hit_test_pie(bounds, position, &values)
@@ -688,7 +688,11 @@ impl MonitorView {
             ("等待扫描".to_string(), t.text_subtle())
         };
 
-        let capacity_total = self.latest.as_ref().map(|s| s.disk_total_bytes).unwrap_or(0);
+        let capacity_total = self
+            .latest
+            .as_ref()
+            .map(|s| s.disk_total_bytes)
+            .unwrap_or(0);
         let capacity_used = self.latest.as_ref().map(|s| s.disk_used_bytes).unwrap_or(0);
         let capacity_pct = disk_ratio(capacity_used, capacity_total) * 100.0;
         let has_capacity = capacity_total > 0;
@@ -816,7 +820,12 @@ impl MonitorView {
             );
             items.push(self.render_crumb(part, accumulated.clone(), cx));
         }
-        div().flex().items_center().gap_1().children(items).into_any_element()
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .children(items)
+            .into_any_element()
     }
 
     fn render_crumb(&self, label: &str, target: String, cx: &mut Context<Self>) -> AnyElement {
@@ -834,9 +843,11 @@ impl MonitorView {
             .text_color(t.text_on_card_bg())
             .cursor_pointer()
             .hover(move |style| style.bg(hover))
-            .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                this.navigate_disk(target.clone(), cx);
-            }))
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                    this.navigate_disk(target.clone(), cx);
+                }),
+            )
             .child(text)
             .into_any_element()
     }
@@ -948,13 +959,7 @@ impl MonitorView {
                     move |bounds, _state, window, _cx| {
                         *bounds_paint.borrow_mut() = Some(bounds);
                         paint_disk_breakdown(
-                            bounds,
-                            &fractions,
-                            &colors,
-                            base_color,
-                            hole_color,
-                            hover,
-                            window,
+                            bounds, &fractions, &colors, base_color, hole_color, hover, window,
                         );
                     },
                 )
@@ -984,13 +989,15 @@ impl MonitorView {
                             .child(center_sub),
                     ),
             )
-            .on_mouse_move(cx.listener(|this: &mut Self, event: &MouseMoveEvent, _w, cx| {
-                let next = this.disk_hit_test(event.position);
-                if this.disk_hover != next {
-                    this.disk_hover = next;
-                    cx.notify();
-                }
-            }))
+            .on_mouse_move(
+                cx.listener(|this: &mut Self, event: &MouseMoveEvent, _w, cx| {
+                    let next = this.disk_hit_test(event.position);
+                    if this.disk_hover != next {
+                        this.disk_hover = next;
+                        cx.notify();
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this: &mut Self, event: &MouseDownEvent, _w, cx| {
@@ -1072,21 +1079,19 @@ impl MonitorView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .on_hover(cx.listener(
-                        move |this: &mut Self, hovered: &bool, _w, cx| {
-                            let next = if *hovered {
-                                Some(index)
-                            } else if this.disk_hover == Some(index) {
-                                None
-                            } else {
-                                return;
-                            };
-                            if this.disk_hover != next {
-                                this.disk_hover = next;
-                                cx.notify();
-                            }
-                        },
-                    ))
+                    .on_hover(cx.listener(move |this: &mut Self, hovered: &bool, _w, cx| {
+                        let next = if *hovered {
+                            Some(index)
+                        } else if this.disk_hover == Some(index) {
+                            None
+                        } else {
+                            return;
+                        };
+                        if this.disk_hover != next {
+                            this.disk_hover = next;
+                            cx.notify();
+                        }
+                    }))
                     .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(color))
                     .child(
                         div()
@@ -1111,11 +1116,11 @@ impl MonitorView {
                             .child(format!("{pct:.1}%")),
                     );
                 if is_dir {
-                    row = row
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                    row = row.cursor_pointer().on_click(cx.listener(
+                        move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
                             this.navigate_disk(path.clone(), cx);
-                        }));
+                        },
+                    ));
                 }
                 row.into_any_element()
             })
@@ -1126,14 +1131,7 @@ impl MonitorView {
             .min_w(px(0.))
             .flex()
             .items_center()
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .children(rows),
-            )
+            .child(div().w_full().flex().flex_wrap().gap_2().children(rows))
             .into_any_element()
     }
 
@@ -1396,7 +1394,10 @@ fn paint_chart(
     for step in 1..=4 {
         let y = bounds.top() + px(height * step as f32 / 5.0);
         window.paint_quad(gpui::fill(
-            Bounds::new(point(bounds.left(), y), gpui::size(bounds.size.width, px(1.0))),
+            Bounds::new(
+                point(bounds.left(), y),
+                gpui::size(bounds.size.width, px(1.0)),
+            ),
             grid,
         ));
     }
@@ -1566,11 +1567,7 @@ fn pie_fractions(sizes: impl Iterator<Item = u64>) -> Vec<f32> {
 }
 
 /// 饼图命中测试：角度以 12 点为 0°、顺时针递增。
-fn hit_test_pie(
-    bounds: Bounds<Pixels>,
-    position: Point<Pixels>,
-    values: &[u64],
-) -> Option<usize> {
+fn hit_test_pie(bounds: Bounds<Pixels>, position: Point<Pixels>, values: &[u64]) -> Option<usize> {
     let total: u64 = values.iter().sum();
     if total == 0 {
         return None;
@@ -1689,10 +1686,16 @@ mod tests {
             Some(1)
         );
         // 圆环内部 / 圆外 → 未命中
-        assert_eq!(hit_test_pie(bounds, point(px(120.), px(120.)), &[1, 3]), None);
+        assert_eq!(
+            hit_test_pie(bounds, point(px(120.), px(120.)), &[1, 3]),
+            None
+        );
         assert_eq!(hit_test_pie(bounds, point(px(0.), px(0.)), &[1, 3]), None);
         // 空目录不响应
-        assert_eq!(hit_test_pie(bounds, point(px(120.), px(30.)), &[0, 0]), None);
+        assert_eq!(
+            hit_test_pie(bounds, point(px(120.), px(30.)), &[0, 0]),
+            None
+        );
     }
 
     #[test]

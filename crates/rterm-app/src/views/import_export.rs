@@ -50,6 +50,13 @@ enum EncryptionKind {
     Passphrase,
 }
 
+/// 导入源类型：rterm 导出 JSON / OpenSSH config。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportSource {
+    RtermJson,
+    OpenSshConfig,
+}
+
 /// 默认导出路径：`<data_dir>\sessions-export.json`
 /// （data_dir 默认 `%APPDATA%\rterm`，可在设置 → 高级中修改）
 pub fn default_export_path() -> std::path::PathBuf {
@@ -73,10 +80,13 @@ pub struct ImportExportDialog {
     export_path: Entity<TextInput>,
 
     // 导入
+    import_source: ImportSource,
     import_path: Entity<TextInput>,
     import_pass: Entity<TextInput>,
     policy: rterm_session::ConflictPolicy,
     preview: Option<Vec<rterm_session::ImportPreviewItem>>,
+    /// OpenSSH config 预览时缓存解析结果，确认导入时直接复用。
+    openssh_parsed: Option<Vec<rterm_session::Session>>,
 
     /// 勾选会话 / 预览列表的滚动状态（9.13）
     select_scroll: ScrollMetrics,
@@ -115,10 +125,12 @@ impl ImportExportDialog {
             export_pass_confirm: ti(cx, String::new(), true),
             export_path: ti(cx, default_path.clone(), false),
 
+            import_source: ImportSource::RtermJson,
             import_path: ti(cx, default_path, false),
             import_pass: ti(cx, String::new(), true),
             policy: rterm_session::ConflictPolicy::Skip,
             preview: None,
+            openssh_parsed: None,
 
             select_scroll: ScrollMetrics::new(SELECT_LIST_VIEW_H, LIST_ROW_H),
             preview_scroll: ScrollMetrics::new(PREVIEW_LIST_VIEW_H, LIST_ROW_H),
@@ -132,6 +144,14 @@ impl ImportExportDialog {
     }
 
     // ---------------- 数据读取 ----------------
+
+    /// 从分组右键「导出该分组…」进入时预选范围。
+    pub fn set_export_folder(&mut self, folder: String, cx: &mut Context<Self>) {
+        self.mode = IoMode::Export;
+        self.scope = ScopeKind::Folder;
+        self.selected_folder = Some(folder);
+        cx.notify();
+    }
 
     fn text(&self, input: &Entity<TextInput>, cx: &Context<Self>) -> String {
         input.read(cx).content.trim().to_string()
@@ -212,19 +232,21 @@ impl ImportExportDialog {
             }
         };
 
-        let sessions = lock_or_recover(&cx.global::<AppState>().session_store)
-            .list()
-            .to_vec();
+        let (sessions, folders) = {
+            let store = lock_or_recover(&cx.global::<AppState>().session_store);
+            (store.list().to_vec(), store.list_folders())
+        };
         let count = count_scope(&sessions, &scope);
 
-        let result = rterm_session::export::export_json(&sessions, scope, passphrase.as_deref())
-            .map_err(|e| format!("{e:#}"))
-            .and_then(|json| {
-                if let Some(parent) = std::path::Path::new(&path_str).parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                std::fs::write(&path_str, json).map_err(|e| format!("写入文件失败: {e}"))
-            });
+        let result =
+            rterm_session::export::export_json(&sessions, &folders, scope, passphrase.as_deref())
+                .map_err(|e| format!("{e:#}"))
+                .and_then(|json| {
+                    if let Some(parent) = std::path::Path::new(&path_str).parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    std::fs::write(&path_str, json).map_err(|e| format!("写入文件失败: {e}"))
+                });
 
         match result {
             Ok(()) => {
@@ -242,11 +264,15 @@ impl ImportExportDialog {
     // ---------------- 导入 ----------------
 
     fn browse_import(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = rfd::FileDialog::new()
-            .set_title("导入会话")
-            .add_filter("JSON", &["json"])
-            .pick_file()
-        {
+        let dialog = rfd::FileDialog::new().set_title(match self.import_source {
+            ImportSource::RtermJson => "导入会话",
+            ImportSource::OpenSshConfig => "导入 OpenSSH config",
+        });
+        let dialog = match self.import_source {
+            ImportSource::RtermJson => dialog.add_filter("JSON", &["json"]),
+            ImportSource::OpenSshConfig => dialog,
+        };
+        if let Some(path) = dialog.pick_file() {
             self.set_input(&self.import_path, path.display().to_string(), cx);
         }
     }
@@ -257,38 +283,61 @@ impl ImportExportDialog {
             self.failure("请填写导入文件路径", cx);
             return;
         }
-        let json = match std::fs::read_to_string(&path) {
-            Ok(j) => j,
-            Err(e) => {
-                self.failure(format!("读取文件失败: {e}"), cx);
-                return;
-            }
-        };
-        let passphrase = {
-            let p = self.text(&self.import_pass, cx);
-            if p.is_empty() {
-                None
-            } else {
-                Some(p)
-            }
-        };
         let existing = lock_or_recover(&cx.global::<AppState>().session_store)
             .list()
             .to_vec();
 
-        match rterm_session::export::preview_import(
-            &json,
-            &existing,
-            self.policy,
-            passphrase.as_deref(),
-        ) {
-            Ok(items) => {
-                self.preview = Some(items);
-                self.message = None;
+        match self.import_source {
+            ImportSource::RtermJson => {
+                let json = match std::fs::read_to_string(&path) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        self.failure(format!("读取文件失败: {e}"), cx);
+                        return;
+                    }
+                };
+                let passphrase = {
+                    let p = self.text(&self.import_pass, cx);
+                    if p.is_empty() {
+                        None
+                    } else {
+                        Some(p)
+                    }
+                };
+                self.openssh_parsed = None;
+                match rterm_session::export::preview_import(
+                    &json,
+                    &existing,
+                    self.policy,
+                    passphrase.as_deref(),
+                ) {
+                    Ok(items) => {
+                        self.preview = Some(items);
+                        self.message = None;
+                    }
+                    Err(e) => {
+                        self.preview = None;
+                        self.message = Some((false, format!("{e}")));
+                    }
+                }
             }
-            Err(e) => {
-                self.preview = None;
-                self.message = Some((false, format!("{e}")));
+            ImportSource::OpenSshConfig => {
+                match rterm_session::openssh::parse_openssh_config(std::path::Path::new(&path)) {
+                    Ok(sessions) => {
+                        self.preview = Some(rterm_session::export::preview_sessions(
+                            &sessions,
+                            &existing,
+                            self.policy,
+                        ));
+                        self.openssh_parsed = Some(sessions);
+                        self.message = None;
+                    }
+                    Err(e) => {
+                        self.preview = None;
+                        self.openssh_parsed = None;
+                        self.message = Some((false, format!("解析 OpenSSH config 失败: {e:#}")));
+                    }
+                }
             }
         }
         cx.notify();
@@ -300,36 +349,65 @@ impl ImportExportDialog {
             self.failure("请填写导入文件路径", cx);
             return;
         }
-        let json = match std::fs::read_to_string(&path) {
-            Ok(j) => j,
-            Err(e) => {
-                self.failure(format!("读取文件失败: {e}"), cx);
-                return;
-            }
+        let (existing, existing_folders) = {
+            let store = lock_or_recover(&cx.global::<AppState>().session_store);
+            (store.list().to_vec(), store.list_folders())
         };
-        let passphrase = {
-            let p = self.text(&self.import_pass, cx);
-            if p.is_empty() {
-                None
-            } else {
-                Some(p)
-            }
-        };
-        let existing = lock_or_recover(&cx.global::<AppState>().session_store)
-            .list()
-            .to_vec();
 
-        match rterm_session::export::import_json(
-            &json,
-            &existing,
-            self.policy,
-            passphrase.as_deref(),
-        ) {
-            Ok((merged, report)) => {
+        let merged_result = match self.import_source {
+            ImportSource::RtermJson => {
+                let json = match std::fs::read_to_string(&path) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        self.failure(format!("读取文件失败: {e}"), cx);
+                        return;
+                    }
+                };
+                let passphrase = {
+                    let p = self.text(&self.import_pass, cx);
+                    if p.is_empty() {
+                        None
+                    } else {
+                        Some(p)
+                    }
+                };
+                rterm_session::export::import_json(
+                    &json,
+                    &existing,
+                    &existing_folders,
+                    self.policy,
+                    passphrase.as_deref(),
+                )
+            }
+            ImportSource::OpenSshConfig => {
+                let parsed = match self.openssh_parsed.take() {
+                    Some(parsed) => parsed,
+                    None => match rterm_session::openssh::parse_openssh_config(
+                        std::path::Path::new(&path),
+                    ) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            self.failure(format!("解析 OpenSSH config 失败: {e:#}"), cx);
+                            return;
+                        }
+                    },
+                };
+                Ok(rterm_session::export::merge_sessions(
+                    parsed,
+                    &existing,
+                    &existing_folders,
+                    self.policy,
+                ))
+            }
+        };
+
+        match merged_result {
+            Ok((merged, folders, report)) => {
                 {
                     let state = cx.global_mut::<AppState>();
                     let mut store = lock_or_recover(&state.session_store);
                     store.clear();
+                    store.set_folders(folders);
                     for s in merged {
                         store.upsert(s);
                     }
@@ -580,18 +658,8 @@ impl ImportExportDialog {
         );
 
         if self.scope == ScopeKind::Folder {
-            let folders = {
-                let sessions = lock_or_recover(&cx.global::<AppState>().session_store)
-                    .list()
-                    .to_vec();
-                let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-                for s in &sessions {
-                    if let Some(f) = s.folder.as_ref().filter(|f| !f.is_empty()) {
-                        set.insert(f.clone());
-                    }
-                }
-                set.into_iter().collect::<Vec<_>>()
-            };
+            // 显式空分组也出现在导出范围里（S13 13.2）。
+            let folders = lock_or_recover(&cx.global::<AppState>().session_store).list_folders();
 
             if folders.is_empty() {
                 body = body.child(
@@ -782,6 +850,45 @@ impl ImportExportDialog {
         let mut body = div().w_full().flex().flex_col().gap_2();
 
         body = body
+            .child(self.section("导入来源", cx))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .gap_1()
+                    .child(self.radio(
+                        "io-src-json".into(),
+                        "rterm 导出文件",
+                        self.import_source == ImportSource::RtermJson,
+                        cx,
+                        |this, cx| {
+                            this.import_source = ImportSource::RtermJson;
+                            this.preview = None;
+                            this.openssh_parsed = None;
+                            this.message = None;
+                            let path = default_export_path().display().to_string();
+                            this.set_input(&this.import_path.clone(), path, cx);
+                        },
+                    ))
+                    .child(self.radio(
+                        "io-src-openssh".into(),
+                        "OpenSSH config",
+                        self.import_source == ImportSource::OpenSshConfig,
+                        cx,
+                        |this, cx| {
+                            this.import_source = ImportSource::OpenSshConfig;
+                            this.preview = None;
+                            this.openssh_parsed = None;
+                            this.message = None;
+                            let path = dirs::home_dir()
+                                .map(|home| home.join(".ssh").join("config"))
+                                .unwrap_or_else(|| std::path::PathBuf::from("~/.ssh/config"))
+                                .display()
+                                .to_string();
+                            this.set_input(&this.import_path.clone(), path, cx);
+                        },
+                    )),
+            )
             .child(self.section("源文件", cx))
             .child(
                 div()
@@ -796,40 +903,54 @@ impl ImportExportDialog {
                         cx,
                         |this, cx| this.browse_import(cx),
                     )),
-            )
-            .child(Self::field(
+            );
+
+        // OpenSSH config 无口令概念，隐藏口令输入。
+        if self.import_source == ImportSource::RtermJson {
+            body = body.child(Self::field(
                 "口令（空 = 按 DPAPI 解密）",
                 self.import_pass.clone(),
                 cx,
-            ))
-            .child(self.section("冲突策略", cx))
-            .child(
+            ));
+        } else {
+            body = body.child(
                 div()
                     .w_full()
+                    .text_size(px(10.))
+                    .text_color(t.text_subtle())
                     .flex()
-                    .gap_1()
-                    .child(self.radio(
-                        "io-policy-overwrite".into(),
-                        "覆盖已有",
-                        self.policy == rterm_session::ConflictPolicy::Overwrite,
-                        cx,
-                        |this, _cx| this.policy = rterm_session::ConflictPolicy::Overwrite,
-                    ))
-                    .child(self.radio(
-                        "io-policy-skip".into(),
-                        "跳过已有",
-                        self.policy == rterm_session::ConflictPolicy::Skip,
-                        cx,
-                        |this, _cx| this.policy = rterm_session::ConflictPolicy::Skip,
-                    ))
-                    .child(self.radio(
-                        "io-policy-rename".into(),
-                        "改名后新增",
-                        self.policy == rterm_session::ConflictPolicy::Rename,
-                        cx,
-                        |this, _cx| this.policy = rterm_session::ConflictPolicy::Rename,
-                    )),
+                    .justify_center()
+                    .child("将解析 Host / HostName / Port / User / IdentityFile / ProxyJump"),
             );
+        }
+
+        body = body.child(self.section("冲突策略", cx)).child(
+            div()
+                .w_full()
+                .flex()
+                .gap_1()
+                .child(self.radio(
+                    "io-policy-overwrite".into(),
+                    "覆盖已有",
+                    self.policy == rterm_session::ConflictPolicy::Overwrite,
+                    cx,
+                    |this, _cx| this.policy = rterm_session::ConflictPolicy::Overwrite,
+                ))
+                .child(self.radio(
+                    "io-policy-skip".into(),
+                    "跳过已有",
+                    self.policy == rterm_session::ConflictPolicy::Skip,
+                    cx,
+                    |this, _cx| this.policy = rterm_session::ConflictPolicy::Skip,
+                ))
+                .child(self.radio(
+                    "io-policy-rename".into(),
+                    "改名后新增",
+                    self.policy == rterm_session::ConflictPolicy::Rename,
+                    cx,
+                    |this, _cx| this.policy = rterm_session::ConflictPolicy::Rename,
+                )),
+        );
 
         // 预览区
         let preview_title = match &self.preview {
@@ -881,6 +1002,22 @@ impl ImportExportDialog {
                                 ("🔵", "改名", list_theme.primary())
                             }
                         };
+                        let mut detail = format!(
+                            "{dot} {label}  {} {}",
+                            item.icon
+                                .as_deref()
+                                .unwrap_or(rterm_session::DEFAULT_SESSION_ICON),
+                            item.name
+                        );
+                        if let Some(folder) = item.folder.as_deref() {
+                            detail.push_str(&format!("  · {folder}"));
+                        }
+                        if item.has_proxy {
+                            detail.push_str("  · 跳板");
+                        }
+                        if item.port_forwards > 0 {
+                            detail.push_str(&format!("  · 转发×{}", item.port_forwards));
+                        }
                         div()
                             .w_full()
                             .h_full()
@@ -889,7 +1026,7 @@ impl ImportExportDialog {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(format!("{dot} {label}  {}", item.name))
+                            .child(detail)
                             .into_any_element()
                     },
                 ));
@@ -930,10 +1067,18 @@ impl ImportExportDialog {
 fn count_scope(sessions: &[rterm_session::Session], scope: &rterm_session::ExportScope) -> usize {
     match scope {
         rterm_session::ExportScope::All => sessions.len(),
-        rterm_session::ExportScope::Folder(f) => sessions
-            .iter()
-            .filter(|s| s.folder.as_deref() == Some(f.as_str()))
-            .count(),
+        rterm_session::ExportScope::Folder(f) => {
+            let prefix = format!("{f}/");
+            sessions
+                .iter()
+                .filter(|s| {
+                    s.folder
+                        .as_deref()
+                        .map(|folder| folder == f || folder.starts_with(&prefix))
+                        .unwrap_or(false)
+                })
+                .count()
+        }
         rterm_session::ExportScope::Selection(ids) => {
             sessions.iter().filter(|s| ids.contains(&s.id)).count()
         }

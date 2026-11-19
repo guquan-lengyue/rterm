@@ -9,6 +9,7 @@ members = [
     "crates/rterm-monitor",
     "crates/rterm-sync",
     "crates/rterm-crypto",
+    "crates/rterm-forward",
 ]
 
 [workspace.package]
@@ -57,6 +58,7 @@ rterm-sftp     = { path = "crates/rterm-sftp" }
 rterm-monitor  = { path = "crates/rterm-monitor" }
 rterm-sync     = { path = "crates/rterm-sync" }
 rterm-crypto   = { path = "crates/rterm-crypto" }
+rterm-forward  = { path = "crates/rterm-forward" }
 
 [profile.release]
 opt-level = 3

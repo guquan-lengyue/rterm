@@ -30,13 +30,22 @@ use gpui::{
 use rterm_sync::SyncBridge;
 use uuid::Uuid;
 
-use crate::event::{AppEvent, EventBusHost};
+use crate::event::{AppEvent, EventBusHost, MenuCommand};
 use crate::state::{lock_or_recover, AppState, TabInfo, TabKind};
 use crate::ui::theme;
 
 use super::command_palette::{PaletteAction, PaletteItem, PaletteState};
+use super::context_menu::{
+    self, BlankMenuAction, ContextMenuAction, ContextMenuState, ContextMenuTarget,
+    FolderMenuAction, SessionMenuAction,
+};
+use super::group_picker::GroupPickerDialog;
+use super::icon_picker;
 use super::import_export::{ImportExportDialog, IoMode};
+use super::menu_bar::{self, MenuBarView};
 use super::monitor::MonitorView;
+use super::port_forward::PortForwardView;
+use super::prompt::TextPromptDialog;
 use super::session_dialog::SessionEditDialog;
 use super::session_tree::SessionTreeView;
 use super::settings::SettingsView;
@@ -45,7 +54,7 @@ use super::status_bar::StatusBar;
 use super::tab_bar::TabBar;
 use super::terminal_tab::TerminalTabView;
 use super::text_input::{TextInput, TextInputEvent};
-use super::{CONTEXT_MENU_ITEM_H, CONTEXT_MENU_W, MENU_PADDING_Y, SIDEBAR_W, TOOLBAR_H};
+use super::{SIDEBAR_W, TOOLBAR_H};
 
 // ---------------------------------------------------------------------------
 // 标签页快捷键（main.rs 里 App::on_action 转发到 MainWindow）
@@ -61,6 +70,7 @@ actions!(
         ToggleFullscreen,
         ToggleSessionLog,
         ToggleSftpDock,
+        ToggleMenuBar,
         OpenPalette,
         PaletteUp,
         PaletteDown,
@@ -69,7 +79,7 @@ actions!(
     ]
 );
 
-pub fn key_bindings() -> [KeyBinding; 12] {
+pub fn key_bindings() -> [KeyBinding; 13] {
     [
         KeyBinding::new("ctrl-t", NewTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
@@ -78,37 +88,13 @@ pub fn key_bindings() -> [KeyBinding; 12] {
         KeyBinding::new("f11", ToggleFullscreen, None),
         KeyBinding::new("ctrl-shift-l", ToggleSessionLog, None),
         KeyBinding::new("ctrl-shift-s", ToggleSftpDock, None),
+        KeyBinding::new("f10", ToggleMenuBar, None),
         KeyBinding::new("ctrl-p", OpenPalette, None),
         KeyBinding::new("up", PaletteUp, Some("CommandPalette")),
         KeyBinding::new("down", PaletteDown, Some("CommandPalette")),
         KeyBinding::new("enter", PaletteConfirm, Some("CommandPalette")),
         KeyBinding::new("escape", PaletteClose, Some("CommandPalette")),
     ]
-}
-
-// ---------------------------------------------------------------------------
-// 右键菜单
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug)]
-pub struct ContextMenuState {
-    /// None = 空白处/文件夹右键（只提供「新建会话」）
-    pub session_id: Option<Uuid>,
-    pub x: i32,
-    pub y: i32,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ContextMenuAction {
-    NewSession,
-    EditSession(Uuid),
-    OpenTerminal(Uuid),
-    OpenSftp(Uuid),
-    OpenMonitor(Uuid),
-    DeleteSession(Uuid),
-    OpenExportDialog,
-    OpenImportDialog,
-    OpenSettingsDialog,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +108,7 @@ pub enum TabContentView {
     Terminal(Entity<TerminalTabView>),
     Sftp(Entity<SftpView>),
     Monitor(Entity<MonitorView>),
+    PortForward(Entity<PortForwardView>),
 }
 
 impl TabContentView {
@@ -130,6 +117,7 @@ impl TabContentView {
             Self::Terminal(view) => view.read(cx).focus_handle(cx),
             Self::Sftp(view) => view.read(cx).focus_handle(),
             Self::Monitor(view) => view.read(cx).focus_handle(),
+            Self::PortForward(view) => view.read(cx).focus_handle(),
         }
     }
 
@@ -144,6 +132,9 @@ impl TabContentView {
             Self::Monitor(view) => {
                 view.update(cx, |view, cx| view.shutdown(cx));
             }
+            Self::PortForward(view) => {
+                view.update(cx, |view, cx| view.shutdown(cx));
+            }
         }
     }
 
@@ -153,6 +144,7 @@ impl TabContentView {
             Self::Terminal(view) => view.read(cx).blocks_global_shortcuts(cx),
             Self::Sftp(view) => view.read(cx).has_modal_dialog(),
             Self::Monitor(_) => false,
+            Self::PortForward(_) => false,
         }
     }
 
@@ -161,6 +153,7 @@ impl TabContentView {
             Self::Terminal(view) => view.clone().into_any_element(),
             Self::Sftp(view) => view.clone().into_any_element(),
             Self::Monitor(view) => view.clone().into_any_element(),
+            Self::PortForward(view) => view.clone().into_any_element(),
         }
     }
 }
@@ -177,6 +170,7 @@ pub struct MainWindow {
     session_tree: Entity<SessionTreeView>,
     status_bar: Entity<StatusBar>,
     tab_bar: Entity<TabBar>,
+    menu_bar: Entity<MenuBarView>,
     tabs: Vec<TabEntry>,
     /// 每个终端 Tab 一份路径同步状态机，tab_id → bridge。
     sync_bridges: HashMap<Uuid, Arc<Mutex<SyncBridge>>>,
@@ -187,10 +181,23 @@ pub struct MainWindow {
     root_focus: FocusHandle,
     root_focus_pending: bool,
     overlay_focus_active: bool,
+    /// 上一帧菜单栏是否展开（关闭时把焦点还给终端）。
+    menu_was_open: bool,
     pub edit_dialog: Option<Entity<SessionEditDialog>>,
     settings_dialog: Option<Entity<SettingsView>>,
     import_export_dialog: Option<Entity<ImportExportDialog>>,
     context_menu: Option<ContextMenuState>,
+    /// 新建 / 重命名分组的文本弹窗。
+    folder_prompt: Option<Entity<TextPromptDialog>>,
+    /// 移动到分组弹窗。
+    group_dialog: Option<Entity<GroupPickerDialog>>,
+    /// 「更改图标」弹窗对应的会话。
+    icon_dialog_session: Option<Uuid>,
+    /// 快捷键 / 关于信息弹窗。
+    info_dialog: Option<(String, String)>,
+    /// 会话树当前选中项（顶部菜单栏「连接」依赖）。
+    selected_session: Option<Uuid>,
+    sidebar_visible: bool,
     /// 等待确认删除的会话（S7.5.3.10 二次确认）。
     pending_delete: Option<Uuid>,
     /// 启动期加载会话的错误提示；点击横幅 ✕ 后清空。
@@ -210,6 +217,8 @@ impl MainWindow {
         let session_tree = cx.new(SessionTreeView::new);
         let status_bar = cx.new(StatusBar::new);
         let tab_bar = cx.new(TabBar::new);
+        let menu_bar = cx.new(MenuBarView::new);
+        let sidebar_visible = cx.global::<AppState>().settings.sidebar_visible;
 
         let host = cx.global::<AppState>().event_bus_host.clone();
         let startup_error = cx.global::<AppState>().startup_error.clone();
@@ -241,14 +250,52 @@ impl MainWindow {
                     x,
                     y,
                 } => {
+                    let target = match (session_id, folder) {
+                        (Some(id), _) => ContextMenuTarget::Session(*id),
+                        (None, Some(path)) => ContextMenuTarget::Folder(path.clone()),
+                        (None, None) => ContextMenuTarget::Blank,
+                    };
                     this.pending_new_folder = folder.clone();
                     this.context_menu = Some(ContextMenuState {
-                        session_id: *session_id,
+                        target,
                         x: *x,
                         y: *y,
                     });
                     this.root_focus_pending = true;
                     this.overlay_focus_active = true;
+                    cx.notify();
+                }
+                AppEvent::SessionTreeSelectionChanged { session_id } => {
+                    this.selected_session = *session_id;
+                    let has_selection = this.selected_session.is_some();
+                    let visible = this.sidebar_visible;
+                    this.menu_bar.update(cx, |bar, cx| {
+                        bar.set_state(has_selection, visible, cx);
+                    });
+                }
+                AppEvent::SessionMoveRequested { session_id, folder } => {
+                    this.move_session(*session_id, folder.clone(), cx);
+                }
+                AppEvent::GroupPickerCloseRequested => {
+                    this.group_dialog = None;
+                    this.focus_pending = true;
+                    cx.notify();
+                }
+                AppEvent::FolderCreateRequested { path } => {
+                    this.create_folder(path.clone(), cx);
+                }
+                AppEvent::FolderRenameRequested { from, to } => {
+                    this.rename_folder(from.clone(), to.clone(), cx);
+                }
+                AppEvent::TextPromptCloseRequested => {
+                    this.folder_prompt = None;
+                    this.focus_pending = true;
+                    cx.notify();
+                }
+                AppEvent::MenuCommand(command) => {
+                    this.handle_menu_command(*command, cx);
+                }
+                AppEvent::PortForwardOpened { .. } | AppEvent::PortForwardClosed { .. } => {
                     cx.notify();
                 }
                 AppEvent::SettingsCloseRequested { saved } => {
@@ -360,6 +407,7 @@ impl MainWindow {
             session_tree,
             status_bar,
             tab_bar,
+            menu_bar,
             tabs: Vec::new(),
             sync_bridges: HashMap::new(),
             active_tab: 0,
@@ -367,10 +415,17 @@ impl MainWindow {
             root_focus: cx.focus_handle(),
             root_focus_pending: false,
             overlay_focus_active: false,
+            menu_was_open: false,
             edit_dialog: None,
             settings_dialog: None,
             import_export_dialog: None,
             context_menu: None,
+            folder_prompt: None,
+            group_dialog: None,
+            icon_dialog_session: None,
+            info_dialog: None,
+            selected_session: None,
+            sidebar_visible,
             pending_delete: None,
             startup_error,
             palette: None,
@@ -410,6 +465,7 @@ impl MainWindow {
         });
         self.active_tab = self.tabs.len() - 1;
         self.focus_pending = true;
+        self.ensure_auto_start_forwards(session_id, cx);
         self.sync_tab_bar(cx);
         cx.notify();
     }
@@ -533,14 +589,106 @@ impl MainWindow {
         }
     }
 
+    fn open_port_forward_tab(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        self.open_port_forward_tab_impl(session_id, true, cx);
+    }
+
+    /// 会话连接时按 `auto_start` 拉起转发：后台开 Tab，不抢占焦点。
+    fn ensure_auto_start_forwards(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let has_auto_start = {
+            let store = lock_or_recover(&cx.global::<AppState>().session_store);
+            store
+                .get(session_id)
+                .map(|session| session.port_forwards.iter().any(|rule| rule.auto_start))
+                .unwrap_or(false)
+        };
+        if has_auto_start
+            && self
+                .find_open_tab(session_id, TabKind::PortForward)
+                .is_none()
+        {
+            self.open_port_forward_tab_impl(session_id, false, cx);
+        }
+    }
+
+    fn open_port_forward_tab_impl(
+        &mut self,
+        session_id: Uuid,
+        activate: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let title = {
+            let state = cx.global::<AppState>();
+            let store = lock_or_recover(&state.session_store);
+            store
+                .get(session_id)
+                .map(|session| format!("{} · 端口转发", session.display_label()))
+                .unwrap_or_else(|| "端口转发".to_string())
+        };
+        let title = self.unique_title(title, TabKind::PortForward);
+
+        let view = cx.new(PortForwardView::new);
+        view.update(cx, |view, cx| view.connect(session_id, cx));
+        let id = view.read(cx).tab_id();
+
+        self.tabs.push(TabEntry {
+            id,
+            session_id,
+            title,
+            kind: TabKind::PortForward,
+            content: TabContentView::PortForward(view),
+        });
+        if activate {
+            self.active_tab = self.tabs.len() - 1;
+            self.focus_pending = true;
+        }
+        self.sync_tab_bar(cx);
+        cx.notify();
+    }
+
+    /// 某会话已无普通 Tab 时，关闭其端口转发 Tab（停止全部规则）。
+    fn close_forward_tabs_if_idle(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let has_session_tab = self
+            .tabs
+            .iter()
+            .any(|tab| tab.session_id == session_id && tab.kind != TabKind::PortForward);
+        if has_session_tab {
+            return;
+        }
+        let forward_tabs: Vec<Uuid> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.session_id == session_id && tab.kind == TabKind::PortForward)
+            .map(|tab| tab.id)
+            .collect();
+        for tab_id in forward_tabs {
+            self.close_tab(tab_id, cx);
+        }
+    }
+
+    /// 打开端口转发：已有同会话 Tab 时直接激活。
+    fn request_port_forward_tab(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(tab_id) = self.find_open_tab(session_id, TabKind::PortForward) {
+            self.activate_tab(tab_id, cx);
+        } else {
+            self.open_port_forward_tab(session_id, cx);
+        }
+    }
+
     fn close_tab(&mut self, tab_id: Uuid, cx: &mut Context<Self>) {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
         let entry = self.tabs.remove(index);
         let session_id = entry.session_id;
+        let closed_kind = entry.kind;
         self.sync_bridges.remove(&tab_id);
         entry.content.close(cx);
+
+        // 会话的终端 / SFTP / 监控全部关闭后，端口转发随会话一起停止。
+        if closed_kind != TabKind::PortForward {
+            self.close_forward_tabs_if_idle(session_id, cx);
+        }
 
         if index < self.active_tab {
             self.active_tab -= 1;
@@ -647,6 +795,12 @@ impl MainWindow {
             || self.edit_dialog.is_some()
             || self.import_export_dialog.is_some()
             || self.pending_delete.is_some()
+            || self.context_menu.is_some()
+            || self.folder_prompt.is_some()
+            || self.group_dialog.is_some()
+            || self.icon_dialog_session.is_some()
+            || self.info_dialog.is_some()
+            || self.menu_bar.read(cx).open_kind().is_some()
             || self
                 .tabs
                 .get(self.active_tab)
@@ -736,6 +890,440 @@ impl MainWindow {
             }
             None => self.set_status("当前标签不是终端，无法切换 SFTP 侧栏", cx),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 顶部菜单栏 / 分组 / 右键动作
+    // -----------------------------------------------------------------------
+
+    /// F10：展开 / 关闭顶部菜单栏。
+    pub fn toggle_menu_bar_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialogs_open(cx) && self.menu_bar.read(cx).open_kind().is_none() {
+            return;
+        }
+        let has_selection = self.selected_session.is_some();
+        let visible = self.sidebar_visible;
+        self.menu_bar.update(cx, |bar, cx| {
+            bar.set_state(has_selection, visible, cx);
+            bar.toggle_first(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn handle_menu_command(&mut self, command: MenuCommand, cx: &mut Context<Self>) {
+        let selected = self.selected_session;
+        match command {
+            MenuCommand::NewSession => self.open_edit_dialog(None, cx),
+            MenuCommand::NewFolder => self.open_folder_prompt(None, cx),
+            MenuCommand::ImportSessions => self.open_import_export(false, cx),
+            MenuCommand::ExportSessions => self.open_import_export(true, cx),
+            MenuCommand::OpenSettings => self.open_settings(cx),
+            MenuCommand::OpenTerminal => {
+                if let Some(id) = selected {
+                    self.request_terminal_tab(id, cx);
+                }
+            }
+            MenuCommand::OpenSftp => {
+                if let Some(id) = selected {
+                    self.request_sftp_tab(id, cx);
+                }
+            }
+            MenuCommand::OpenMonitor => {
+                if let Some(id) = selected {
+                    self.request_monitor_tab(id, cx);
+                }
+            }
+            MenuCommand::OpenPortForward => {
+                if let Some(id) = selected {
+                    self.request_port_forward_tab(id, cx);
+                }
+            }
+            MenuCommand::ToggleSidebar => self.toggle_sidebar(cx),
+            MenuCommand::ExpandAll => {
+                self.emit_event(cx, AppEvent::SessionTreeExpandAll { expanded: true })
+            }
+            MenuCommand::CollapseAll => {
+                self.emit_event(cx, AppEvent::SessionTreeExpandAll { expanded: false })
+            }
+            MenuCommand::ToggleTheme => self.cycle_theme(cx),
+            MenuCommand::ZoomIn => self.change_font_size(1.0, cx),
+            MenuCommand::ZoomOut => self.change_font_size(-1.0, cx),
+            MenuCommand::ShowShortcuts => {
+                self.info_dialog = Some(("快捷键".into(), shortcut_text()));
+            }
+            MenuCommand::OpenLogDir => self.open_log_dir(cx),
+            MenuCommand::About => {
+                self.info_dialog = Some((
+                    "关于 rterm".into(),
+                    format!(
+                        "rterm {}\n\nSSH 会话管理 / 终端 / SFTP / 监控 / 端口转发",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                ));
+            }
+        }
+        // 菜单动作执行后关闭下拉，把焦点还给内容区。
+        self.menu_bar.update(cx, |bar, cx| bar.close(cx));
+        self.focus_pending = true;
+        cx.notify();
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        {
+            let state = cx.global_mut::<AppState>();
+            state.settings.sidebar_visible = self.sidebar_visible;
+            if let Err(error) = state.settings.save() {
+                log::error!("保存侧栏可见性失败: {error:#}");
+            }
+        }
+        let has_selection = self.selected_session.is_some();
+        let visible = self.sidebar_visible;
+        self.menu_bar.update(cx, |bar, cx| {
+            bar.set_state(has_selection, visible, cx);
+        });
+        cx.notify();
+    }
+
+    fn cycle_theme(&mut self, cx: &mut Context<Self>) {
+        let themes = crate::theme::all_themes();
+        let current = cx.global::<AppState>().settings.default_theme.clone();
+        let index = themes
+            .iter()
+            .position(|theme| theme.name() == current)
+            .unwrap_or(0);
+        let next = themes[(index + 1) % themes.len()].name().to_string();
+        {
+            let state = cx.global_mut::<AppState>();
+            state.settings.default_theme = next.clone();
+            state.theme = crate::theme::theme_by_name(&next);
+            if let Err(error) = state.settings.save() {
+                log::error!("保存主题失败: {error:#}");
+            }
+        }
+        self.emit_event(cx, AppEvent::AppThemeChanged { name: next.clone() });
+        self.set_status(format!("主题已切换: {next}"), cx);
+    }
+
+    fn change_font_size(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let size = {
+            let state = cx.global_mut::<AppState>();
+            let size = (state.settings.default_font_size + delta).clamp(8.0, 40.0);
+            state.settings.default_font_size = size;
+            if let Err(error) = state.settings.save() {
+                log::error!("保存字号失败: {error:#}");
+            }
+            size
+        };
+        self.emit_event(cx, AppEvent::AppSettingsChanged);
+        self.set_status(format!("终端字号: {size:.0}"), cx);
+    }
+
+    fn open_log_dir(&mut self, cx: &mut Context<Self>) {
+        let settings = cx.global::<AppState>().settings.clone();
+        let dir = crate::state::logs_dir_path(&settings);
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            self.set_status(format!("创建日志目录失败: {error}"), cx);
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        let opened = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+        #[cfg(not(target_os = "windows"))]
+        let opened = std::process::Command::new("xdg-open").arg(&dir).spawn();
+
+        match opened {
+            Ok(_) => self.set_status(format!("已打开日志目录: {}", dir.display()), cx),
+            Err(error) => self.set_status(format!("打开日志目录失败: {error}"), cx),
+        }
+    }
+
+    fn emit_event(&self, cx: &mut Context<Self>, event: AppEvent) {
+        let host = cx.global::<AppState>().event_bus_host.clone();
+        cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
+            cx.emit(event);
+        });
+    }
+
+    /// 空白 / 分组 / 会话三类右键动作分发。
+    fn handle_context_action(&mut self, action: ContextMenuAction, cx: &mut Context<Self>) {
+        let target = self.context_menu.as_ref().map(|state| state.target.clone());
+        self.context_menu = None;
+
+        match action {
+            ContextMenuAction::Blank(action) => match action {
+                BlankMenuAction::NewSession => self.open_edit_dialog(None, cx),
+                BlankMenuAction::NewFolder => self.open_folder_prompt(None, cx),
+                BlankMenuAction::ImportSessions => self.open_import_export(false, cx),
+                BlankMenuAction::ExpandAll => {
+                    self.emit_event(cx, AppEvent::SessionTreeExpandAll { expanded: true })
+                }
+                BlankMenuAction::CollapseAll => {
+                    self.emit_event(cx, AppEvent::SessionTreeExpandAll { expanded: false })
+                }
+            },
+            ContextMenuAction::Folder(action) => {
+                let ContextMenuTarget::Folder(folder) = (match target {
+                    Some(target) => target,
+                    None => ContextMenuTarget::Blank,
+                }) else {
+                    self.focus_pending = true;
+                    return;
+                };
+                match action {
+                    FolderMenuAction::NewSessionInFolder => {
+                        self.pending_new_folder = Some(folder.clone());
+                        self.open_edit_dialog(None, cx);
+                        if let Some(dialog) = self.edit_dialog.clone() {
+                            dialog.update(cx, |dialog, cx| {
+                                dialog.group_picker.update(cx, |picker, cx| {
+                                    picker.set_selected(Some(folder.clone()), cx);
+                                });
+                                cx.notify();
+                            });
+                        }
+                    }
+                    FolderMenuAction::NewSubfolder => {
+                        self.open_folder_prompt(Some(folder.clone()), cx)
+                    }
+                    FolderMenuAction::RenameFolder => self.open_rename_prompt(folder, cx),
+                    FolderMenuAction::DeleteFolder => self.delete_folder(folder, cx),
+                    FolderMenuAction::ExportFolder => self.open_export_folder(folder, cx),
+                }
+            }
+            ContextMenuAction::Session(action) => {
+                let ContextMenuTarget::Session(session_id) = (match target {
+                    Some(target) => target,
+                    None => ContextMenuTarget::Blank,
+                }) else {
+                    self.focus_pending = true;
+                    return;
+                };
+                match action {
+                    SessionMenuAction::OpenTerminal => self.request_terminal_tab(session_id, cx),
+                    SessionMenuAction::OpenSftp => self.request_sftp_tab(session_id, cx),
+                    SessionMenuAction::OpenMonitor => self.request_monitor_tab(session_id, cx),
+                    SessionMenuAction::OpenPortForward => {
+                        self.request_port_forward_tab(session_id, cx)
+                    }
+                    SessionMenuAction::EditSession => self.edit_session(session_id, cx),
+                    SessionMenuAction::ChangeIcon => {
+                        self.icon_dialog_session = Some(session_id);
+                    }
+                    SessionMenuAction::MoveToFolder => self.open_move_dialog(session_id, cx),
+                    SessionMenuAction::DuplicateSession => self.duplicate_session(session_id, cx),
+                    SessionMenuAction::DeleteSession => {
+                        self.pending_delete = Some(session_id);
+                        self.root_focus_pending = true;
+                        self.overlay_focus_active = true;
+                    }
+                }
+            }
+        }
+        self.pending_new_folder = None;
+        self.focus_pending = true;
+        cx.notify();
+    }
+
+    // ---------------- 分组操作 ----------------
+
+    fn open_folder_prompt(&mut self, parent: Option<String>, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| match parent.clone() {
+            Some(parent) => TextPromptDialog::new_folder_under(cx, parent),
+            None => TextPromptDialog::new_folder(cx),
+        });
+        self.folder_prompt = Some(dialog);
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    fn open_rename_prompt(&mut self, folder: String, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| TextPromptDialog::rename_folder(cx, folder));
+        self.folder_prompt = Some(dialog);
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    fn create_folder(&mut self, path: String, cx: &mut Context<Self>) {
+        let result = {
+            let state = cx.global_mut::<AppState>();
+            let mut store = lock_or_recover(&state.session_store);
+            store.create_folder(&path)
+        };
+        match result {
+            Ok(()) => {
+                self.persist_and_refresh_folders(cx);
+                self.folder_prompt = None;
+                self.focus_pending = true;
+                self.set_status(format!("已创建分组「{path}」"), cx);
+            }
+            Err(error) => {
+                if let Some(dialog) = self.folder_prompt.clone() {
+                    dialog.update(cx, |dialog, cx| {
+                        dialog.set_error(format!("{error}"), cx);
+                    });
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn rename_folder(&mut self, from: String, to: String, cx: &mut Context<Self>) {
+        let result = {
+            let state = cx.global_mut::<AppState>();
+            let mut store = lock_or_recover(&state.session_store);
+            store.rename_folder(&from, &to)
+        };
+        match result {
+            Ok(()) => {
+                self.persist_and_refresh_folders(cx);
+                self.folder_prompt = None;
+                self.focus_pending = true;
+                self.set_status(format!("分组已重命名为「{to}」"), cx);
+            }
+            Err(error) => {
+                if let Some(dialog) = self.folder_prompt.clone() {
+                    dialog.update(cx, |dialog, cx| {
+                        dialog.set_error(format!("{error}"), cx);
+                    });
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn delete_folder(&mut self, folder: String, cx: &mut Context<Self>) {
+        let result = {
+            let state = cx.global_mut::<AppState>();
+            let mut store = lock_or_recover(&state.session_store);
+            store.delete_empty_folder(&folder)
+        };
+        match result {
+            Ok(()) => {
+                self.persist_and_refresh_folders(cx);
+                self.set_status(format!("已删除空分组「{folder}」"), cx);
+            }
+            Err(error) => self.set_status(format!("删除分组失败: {error}"), cx),
+        }
+        cx.notify();
+    }
+
+    fn persist_and_refresh_folders(&mut self, cx: &mut Context<Self>) {
+        let store = cx.global::<AppState>().session_store.clone();
+        if let Err(error) = crate::state::persist_sessions(&store) {
+            log::error!("保存分组失败: {error:#}");
+        }
+        self.emit_event(cx, AppEvent::SessionTreeFoldersChanged);
+    }
+
+    fn open_export_folder(&mut self, folder: String, cx: &mut Context<Self>) {
+        let dialog = cx.new(|cx| ImportExportDialog::new(cx, IoMode::Export));
+        dialog.update(cx, |dialog, cx| dialog.set_export_folder(folder, cx));
+        self.import_export_dialog = Some(dialog);
+        self.context_menu = None;
+        cx.notify();
+    }
+
+    fn move_session(&mut self, session_id: Uuid, folder: Option<String>, cx: &mut Context<Self>) {
+        let result = {
+            let state = cx.global_mut::<AppState>();
+            let mut store = lock_or_recover(&state.session_store);
+            store.move_session(session_id, folder.as_deref())
+        };
+        match result {
+            Ok(()) => {
+                let store = cx.global::<AppState>().session_store.clone();
+                if let Err(error) = crate::state::persist_sessions(&store) {
+                    log::error!("移动会话后保存失败: {error:#}");
+                }
+                self.emit_event(cx, AppEvent::SessionUpdated { session_id });
+                self.group_dialog = None;
+                self.focus_pending = true;
+                self.set_status(
+                    format!(
+                        "已移动到「{}」",
+                        folder.clone().unwrap_or_else(|| "根目录".into())
+                    ),
+                    cx,
+                );
+            }
+            Err(error) => self.set_status(format!("移动失败: {error}"), cx),
+        }
+        cx.notify();
+    }
+
+    fn open_move_dialog(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let info = {
+            let store = lock_or_recover(&cx.global::<AppState>().session_store);
+            store
+                .get(session_id)
+                .map(|session| (session.display_label(), session.folder.clone()))
+        };
+        if let Some((name, folder)) = info {
+            let dialog = cx.new(|cx| GroupPickerDialog::new(cx, session_id, name, folder));
+            self.group_dialog = Some(dialog);
+            self.context_menu = None;
+            cx.notify();
+        }
+    }
+
+    fn duplicate_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let new_id = Uuid::new_v4();
+        let result: Result<(), String> = {
+            let state = cx.global_mut::<AppState>();
+            let mut store = lock_or_recover(&state.session_store);
+            match store.get(session_id).cloned() {
+                Some(mut copy) => {
+                    copy.id = new_id;
+                    copy.name = if copy.name.is_empty() {
+                        "未命名会话 副本".to_string()
+                    } else {
+                        format!("{} 副本", copy.name)
+                    };
+                    // 规则复制后重新分配 id，避免与源会话的运行态互相干扰。
+                    for rule in &mut copy.port_forwards {
+                        rule.id = Uuid::new_v4();
+                    }
+                    copy.created_at = rterm_session::default_now();
+                    copy.last_modified = rterm_session::default_now();
+                    copy.last_connected = None;
+                    store.upsert(copy);
+                    Ok(())
+                }
+                None => Err("会话不存在".into()),
+            }
+        };
+        match result {
+            Ok(()) => {
+                let store = cx.global::<AppState>().session_store.clone();
+                if let Err(error) = crate::state::persist_sessions(&store) {
+                    log::error!("复制会话后保存失败: {error:#}");
+                }
+                self.emit_event(cx, AppEvent::SessionCreated { session_id: new_id });
+                self.set_status("已复制会话", cx);
+            }
+            Err(error) => self.set_status(format!("复制会话失败: {error}"), cx),
+        }
+        cx.notify();
+    }
+
+    fn apply_session_icon(&mut self, session_id: Uuid, icon: &str, cx: &mut Context<Self>) {
+        {
+            let state = cx.global_mut::<AppState>();
+            let mut store = lock_or_recover(&state.session_store);
+            if let Some(session) = store.get_mut(session_id) {
+                session.icon = Some(icon.to_string());
+                session.last_modified = rterm_session::default_now();
+            }
+        }
+        let store = cx.global::<AppState>().session_store.clone();
+        if let Err(error) = crate::state::persist_sessions(&store) {
+            log::error!("保存会话图标失败: {error:#}");
+        }
+        self.emit_event(cx, AppEvent::SessionUpdated { session_id });
+        self.icon_dialog_session = None;
+        self.focus_pending = true;
+        self.set_status("会话图标已更新", cx);
+        cx.notify();
     }
 
     // -----------------------------------------------------------------------
@@ -875,7 +1463,6 @@ impl MainWindow {
     }
 
     /// 面板内文本输入由 TextInput 实体负责（含 IME）；这里只保留导航动作。
-
     fn render_command_palette(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let Some(palette) = self.palette.as_ref() else {
@@ -1060,10 +1647,6 @@ impl MainWindow {
         cx.notify();
     }
 
-    fn request_terminal(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
-        self.request_terminal_tab(session_id, cx);
-    }
-
     fn edit_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let session = {
             let state = cx.global::<AppState>();
@@ -1159,6 +1742,13 @@ impl Render for MainWindow {
             self.focus_pending = true;
         }
 
+        // 菜单栏关闭后把焦点还给终端
+        let menu_open = self.menu_bar.read(cx).open_kind().is_some();
+        if self.menu_was_open && !menu_open {
+            self.focus_pending = true;
+        }
+        self.menu_was_open = menu_open;
+
         let settings_hover = t.secondary_btn_hover();
         let mut root = div()
             .size_full()
@@ -1177,6 +1767,12 @@ impl Render for MainWindow {
                     } else if this.context_menu.is_some() {
                         this.context_menu = None;
                         closed = true;
+                    } else if this.info_dialog.is_some() {
+                        this.info_dialog = None;
+                        closed = true;
+                    } else if this.icon_dialog_session.is_some() {
+                        this.icon_dialog_session = None;
+                        closed = true;
                     }
                     if closed {
                         this.overlay_focus_active = false;
@@ -1187,6 +1783,8 @@ impl Render for MainWindow {
             )
             .flex()
             .flex_col()
+            // 顶部菜单栏
+            .child(self.menu_bar.clone())
             // Toolbar
             .child(
                 div()
@@ -1278,65 +1876,88 @@ impl Render for MainWindow {
             );
         }
 
-        root = root
-            // 左 SessionTree + 右 TabBar + Content
-            .child(
+        let mut main_row = div().w_full().flex_1().flex();
+        if self.sidebar_visible {
+            main_row = main_row.child(
                 div()
-                    .w_full()
-                    .flex_1()
-                    .flex()
-                    .child(
-                        div()
-                            .w(px(SIDEBAR_W))
-                            .h_full()
-                            .bg(t.sidebar_bg())
-                            .border_r_1()
-                            .border_color(t.border_subtle())
-                            .child(self.session_tree.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .bg(t.app_bg())
-                            .flex()
-                            .flex_col()
-                            .child(self.tab_bar.clone())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .w_full()
-                                    .relative()
-                                    .child(self.render_content(cx)),
-                            ),
-                    ),
-            )
+                    .w(px(SIDEBAR_W))
+                    .h_full()
+                    .bg(t.sidebar_bg())
+                    .border_r_1()
+                    .border_color(t.border_subtle())
+                    .child(self.session_tree.clone()),
+            );
+        }
+        main_row = main_row.child(
+            div()
+                .flex_1()
+                .h_full()
+                .bg(t.app_bg())
+                .flex()
+                .flex_col()
+                .child(self.tab_bar.clone())
+                .child(
+                    div()
+                        .flex_1()
+                        .w_full()
+                        .relative()
+                        .child(self.render_content(cx)),
+                ),
+        );
+        root = root
+            .child(main_row)
             // 底部 StatusBar
             .child(self.status_bar.clone());
 
-        if let Some(menu_state) = self.context_menu {
+        if let Some(menu_state) = self.context_menu.clone() {
             let viewport = window.viewport_size();
-            let menu_w = CONTEXT_MENU_W;
-            // 有会话：新建/编辑/终端/SFTP/监控/删除 + 导出/导入/设置 = 9 项；
-            // 空白处：新建 + 导出/导入/设置 = 4 项。
-            let menu_item_count = if menu_state.session_id.is_some() {
-                9
-            } else {
-                4
-            };
-            let menu_h = menu_item_count as f32 * CONTEXT_MENU_ITEM_H + MENU_PADDING_Y;
-            let x = (menu_state.x as f32)
-                .min(f32::from(viewport.width) - menu_w)
-                .max(0.);
-            let y = (menu_state.y as f32)
-                .min(f32::from(viewport.height) - menu_h)
-                .max(0.);
+            root = root.child(context_menu::render_context_menu(
+                &menu_state,
+                f32::from(viewport.width),
+                f32::from(viewport.height),
+                cx,
+                |this, action, cx| this.handle_context_action(action, cx),
+                |this, cx| {
+                    this.context_menu = None;
+                    this.overlay_focus_active = false;
+                    this.focus_pending = true;
+                    cx.notify();
+                },
+            ));
+        }
+
+        // 顶部菜单栏下拉（会话 / 连接 / 视图 / 帮助）
+        if let Some(kind) = self.menu_bar.read(cx).open_kind() {
+            let entries =
+                menu_bar::entries(kind, self.selected_session.is_some(), self.sidebar_visible);
+            let viewport = window.viewport_size();
+            let width = context_menu::CONTEXT_MENU_W;
+            let height = entries
+                .iter()
+                .map(|entry| {
+                    context_menu::MENU_ITEM_H
+                        + if entry.divider_before {
+                            context_menu::MENU_DIVIDER_H
+                        } else {
+                            0.0
+                        }
+                })
+                .sum::<f32>()
+                + context_menu::MENU_PADDING_Y;
+            let (x, y) = context_menu::clamp_position(
+                menu_bar::menu_anchor_x(kind),
+                menu_bar::MENU_BAR_H,
+                width,
+                height,
+                f32::from(viewport.width),
+                f32::from(viewport.height),
+            );
 
             let mut menu = div()
                 .absolute()
                 .left(px(x))
                 .top(px(y))
-                .w(px(menu_w))
+                .w(px(width))
                 .py_1()
                 .bg(t.card_bg())
                 .border_1()
@@ -1344,83 +1965,33 @@ impl Render for MainWindow {
                 .rounded_md()
                 .flex()
                 .flex_col()
-                .id("rterm-context-menu")
+                .id("rterm-menu-dropdown")
                 .on_mouse_down_out(
                     cx.listener(|this: &mut Self, _ev: &MouseDownEvent, _w, cx| {
-                        this.context_menu = None;
+                        this.menu_bar.update(cx, |bar, cx| bar.close(cx));
+                        this.focus_pending = true;
                         cx.notify();
                     }),
-                )
-                .child(self.render_menu_item(
-                    "rterm-ctx-new",
-                    "＋ 新建会话",
-                    false,
-                    ContextMenuAction::NewSession,
-                    cx,
-                ));
+                );
 
-            if let Some(sid) = menu_state.session_id {
-                menu = menu
-                    .child(self.render_menu_item(
-                        "rterm-ctx-edit",
-                        "✏ 编辑会话",
-                        false,
-                        ContextMenuAction::EditSession(sid),
-                        cx,
-                    ))
-                    .child(self.render_menu_item(
-                        "rterm-ctx-open-terminal",
-                        "▶ 打开终端",
-                        false,
-                        ContextMenuAction::OpenTerminal(sid),
-                        cx,
-                    ))
-                    .child(self.render_menu_item(
-                        "rterm-ctx-open-sftp",
-                        "📁 打开 SFTP",
-                        false,
-                        ContextMenuAction::OpenSftp(sid),
-                        cx,
-                    ))
-                    .child(self.render_menu_item(
-                        "rterm-ctx-open-monitor",
-                        "📊 打开监控",
-                        false,
-                        ContextMenuAction::OpenMonitor(sid),
-                        cx,
-                    ))
-                    .child(self.render_menu_item(
-                        "rterm-ctx-delete",
-                        "🗑 删除会话",
-                        true,
-                        ContextMenuAction::DeleteSession(sid),
-                        cx,
-                    ));
+            for (index, entry) in entries.into_iter().enumerate() {
+                if entry.divider_before {
+                    menu = menu.child(context_menu::menu_divider(t.border_subtle()));
+                }
+                let command = entry.command;
+                menu = menu.child(context_menu::menu_item(
+                    &format!("rterm-menu-cmd-{index}"),
+                    entry.label,
+                    entry.enabled,
+                    false,
+                    cx,
+                    move |this, cx| {
+                        this.menu_bar.update(cx, |bar, cx| bar.close(cx));
+                        this.focus_pending = true;
+                        this.emit_event(cx, AppEvent::MenuCommand(command));
+                    },
+                ));
             }
-
-            menu = menu
-                .child(self.render_menu_item(
-                    "rterm-ctx-export",
-                    "⬇ 导出会话…",
-                    false,
-                    ContextMenuAction::OpenExportDialog,
-                    cx,
-                ))
-                .child(self.render_menu_item(
-                    "rterm-ctx-import",
-                    "⬆ 导入会话…",
-                    false,
-                    ContextMenuAction::OpenImportDialog,
-                    cx,
-                ))
-                .child(self.render_menu_item(
-                    "rterm-ctx-settings",
-                    "⚙ 设置…",
-                    false,
-                    ContextMenuAction::OpenSettingsDialog,
-                    cx,
-                ));
-
             root = root.child(menu);
         }
 
@@ -1432,6 +2003,174 @@ impl Render for MainWindow {
         }
         if let Some(dialog) = &self.import_export_dialog {
             root = root.child(dialog.clone());
+        }
+        if let Some(dialog) = &self.folder_prompt {
+            root = root.child(dialog.clone());
+        }
+        if let Some(dialog) = &self.group_dialog {
+            root = root.child(dialog.clone());
+        }
+
+        // 更改会话图标
+        if let Some(session_id) = self.icon_dialog_session {
+            let current = {
+                let store = lock_or_recover(&cx.global::<AppState>().session_store);
+                store
+                    .get(session_id)
+                    .map(|session| session.icon_or_default().to_string())
+                    .unwrap_or_else(|| rterm_session::DEFAULT_SESSION_ICON.to_string())
+            };
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(t.modal_overlay())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .on_mouse_down_out(cx.listener(
+                        |this: &mut Self, _ev: &MouseDownEvent, _w, cx| {
+                            this.icon_dialog_session = None;
+                            this.focus_pending = true;
+                            cx.notify();
+                        },
+                    ))
+                    .child(
+                        div()
+                            .w(px(360.))
+                            .p_4()
+                            .bg(t.card_bg())
+                            .border_1()
+                            .border_color(t.border_medium())
+                            .rounded_lg()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .text_size(px(13.))
+                                    .text_color(t.text_on_card_bg())
+                                    .flex()
+                                    .justify_center()
+                                    .child("更改会话图标"),
+                            )
+                            .child(icon_picker::render_icon_grid(
+                                "icon-dialog",
+                                &current,
+                                cx,
+                                move |this, icon, cx| this.apply_session_icon(session_id, icon, cx),
+                            ))
+                            .child(
+                                div().w_full().flex().justify_center().child(
+                                    div()
+                                        .id("rterm-icon-dialog-close")
+                                        .h(px(26.))
+                                        .px_4()
+                                        .rounded_md()
+                                        .bg(t.secondary_btn_bg())
+                                        .text_size(px(11.))
+                                        .text_color(t.text_on_secondary_btn())
+                                        .flex()
+                                        .items_center()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(t.secondary_btn_hover()))
+                                        .on_click(cx.listener(
+                                            |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                                                this.icon_dialog_session = None;
+                                                this.focus_pending = true;
+                                                cx.notify();
+                                            },
+                                        ))
+                                        .child("关闭"),
+                                ),
+                            ),
+                    ),
+            );
+        }
+
+        // 快捷键 / 关于
+        if let Some((title, body)) = self.info_dialog.clone() {
+            root = root.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(t.modal_overlay())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .on_mouse_down_out(cx.listener(
+                        |this: &mut Self, _ev: &MouseDownEvent, _w, cx| {
+                            this.info_dialog = None;
+                            this.focus_pending = true;
+                            cx.notify();
+                        },
+                    ))
+                    .child(
+                        div()
+                            .w(px(460.))
+                            .bg(t.card_bg())
+                            .border_1()
+                            .border_color(t.border_medium())
+                            .rounded_lg()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(42.))
+                                    .px_4()
+                                    .flex()
+                                    .items_center()
+                                    .bg(t.card_header_bg())
+                                    .border_b_1()
+                                    .border_color(t.border_subtle())
+                                    .text_size(px(13.))
+                                    .text_color(t.text_on_card_header_bg())
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .p_4()
+                                    .text_size(px(11.))
+                                    .text_color(t.text_on_card_bg())
+                                    .child(body),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(46.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .border_t_1()
+                                    .border_color(t.border_subtle())
+                                    .child(
+                                        div()
+                                            .id("rterm-info-dialog-close")
+                                            .h(px(26.))
+                                            .px_4()
+                                            .rounded_md()
+                                            .bg(t.secondary_btn_bg())
+                                            .text_size(px(11.))
+                                            .text_color(t.text_on_secondary_btn())
+                                            .flex()
+                                            .items_center()
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(t.secondary_btn_hover()))
+                                            .on_click(cx.listener(
+                                                |this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                                                    this.info_dialog = None;
+                                                    this.focus_pending = true;
+                                                    cx.notify();
+                                                },
+                                            ))
+                                            .child("关闭"),
+                                    ),
+                            ),
+                    ),
+            );
         }
 
         // Ctrl+P 命令面板（最上层）。
@@ -1586,71 +2325,22 @@ impl MainWindow {
             )
             .into_any_element()
     }
+}
 
-    fn render_menu_item(
-        &self,
-        id: &'static str,
-        label: &str,
-        danger: bool,
-        action: ContextMenuAction,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let t = theme(cx);
-        let label = label.to_string();
-        let color = if danger {
-            t.danger()
-        } else {
-            t.text_on_card_bg()
-        };
-        let hover_bg = t.row_hover_bg();
-
-        div()
-            .w_full()
-            .h(px(CONTEXT_MENU_ITEM_H))
-            .px_3()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(12.))
-            .text_color(color)
-            .cursor_pointer()
-            .id(id)
-            .hover(move |s| s.bg(hover_bg))
-            .on_click(
-                cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                    this.context_menu = None;
-                    match action {
-                        ContextMenuAction::NewSession => {
-                            let folder = this.pending_new_folder.take();
-                            this.open_edit_dialog(None, cx);
-                            if let (Some(folder), Some(dialog)) = (folder, this.edit_dialog.clone())
-                            {
-                                dialog.update(cx, |dialog, cx| {
-                                    dialog.folder_input.update(cx, |input, cx| {
-                                        input.set_content(folder, cx);
-                                    });
-                                    cx.notify();
-                                });
-                            }
-                        }
-                        ContextMenuAction::EditSession(sid) => this.edit_session(sid, cx),
-                        ContextMenuAction::OpenTerminal(sid) => this.request_terminal(sid, cx),
-                        ContextMenuAction::OpenSftp(sid) => this.request_sftp_tab(sid, cx),
-                        ContextMenuAction::OpenMonitor(sid) => this.request_monitor_tab(sid, cx),
-                        ContextMenuAction::DeleteSession(sid) => {
-                            // 不立即删除：先弹出确认卡片。
-                            this.pending_delete = Some(sid);
-                            this.root_focus_pending = true;
-                            this.overlay_focus_active = true;
-                        }
-                        ContextMenuAction::OpenExportDialog => this.open_import_export(true, cx),
-                        ContextMenuAction::OpenImportDialog => this.open_import_export(false, cx),
-                        ContextMenuAction::OpenSettingsDialog => this.open_settings(cx),
-                    }
-                    cx.notify();
-                }),
-            )
-            .child(label)
-            .into_any_element()
-    }
+/// 「帮助 → 快捷键」弹窗内容。
+fn shortcut_text() -> String {
+    [
+        "Ctrl+T          新建标签",
+        "Ctrl+Tab        切换标签",
+        "Ctrl+W          关闭标签",
+        "Ctrl+Shift+N    新建会话",
+        "Ctrl+Shift+S    开关 SFTP 侧栏",
+        "Ctrl+Shift+L    开关会话日志",
+        "Ctrl+P          命令面板",
+        "F10             顶部菜单栏",
+        "F11             全屏",
+        "Ctrl+,          设置",
+        "Ctrl+= / Ctrl+- 调整字号",
+    ]
+    .join("\n")
 }

@@ -1,7 +1,10 @@
 //! SessionTreeView — 左侧会话树
 //!
-//! 所有颜色通过 `crate::ui::theme(cx)` 取主题，不硬编码 rgb。
-//! 所有文字居中（`.items_center()`）。
+//! S13：
+//! - 树节点 = 显式分组（含空分组）∪ 会话 `folder` 派生路径
+//! - 会话按 `icon` 渲染；未设置为默认图标
+//! - 右键三态：空白 / 分组 / 会话，行内 `stop_propagation` 避免误弹空白菜单
+//! - 选中态通过 `SessionTreeSelectionChanged` 广播给顶部菜单栏
 
 use gpui::*;
 use gpui::{div, px, ClickEvent, IntoElement, MouseButton, MouseDownEvent, Render, Window};
@@ -28,15 +31,19 @@ enum TreeNode {
     Session {
         id: Uuid,
         name: String,
+        icon: String,
         host: String,
         port: u16,
     },
 }
 
 impl TreeNode {
-    /// 按 `folder` 中的 `/` 构建多级文件夹树。
-    fn build(sessions: &[&rterm_session::Session]) -> Vec<TreeNode> {
+    /// 合并显式分组与会话派生分组后构建多级文件夹树。
+    fn build(sessions: &[&rterm_session::Session], folders: &[String]) -> Vec<TreeNode> {
         let mut nodes: Vec<TreeNode> = Vec::new();
+        for folder in folders {
+            insert_folder_path(&mut nodes, folder);
+        }
         for s in sessions {
             let folder = s.folder.as_deref().unwrap_or("").trim_matches('/');
             if folder.is_empty() {
@@ -54,8 +61,40 @@ fn session_node(s: &rterm_session::Session) -> TreeNode {
     TreeNode::Session {
         id: s.id,
         name: s.name.clone(),
+        icon: s.icon_or_default().to_string(),
         host: s.host.clone(),
         port: s.port,
+    }
+}
+
+/// 插入显式分组路径（每一级都建节点，空分组也能显示）。
+fn insert_folder_path(nodes: &mut Vec<TreeNode>, folder: &str) {
+    let mut path = String::new();
+    let mut level = nodes;
+    for segment in folder.split('/').filter(|seg| !seg.is_empty()) {
+        if !path.is_empty() {
+            path.push('/');
+        }
+        path.push_str(segment);
+
+        let index = match level
+            .iter()
+            .position(|node| matches!(node, TreeNode::Folder { path: p, .. } if *p == path))
+        {
+            Some(i) => i,
+            None => {
+                level.push(TreeNode::Folder {
+                    name: segment.to_string(),
+                    path: path.clone(),
+                    children: Vec::new(),
+                });
+                level.len() - 1
+            }
+        };
+        level = match &mut level[index] {
+            TreeNode::Folder { children, .. } => children,
+            TreeNode::Session { .. } => return,
+        };
     }
 }
 
@@ -85,7 +124,6 @@ fn insert_session(nodes: &mut Vec<TreeNode>, folder: &str, session: &rterm_sessi
         };
         level = match &mut level[index] {
             TreeNode::Folder { children, .. } => children,
-            // 同一路径前缀只会是文件夹，这里防御性退出，不 panic。
             TreeNode::Session { .. } => return,
         };
     }
@@ -107,6 +145,16 @@ fn sort_nodes(nodes: &mut [TreeNode]) {
     }
 }
 
+/// 收集树中所有分组路径（展开全部用）。
+fn collect_folder_paths(nodes: &[TreeNode], out: &mut HashSet<String>) {
+    for node in nodes {
+        if let TreeNode::Folder { path, children, .. } = node {
+            out.insert(path.clone());
+            collect_folder_paths(children, out);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SessionTreeView
 // ---------------------------------------------------------------------------
@@ -122,7 +170,7 @@ enum ConnectionBadge {
 
 pub struct SessionTreeView {
     expanded: HashSet<String>,
-    selected: Option<Uuid>,
+    pub selected: Option<Uuid>,
     connection: HashMap<Uuid, ConnectionBadge>,
     /// 会话较多时的纵向滚动
     scroll: ScrollHandle,
@@ -154,10 +202,37 @@ impl SessionTreeView {
                 cx.notify()
             }
             AppEvent::SessionUpdated { .. }
-            | AppEvent::SessionDeleted { .. }
-            | AppEvent::SessionImported { .. } => cx.notify(),
+            | AppEvent::SessionImported { .. }
+            | AppEvent::SessionTreeFoldersChanged => cx.notify(),
+            AppEvent::SessionDeleted { session_id } => {
+                if this.selected == Some(*session_id) {
+                    this.selected = None;
+                    this.emit_event(
+                        cx,
+                        AppEvent::SessionTreeSelectionChanged { session_id: None },
+                    );
+                }
+                cx.notify()
+            }
             AppEvent::SessionTreeSelectRequested { session_id } => {
                 this.selected = *session_id;
+                cx.notify();
+            }
+            AppEvent::SessionTreeExpandAll { expanded } => {
+                if *expanded {
+                    let state = cx.global::<AppState>();
+                    let store = lock_or_recover(&state.session_store);
+                    let sessions = store.list().to_vec();
+                    let folders = store.list_folders();
+                    drop(store);
+                    let refs: Vec<&rterm_session::Session> = sessions.iter().collect();
+                    let tree = TreeNode::build(&refs, &folders);
+                    let mut paths = HashSet::new();
+                    collect_folder_paths(&tree, &mut paths);
+                    this.expanded = paths;
+                } else {
+                    this.expanded.clear();
+                }
                 cx.notify();
             }
             AppEvent::SessionConnectRequested { session_id } => {
@@ -201,16 +276,41 @@ impl SessionTreeView {
             cx.emit(ev);
         });
     }
+
+    fn select(&mut self, session_id: Option<Uuid>, cx: &mut Context<Self>) {
+        if self.selected == session_id {
+            return;
+        }
+        self.selected = session_id;
+        self.emit_event(cx, AppEvent::SessionTreeSelectionChanged { session_id });
+        cx.notify();
+    }
+
+    /// 空白区右键：发送 Blank 菜单事件。
+    fn open_blank_menu(&self, ev: &MouseDownEvent, cx: &mut Context<Self>) {
+        self.emit_event(
+            cx,
+            AppEvent::SessionTreeOpenContextMenuAt {
+                session_id: None,
+                folder: None,
+                x: ev.position.x.to_f64() as i32,
+                y: ev.position.y.to_f64() as i32,
+            },
+        );
+    }
 }
 
 impl Render for SessionTreeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
-        let state = cx.global::<AppState>();
-        let sessions = lock_or_recover(&state.session_store).list().to_vec();
+        let (sessions, folders) = {
+            let state = cx.global::<AppState>();
+            let store = lock_or_recover(&state.session_store);
+            (store.list().to_vec(), store.list_folders())
+        };
         let sessions_refs: Vec<&rterm_session::Session> = sessions.iter().collect();
-        let tree = TreeNode::build(&sessions_refs);
+        let tree = TreeNode::build(&sessions_refs, &folders);
 
         let mut root = div()
             .w(px(super::SIDEBAR_W))
@@ -234,45 +334,52 @@ impl Render for SessionTreeView {
                 .child(format!("会话 ({})", sessions.len())),
         );
 
-        // 会话列表：滚动容器 + 空状态引导
-        let list: gpui::AnyElement = if tree.is_empty() {
-            div()
-                .w_full()
-                .flex_1()
-                .min_h(px(0.))
-                .pt_6()
-                .px_3()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_1()
-                .text_size(px(11.))
-                .text_color(t.text_subtle())
-                .child("还没有会话")
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(t.text_placeholder())
-                        .child("点击上方「＋ 新建会话」开始"),
-                )
-                .into_any_element()
+        // 会话列表：滚动容器 + 空白区右键 + 空状态引导
+        let mut body = div()
+            .w_full()
+            .flex_1()
+            .min_h(px(0.))
+            .id("session-tree-blank")
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this: &mut Self, ev: &MouseDownEvent, _w, cx| {
+                    this.open_blank_menu(ev, cx);
+                }),
+            )
+            .on_click(cx.listener(|this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                this.select(None, cx);
+            }));
+
+        if tree.is_empty() {
+            body = body.child(
+                div()
+                    .w_full()
+                    .pt_6()
+                    .px_3()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(11.))
+                    .text_color(t.text_subtle())
+                    .child("还没有会话")
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(t.text_placeholder())
+                            .child("点击上方「＋ 新建会话」开始"),
+                    ),
+            );
         } else {
             let mut rows = div().w_full().flex_shrink_0();
             for node in &tree {
                 rows = rows.child(self.render_node(node, 0, cx));
             }
-            div()
-                .w_full()
-                .flex_1()
-                .min_h(px(0.))
-                .id("session-tree-scroll")
-                .overflow_y_scroll()
-                .track_scroll(&self.scroll)
-                .child(rows)
-                .into_any_element()
-        };
-        root = root.child(list);
-
+            body = body.child(rows);
+        }
+        root = root.child(body);
         root
     }
 }
@@ -295,6 +402,8 @@ impl SessionTreeView {
                 let is_expanded = self.expanded.contains(path);
                 let path_clone = path.clone();
                 let folder_path = path.clone();
+                let toggle_path = path.clone();
+                let empty_hint = children.is_empty();
 
                 let row = div()
                     .w_full()
@@ -310,6 +419,7 @@ impl SessionTreeView {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this: &mut Self, ev: &MouseDownEvent, _w, cx| {
+                            cx.stop_propagation();
                             this.emit_event(
                                 cx,
                                 AppEvent::SessionTreeOpenContextMenuAt {
@@ -323,19 +433,20 @@ impl SessionTreeView {
                     )
                     .on_click(
                         cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
-                            let f = path_clone.clone();
-                            if this.expanded.contains(&f) {
-                                this.expanded.remove(&f);
+                            cx.stop_propagation();
+                            if this.expanded.contains(&toggle_path) {
+                                this.expanded.remove(&toggle_path);
                             } else {
-                                this.expanded.insert(f);
+                                this.expanded.insert(toggle_path.clone());
                             }
                             cx.notify();
                         }),
                     )
                     .child(format!(
-                        "{} 📁 {}",
+                        "{} 📁 {}{}",
                         if is_expanded { "▼" } else { "▶" },
-                        name
+                        name,
+                        if empty_hint { "（空）" } else { "" }
                     ));
 
                 let mut container = row.into_element();
@@ -344,12 +455,14 @@ impl SessionTreeView {
                         container = container.child(self.render_node(child, indent + 1, cx));
                     }
                 }
+                let _ = path_clone;
                 container.into_any_element()
             }
 
             TreeNode::Session {
                 id,
                 name,
+                icon,
                 host,
                 port,
             } => {
@@ -373,6 +486,8 @@ impl SessionTreeView {
                     ConnectionBadge::Failed => ("●", t.danger()),
                     ConnectionBadge::None => ("○", t.text_placeholder()),
                 };
+                let icon = icon.clone();
+                let name = name.clone();
 
                 let row = div()
                     .w_full()
@@ -393,8 +508,8 @@ impl SessionTreeView {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this: &mut Self, ev: &MouseDownEvent, _w, cx| {
-                            this.selected = Some(id_copy);
-                            cx.notify();
+                            cx.stop_propagation();
+                            this.select(Some(id_copy), cx);
                             this.emit_event(
                                 cx,
                                 AppEvent::SessionTreeOpenContextMenuAt {
@@ -408,14 +523,14 @@ impl SessionTreeView {
                     )
                     .on_click(
                         cx.listener(move |this: &mut Self, ev: &ClickEvent, _w, cx| {
+                            cx.stop_propagation();
                             let sid = id_copy;
                             let click_count = match ev {
                                 ClickEvent::Mouse(m) => m.down.click_count,
                                 ClickEvent::Touch(t) => t.tap_count,
                                 ClickEvent::Keyboard(_) => 1,
                             };
-                            this.selected = Some(sid);
-                            cx.notify();
+                            this.select(Some(sid), cx);
                             this.emit_event(
                                 cx,
                                 AppEvent::SessionTreeSelectRequested {
@@ -438,7 +553,7 @@ impl SessionTreeView {
                             .items_center()
                             .gap_1()
                             .child(div().text_size(px(9.)).text_color(dot_color).child(dot))
-                            .child(format!("🖥️ {}", name)),
+                            .child(format!("{icon} {name}")),
                     )
                     .child(
                         div()

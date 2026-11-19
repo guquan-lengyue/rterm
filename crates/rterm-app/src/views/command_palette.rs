@@ -62,7 +62,7 @@ impl PaletteState {
             .iter()
             .filter_map(|item| fuzzy_score(&self.query, &item.label).map(|score| (score, item)))
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         scored.into_iter().map(|(_, item)| item).collect()
     }
 
@@ -120,8 +120,8 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
 
     for expected in needle {
         let mut found = None;
-        for index in cursor..haystack.len() {
-            if haystack[index] == expected {
+        for (index, candidate) in haystack.iter().enumerate().skip(cursor) {
+            if *candidate == expected {
                 found = Some(index);
                 break;
             }

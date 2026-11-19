@@ -75,6 +75,7 @@ impl TabBar {
             TabKind::Terminal => "📟",
             TabKind::Sftp => "📁",
             TabKind::Monitor => "📊",
+            TabKind::PortForward => "🔀",
         }
     }
 

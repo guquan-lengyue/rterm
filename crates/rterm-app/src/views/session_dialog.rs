@@ -14,6 +14,8 @@ use crate::event::{AppEvent, EventBusHost};
 use crate::state::{lock_or_recover, AppState};
 use crate::ui::theme;
 
+use super::group_picker::{GroupPicker, GroupPickerEvent};
+use super::icon_picker;
 use super::text_input::TextInput;
 
 // ---------------------------------------------------------------------------
@@ -80,7 +82,20 @@ pub struct SessionEditDialog {
     pub host_input: Entity<TextInput>,
     pub port_input: Entity<TextInput>,
     pub username_input: Entity<TextInput>,
-    pub folder_input: Entity<TextInput>,
+    /// 分组选择：可搜索下拉 + 内联新建（替代自由文本，避免错名）。
+    pub group_picker: Entity<GroupPicker>,
+
+    /// 会话图标（None = 默认图标）；预设选择见 `icon_picker`。
+    pub icon: Option<String>,
+    icon_open: bool,
+
+    /// 跳板代理：从已有会话中选择的 id（None = 直连）。
+    pub proxy_choice: Option<Uuid>,
+    /// 编辑时的既有代理配置（可能来自 OpenSSH 导入，不在会话库中）。
+    original_proxy: Option<Box<rterm_session::Session>>,
+    /// 用户未改动代理时保留 `original_proxy`。
+    proxy_custom_kept: bool,
+    proxy_open: bool,
 
     // Auth
     pub auth_type: AuthType,
@@ -194,6 +209,48 @@ impl SessionEditDialog {
             ),
         };
 
+        // 代理：既有配置若来自会话库则转成「选择已有会话」，否则原样保留。
+        let (icon, original_proxy, proxy_choice, proxy_custom_kept) = match session {
+            Some(s) => {
+                let original = s.proxy_jump.clone();
+                let in_store = original
+                    .as_ref()
+                    .map(|proxy| {
+                        lock_or_recover(&cx.global::<AppState>().session_store)
+                            .get(proxy.id)
+                            .is_some()
+                    })
+                    .unwrap_or(false);
+                let choice = if in_store {
+                    original.as_ref().map(|proxy| proxy.id)
+                } else {
+                    None
+                };
+                (
+                    s.icon.clone(),
+                    original.clone(),
+                    choice,
+                    original.is_some() && !in_store,
+                )
+            }
+            None => (None, None, None, false),
+        };
+
+        let initial_folder = if folder.trim().is_empty() {
+            None
+        } else {
+            Some(folder)
+        };
+        let group_picker = cx.new(|cx| GroupPicker::new(cx, initial_folder));
+        cx.subscribe(
+            &group_picker,
+            |this: &mut Self, _picker, event: &GroupPickerEvent, cx| {
+                let GroupPickerEvent::CreateFolder(path) = event;
+                this.create_folder_from_picker(path.clone(), cx);
+            },
+        )
+        .detach();
+
         Self {
             editing_id,
             active_tab: DialogTab::Basic,
@@ -203,7 +260,13 @@ impl SessionEditDialog {
             host_input: Self::make_ti(cx, &host, "主机地址", false),
             port_input: Self::make_ti(cx, &port, "22", false),
             username_input: Self::make_ti(cx, &username, "用户名", false),
-            folder_input: Self::make_ti(cx, &folder, "分组", false),
+            group_picker,
+            icon,
+            icon_open: false,
+            proxy_choice,
+            original_proxy,
+            proxy_custom_kept,
+            proxy_open: false,
             auth_type,
             password_input: Self::make_ti(cx, &password, "密码", true),
             key_path_input: Self::make_ti(cx, &key_path, "密钥文件路径", false),
@@ -214,6 +277,34 @@ impl SessionEditDialog {
             test_status: None,
             form_error: None,
             form_scroll: ScrollHandle::new(),
+        }
+    }
+
+    /// GroupPicker 内联新建：落库 + 持久化 + 回填选择。
+    fn create_folder_from_picker(&mut self, path: String, cx: &mut Context<Self>) {
+        let result = {
+            let state = cx.global_mut::<AppState>();
+            let mut store = lock_or_recover(&state.session_store);
+            store.create_folder(&path)
+        };
+        match result {
+            Ok(()) => {
+                let store = cx.global::<AppState>().session_store.clone();
+                if let Err(error) = crate::state::persist_sessions(&store) {
+                    log::error!("创建分组后保存失败: {error:#}");
+                }
+                let host = cx.global::<AppState>().event_bus_host.clone();
+                cx.update_entity(&host, |_host, cx: &mut Context<EventBusHost>| {
+                    cx.emit(AppEvent::SessionTreeFoldersChanged);
+                });
+                self.group_picker
+                    .update(cx, |picker, cx| picker.set_selected(Some(path), cx));
+            }
+            Err(error) => {
+                self.group_picker.update(cx, |picker, cx| {
+                    picker.set_error(Some(format!("{error}")), cx)
+                });
+            }
         }
     }
 
@@ -241,12 +332,7 @@ impl SessionEditDialog {
 
         self.form_error = None;
         let username = self.username_input.read(cx).content.to_string();
-        let folder_val = self.folder_input.read(cx).content.to_string();
-        let folder = if folder_val.is_empty() {
-            None
-        } else {
-            Some(folder_val)
-        };
+        let folder = self.group_picker.read(cx).selected();
 
         let session_id = self.editing_id.unwrap_or_else(Uuid::new_v4);
 
@@ -307,13 +393,45 @@ impl SessionEditDialog {
             None => (rterm_session::default_now(), None),
         };
 
-        let session = rterm_session::Session {
+        // 代理：优先保留用户未改动的导入配置，其次使用选择的会话快照。
+        let proxy_jump = if self.proxy_custom_kept {
+            self.original_proxy.clone()
+        } else if let Some(proxy_id) = self.proxy_choice {
+            let candidate = {
+                let state = cx.global::<AppState>();
+                let store = lock_or_recover(&state.session_store);
+                store.get(proxy_id).cloned()
+            };
+            match candidate {
+                Some(candidate) => {
+                    if let Err(error) =
+                        rterm_session::proxy::validate_selection(session_id, &candidate)
+                    {
+                        self.form_error = Some(format!("跳板代理无效: {error}"));
+                        cx.notify();
+                        return;
+                    }
+                    Some(Box::new(candidate))
+                }
+                None => {
+                    self.form_error = Some("所选跳板会话已被删除，请重新选择".into());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut session = rterm_session::Session {
             id: session_id,
             name,
+            icon: self.icon.clone(),
             host,
             port,
             username,
             auth,
+            proxy_jump,
             keepalive_secs,
             connect_timeout_secs,
             folder,
@@ -323,10 +441,26 @@ impl SessionEditDialog {
             last_connected,
             ..rterm_session::Session::default()
         };
+        // 编辑时保留本次表单未覆盖的字段（端口转发 / 标签 / 主题覆盖）。
+        if let Some(old) = &old {
+            session.port_forwards = old.port_forwards.clone();
+            session.tags = old.tags.clone();
+            session.theme_override = old.theme_override.clone();
+        }
+
+        if let Err(error) = session.validate() {
+            self.form_error = Some(error);
+            cx.notify();
+            return;
+        }
 
         {
             let state = cx.global_mut::<AppState>();
             let mut store = lock_or_recover(&state.session_store);
+            if let Some(folder) = session.folder.as_deref() {
+                // 自由输入的新分组自动登记为显式分组，重启后仍可见。
+                let _ = store.create_folder(folder);
+            }
             store.upsert(session);
         }
 
@@ -684,6 +818,7 @@ impl SessionEditDialog {
                 self.name_input.clone(),
                 cx,
             ))
+            .child(self.render_icon_field(cx))
             .child(Self::render_field(
                 "主机地址 *",
                 self.host_input.clone(),
@@ -695,7 +830,305 @@ impl SessionEditDialog {
                 self.username_input.clone(),
                 cx,
             ))
-            .child(Self::render_field("分组", self.folder_input.clone(), cx))
+            .child(
+                div()
+                    .w_full()
+                    .mb_3()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme(cx).text_subtle())
+                            .child("分组"),
+                    )
+                    .child(self.group_picker.clone()),
+            )
+            .child(self.render_proxy_field(cx))
+            .into_any_element()
+    }
+
+    /// 图标选择：当前图标 + 展开后的预设网格。
+    fn render_icon_field(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme(cx);
+        let icon = self
+            .icon
+            .as_deref()
+            .filter(|icon| !icon.trim().is_empty())
+            .unwrap_or(rterm_session::DEFAULT_SESSION_ICON)
+            .to_string();
+        let open = self.icon_open;
+
+        let mut container =
+            div()
+                .w_full()
+                .mb_3()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(t.text_subtle())
+                        .child("图标"),
+                )
+                .child(
+                    div()
+                        .id("rterm-session-icon-toggle")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .on_click(
+                            cx.listener(|this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                                this.icon_open = !this.icon_open;
+                                cx.notify();
+                            }),
+                        )
+                        .child(
+                            div()
+                                .w(px(38.))
+                                .h(px(30.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(t.border_subtle())
+                                .bg(t.input_bg())
+                                .text_size(px(15.))
+                                .child(icon.clone()),
+                        )
+                        .child(div().text_size(px(11.)).text_color(t.text_subtle()).child(
+                            if open {
+                                "收起图标列表"
+                            } else {
+                                "选择图标"
+                            },
+                        )),
+                );
+
+        if open {
+            container = container.child(icon_picker::render_icon_grid(
+                "session-dialog",
+                &icon,
+                cx,
+                |this, icon, cx| {
+                    this.icon = Some(icon.to_string());
+                    cx.notify();
+                },
+            ));
+        }
+        container.into_any_element()
+    }
+
+    /// 代理选择：无 / 已有会话（排除自身与环路）；下方展示链式预览。
+    fn render_proxy_field(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme(cx);
+        let target_id = self.editing_id.unwrap_or_default();
+        let open = self.proxy_open;
+
+        let candidates: Vec<rterm_session::Session> = {
+            let state = cx.global::<AppState>();
+            let store = lock_or_recover(&state.session_store);
+            store
+                .list()
+                .iter()
+                .filter(|candidate| rterm_session::proxy::can_be_proxy_of(target_id, candidate))
+                .cloned()
+                .collect()
+        };
+
+        let selected_label = if self.proxy_custom_kept {
+            match self.original_proxy.as_deref() {
+                Some(proxy) => format!("{}（原配置）", proxy.display_label()),
+                None => "无（直连）".to_string(),
+            }
+        } else if let Some(proxy_id) = self.proxy_choice {
+            candidates
+                .iter()
+                .find(|candidate| candidate.id == proxy_id)
+                .map(|candidate| candidate.display_label())
+                .unwrap_or_else(|| "已删除的会话".to_string())
+        } else {
+            "无（直连）".to_string()
+        };
+
+        // 链式预览：候选链路 + 当前会话占位名。
+        let preview_session = rterm_session::Session {
+            id: target_id,
+            name: self.name_input.read(cx).content.to_string(),
+            host: self.host_input.read(cx).content.to_string(),
+            proxy_jump: if self.proxy_custom_kept {
+                self.original_proxy.clone()
+            } else {
+                self.proxy_choice.and_then(|id| {
+                    candidates
+                        .iter()
+                        .find(|candidate| candidate.id == id)
+                        .cloned()
+                        .map(Box::new)
+                })
+            },
+            ..rterm_session::Session::default()
+        };
+        let chain_text = rterm_session::proxy::describe_chain(&preview_session);
+        let chain_invalid = chain_text.starts_with("代理链无效");
+
+        let mut container = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(t.text_subtle())
+                    .child("代理（跳板机）"),
+            )
+            .child(
+                div()
+                    .id("rterm-session-proxy-toggle")
+                    .w_full()
+                    .h(px(32.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if open {
+                        t.border_input_focused()
+                    } else {
+                        t.border_input_idle()
+                    })
+                    .bg(t.input_bg())
+                    .text_size(px(12.))
+                    .text_color(t.text_on_card_bg())
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(|this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                            this.proxy_open = !this.proxy_open;
+                            cx.notify();
+                        }),
+                    )
+                    .child(div().truncate().child(selected_label))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(t.text_subtle())
+                            .child(if open { "▴" } else { "▾" }),
+                    ),
+            );
+
+        if open {
+            let mut list = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .rounded_md()
+                .border_1()
+                .border_color(t.border_medium())
+                .bg(t.card_bg());
+
+            // 「无（直连）」
+            list = list.child(self.render_proxy_option(
+                "rterm-proxy-none",
+                "无（直连）".to_string(),
+                !self.proxy_custom_kept && self.proxy_choice.is_none(),
+                None,
+                false,
+                cx,
+            ));
+
+            // 编辑时保留的导入代理
+            if let Some(original) = self.original_proxy.as_deref() {
+                list = list.child(self.render_proxy_option(
+                    "rterm-proxy-original",
+                    format!("{}（原配置）", original.display_label()),
+                    self.proxy_custom_kept,
+                    None,
+                    true,
+                    cx,
+                ));
+            }
+
+            for candidate in &candidates {
+                let id = candidate.id;
+                list = list.child(self.render_proxy_option(
+                    &format!("rterm-proxy-{id}"),
+                    format!(
+                        "{} · {}:{}",
+                        candidate.display_label(),
+                        candidate.host,
+                        candidate.port
+                    ),
+                    !self.proxy_custom_kept && self.proxy_choice == Some(id),
+                    Some(id),
+                    false,
+                    cx,
+                ));
+            }
+            container = container.child(list);
+        }
+
+        container = container.child(
+            div()
+                .text_size(px(10.))
+                .text_color(if chain_invalid {
+                    t.danger()
+                } else {
+                    t.text_subtle()
+                })
+                .child(format!("链路: {chain_text}")),
+        );
+
+        container.into_any_element()
+    }
+
+    /// 代理下拉中的单行选项。
+    fn render_proxy_option(
+        &self,
+        id: &str,
+        label: String,
+        selected: bool,
+        proxy_id: Option<Uuid>,
+        use_original: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = theme(cx);
+        let row_bg = if selected {
+            t.row_selected_bg()
+        } else {
+            t.card_bg()
+        };
+        div()
+            .id(id.to_string())
+            .w_full()
+            .h(px(28.))
+            .px_2()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(row_bg)
+            .text_size(px(11.))
+            .text_color(if selected {
+                t.text_on_row_selected_bg()
+            } else {
+                t.text_on_card_bg()
+            })
+            .cursor_pointer()
+            .hover(|style| style.bg(t.row_hover_bg()))
+            .on_click(
+                cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+                    this.proxy_custom_kept = use_original;
+                    this.proxy_choice = proxy_id;
+                    this.proxy_open = false;
+                    cx.notify();
+                }),
+            )
+            .child(label)
             .into_any_element()
     }
 

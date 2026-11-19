@@ -200,6 +200,20 @@ fn main() {
             },
         );
 
+        // F10 → 顶部菜单栏
+        app.on_action(
+            move |_: &views::main_window::ToggleMenuBar, app: &mut App| {
+                app.defer(move |app| {
+                    let handle = WindowHandle::<MainWindow>::new(window_id);
+                    if let Err(e) = handle.update(app, |main, window, cx| {
+                        main.toggle_menu_bar_shortcut(window, cx)
+                    }) {
+                        log::error!("[shortcut] 切换菜单栏失败: {e:#}");
+                    }
+                });
+            },
+        );
+
         // Ctrl+P → 命令面板
         app.on_action(move |_: &views::main_window::OpenPalette, app: &mut App| {
             app.defer(move |app| {

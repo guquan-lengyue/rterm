@@ -42,8 +42,7 @@ impl DiskScanCache {
     /// 可注入时间点的读取，便于单测。
     pub fn get_at(&self, path: &str, now: Instant) -> Option<DiskUsage> {
         let entry = self.entries.get(normalize_path(path))?;
-        (now.saturating_duration_since(entry.fetched_at) < self.ttl)
-            .then(|| entry.usage.clone())
+        (now.saturating_duration_since(entry.fetched_at) < self.ttl).then(|| entry.usage.clone())
     }
 
     /// 可注入时间点的写入，便于单测。

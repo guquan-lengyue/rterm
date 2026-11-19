@@ -1,6 +1,6 @@
 # Sprint 13 — 会话管理增强 + SSH 跳板代理 / 端口转发（v1.2）
 
-> **状态**：📋 待开始
+> **状态**：🚧 编码完成（2026-11-19，待真实远端手工 smoke）
 > **前置**：[S2](./sprint-02-session-data.md) ✅（Session / SessionStore）+ [S3](./sprint-03-session-tree.md) ✅（会话树 / 编辑对话框）+
 > [S4](./sprint-04-settings-io.md) ✅（导入导出）+ [S5](./sprint-05-ssh-terminal.md) ✅（SSH 连接）；
 > 与 [S12](./sprint-12-terminal-sftp-dock.md) 并行时注意 `main_window.rs` 菜单/事件冲突
@@ -231,13 +231,33 @@ connect(session)
 
 ## 交付定义
 
-- [ ] 会话可配置跳板代理（含链式与环路校验），终端 / SFTP / 监控均可经代理连接，错误文案可定位跳板
-- [ ] 分组可新建（含空分组）、重命名、删除；会话编辑使用可搜索分组下拉
-- [ ] 会话树空白处 / 分组 / 会话三类右键菜单职责清晰，全局功能不再混入会话菜单
-- [ ] 顶部菜单栏（会话 / 连接 / 视图 / 帮助）可用，动作与右键菜单、快捷键一致；无选中会话时连接项禁用
-- [ ] 端口转发支持本地 `-L` / 远程 `-R`（动态 `-D` 可选），规则可启停与自动启动，状态与错误可视，会话关闭时全部停止
-- [ ] 会话支持预设图标修改并持久化，导出 / 导入保留图标、分组、代理、端口转发
-- [ ] 导入导出统一入口，OpenSSH config 可在 UI 中导入
-- [ ] `cargo fmt --check` / `cargo clippy --workspace --all-targets`（0 warning）/ `cargo test --workspace` 全绿
+- [x] 会话可配置跳板代理（含链式与环路校验），终端 / SFTP / 监控均可经代理连接，错误文案可定位跳板
+- [x] 分组可新建（含空分组）、重命名、删除；会话编辑使用可搜索分组下拉
+- [x] 会话树空白处 / 分组 / 会话三类右键菜单职责清晰，全局功能不再混入会话菜单
+- [x] 顶部菜单栏（会话 / 连接 / 视图 / 帮助）可用，动作与右键菜单、快捷键一致；无选中会话时连接项禁用
+- [x] 端口转发支持本地 `-L` / 远程 `-R` / 动态 `-D`，规则可启停与自动启动，状态与错误可视，会话关闭时全部停止
+- [x] 会话支持预设图标修改并持久化，导出 / 导入保留图标、分组、代理、端口转发
+- [x] 导入导出统一入口，OpenSSH config 可在 UI 中导入
+- [x] `cargo fmt --check` / `cargo clippy --workspace --all-targets`（0 warning）/ `cargo test --workspace` 全绿
 - [ ] 真实验证：经跳板连接 Ubuntu 主机，打开终端 / SFTP / 监控；本地与远程转发各验证一次；
   空分组重启保留；图标、菜单、分组重命名回归通过
+
+---
+
+## 实现备注（2026-11-19）
+
+- **逐跳代理实现**：`ssh2` 的 `set_tcp_stream` 仅接受真实 socket（Windows 需 `AsRawSocket`），
+  无法直接传入上一跳的 `Channel`。`rterm-ssh` 采用「本地回环中继」：上一跳
+  `channel_direct_tcpip` → `127.0.0.1:临时端口` → 下一跳 `TcpStream`；跳板 Session 与中继线程
+  由 `SshSession` 持有，断开时目标先断、跳板逆序释放。
+- **schema v2**：`SessionFile.folders` + `Session.icon` + `Session.port_forwards`；
+  v1 文件直接加载（`serde(default)`），首次保存写 v2；保存前沿用 S10 的 24h 备份策略。
+- **分组**：不引入 Group ID，路径即唯一键；新建自动补父路径，重命名同步前缀，删除仅限空分组。
+- **图标**：12 个常见 emoji 预设；编辑对话框内联选择 + 右键「更改图标…」弹窗复用同一网格。
+- **右键 / 菜单栏**：`views/context_menu.rs` 统一三态目标、动作枚举、菜单项 / 分隔线 / 分区与位置夹取；
+  顶部菜单栏动作经 `AppEvent::MenuCommand` 分发，菜单展开时屏蔽全局快捷键，Esc / 点击外部关闭。
+- **端口转发**：`rterm-forward` 每条规则独立 SSH 连接（支持跳板链）；本地 / 动态监听非阻塞轮询，
+  远程 `-R` 用 500ms 超时轮询停止位；`-D` 实现最小 SOCKS5（无认证 + CONNECT）。
+- **自动启动**：会话首次打开终端时，若存在 `auto_start` 规则且尚无转发 Tab，则在后台创建转发 Tab
+  （不抢焦点）并启动规则；关闭最后一个相关 Tab / 应用退出时 stop_all。
+- **非回环绑定**：保存规则时二次确认；默认 `127.0.0.1`。

@@ -94,9 +94,7 @@ fn build_summary(sessions_count: usize, settings: &Settings) -> String {
         "term_logging_dir: {:?}\n",
         settings.terminal_log_dir
     ));
-    text.push_str(&format!(
-        "backup_included: false (sessions.json 不含凭据导出)\n"
-    ));
+    text.push_str("backup_included: false (sessions.json 不含凭据导出)\n");
     text.push_str("included_logs:\n");
     if logs.is_empty() {
         text.push_str("  (none)\n");
@@ -128,7 +126,7 @@ fn recent_logs(settings: &Settings, limit: usize) -> Vec<PathBuf> {
             Some((modified, entry.path()))
         })
         .collect();
-    logs.sort_by(|a, b| b.0.cmp(&a.0));
+    logs.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     logs.into_iter().take(limit).map(|(_, path)| path).collect()
 }
 
@@ -157,9 +155,11 @@ mod tests {
         std::fs::create_dir_all(&log_dir).expect("创建日志目录");
         std::fs::write(log_dir.join("demo.log"), b"hello from remote\n").expect("写日志");
 
-        let mut settings = Settings::default();
-        settings.data_dir = Some(base.to_string_lossy().into_owned());
-        settings.terminal_log_dir = Some(log_dir.to_string_lossy().into_owned());
+        let settings = Settings {
+            data_dir: Some(base.to_string_lossy().into_owned()),
+            terminal_log_dir: Some(log_dir.to_string_lossy().into_owned()),
+            ..Settings::default()
+        };
 
         let dest = base.join("diag.zip");
         export_diagnostics(&dest, 2, &settings).expect("导出诊断包");
@@ -195,9 +195,11 @@ mod tests {
     #[test]
     fn export_without_log_dir_still_succeeds() {
         let base = temp_dir("nolog");
-        let mut settings = Settings::default();
-        settings.data_dir = Some(base.to_string_lossy().into_owned());
-        settings.terminal_log_dir = Some(base.join("missing").to_string_lossy().into_owned());
+        let settings = Settings {
+            data_dir: Some(base.to_string_lossy().into_owned()),
+            terminal_log_dir: Some(base.join("missing").to_string_lossy().into_owned()),
+            ..Settings::default()
+        };
 
         let dest = base.join("diag.zip");
         export_diagnostics(&dest, 0, &settings).expect("无日志也应成功");

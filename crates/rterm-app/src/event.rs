@@ -157,8 +157,18 @@ pub enum AppEvent {
     SessionTreeSelectRequested {
         session_id: Option<Uuid>,
     },
+    /// 树选中态变化（顶部菜单栏「连接」依赖它启用/禁用）。
+    SessionTreeSelectionChanged {
+        session_id: Option<Uuid>,
+    },
     SessionTreeFolderToggle {
         folder: String,
+    },
+    /// 显式分组 / 会话分组变化后，树与导出对话框刷新。
+    SessionTreeFoldersChanged,
+    /// 展开 / 折叠全部分组。
+    SessionTreeExpandAll {
+        expanded: bool,
     },
     SessionTreeOpenEditDialog {
         session_id: Option<Uuid>,
@@ -170,6 +180,56 @@ pub enum AppEvent {
         x: i32,
         y: i32,
     },
+
+    // ---- 分组操作（GroupPicker / PromptDialog → MainWindow） ----
+    SessionMoveRequested {
+        session_id: Uuid,
+        folder: Option<String>,
+    },
+    GroupPickerCloseRequested,
+    FolderCreateRequested {
+        path: String,
+    },
+    FolderRenameRequested {
+        from: String,
+        to: String,
+    },
+    TextPromptCloseRequested,
+
+    // ---- 端口转发 ----
+    PortForwardOpened {
+        tab_id: Uuid,
+        session_id: Uuid,
+    },
+    PortForwardClosed {
+        tab_id: Uuid,
+    },
+
+    // ---- 顶部菜单栏 ----
+    MenuCommand(MenuCommand),
+}
+
+/// 顶部菜单栏动作。MainWindow 统一映射到现有 request_* / 设置操作。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuCommand {
+    NewSession,
+    NewFolder,
+    ImportSessions,
+    ExportSessions,
+    OpenSettings,
+    OpenTerminal,
+    OpenSftp,
+    OpenMonitor,
+    OpenPortForward,
+    ToggleSidebar,
+    ExpandAll,
+    CollapseAll,
+    ToggleTheme,
+    ZoomIn,
+    ZoomOut,
+    ShowShortcuts,
+    OpenLogDir,
+    About,
 }
 
 #[derive(Clone, Debug)]
