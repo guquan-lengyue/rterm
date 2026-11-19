@@ -102,15 +102,15 @@ pub fn entries(kind: MenuKind, has_selection: bool, sidebar_visible: bool) -> Ve
         MenuKind::Session => vec![
             item("＋ 新建会话", MenuCommand::NewSession),
             item("📁 新建分组", MenuCommand::NewFolder),
-            divider("⬆ 导入会话…", MenuCommand::ImportSessions),
-            item("⬇ 导出会话…", MenuCommand::ExportSessions),
-            divider("⚙ 设置…", MenuCommand::OpenSettings),
+            divider("⬆ 导入会话", MenuCommand::ImportSessions),
+            item("⬇ 导出会话", MenuCommand::ExportSessions),
+            divider("⚙ 设置", MenuCommand::OpenSettings),
         ],
         MenuKind::Connection => vec![
             disabled_item("▶ 打开终端", MenuCommand::OpenTerminal, has_selection),
             disabled_item("📁 打开 SFTP", MenuCommand::OpenSftp, has_selection),
             disabled_item("📊 打开监控", MenuCommand::OpenMonitor, has_selection),
-            disabled_item("🔀 端口转发…", MenuCommand::OpenPortForward, has_selection),
+            disabled_item("🔀 端口转发", MenuCommand::OpenPortForward, has_selection),
         ],
         MenuKind::View => vec![
             item(

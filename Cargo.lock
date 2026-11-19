@@ -4930,6 +4930,7 @@ dependencies = [
  "bezel-gpui-platform",
  "chrono",
  "dirs",
+ "embed-resource",
  "env_logger",
  "futures",
  "log",

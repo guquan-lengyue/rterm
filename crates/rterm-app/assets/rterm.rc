@@ -1,0 +1,2 @@
+// 应用图标资源：Windows 用第一个图标组作为 exe / 任务栏默认图标。
+1 ICON "rterm.ico"

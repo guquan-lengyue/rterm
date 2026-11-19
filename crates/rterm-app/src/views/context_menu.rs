@@ -7,7 +7,7 @@
 //! 菜单项 / 分隔线 / 分区标题 / 位置夹取同时供顶部菜单栏复用。
 
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, Context, IntoElement, Rgba};
+use gpui::{div, px, AnyElement, Context, IntoElement, Rgba, SharedString, Window};
 use uuid::Uuid;
 
 use crate::ui::theme;
@@ -16,7 +16,8 @@ use crate::ui::theme;
 // 尺寸常量
 // ---------------------------------------------------------------------------
 
-pub const CONTEXT_MENU_W: f32 = 188.0;
+/// 菜单行左右内边距：文字距菜单边缘的距离。
+pub const MENU_ITEM_PAD_X: f32 = 10.0;
 pub const MENU_ITEM_H: f32 = 30.0;
 pub const MENU_SECTION_H: f32 = 20.0;
 pub const MENU_DIVIDER_H: f32 = 9.0;
@@ -129,7 +130,7 @@ pub fn entries_for(target: &ContextMenuTarget) -> Vec<MenuEntry> {
             ),
             entry(
                 "ctx-blank-import",
-                "⬆ 导入会话…",
+                "⬆ 导入会话",
                 ContextMenuAction::Blank(BlankMenuAction::ImportSessions),
                 None,
                 false,
@@ -187,7 +188,7 @@ pub fn entries_for(target: &ContextMenuTarget) -> Vec<MenuEntry> {
             ),
             entry(
                 "ctx-folder-export",
-                "⬇ 导出该分组…",
+                "⬇ 导出该分组",
                 ContextMenuAction::Folder(FolderMenuAction::ExportFolder),
                 Some("传输"),
                 true,
@@ -221,7 +222,7 @@ pub fn entries_for(target: &ContextMenuTarget) -> Vec<MenuEntry> {
             ),
             entry(
                 "ctx-session-forward",
-                "🔀 端口转发…",
+                "🔀 端口转发",
                 ContextMenuAction::Session(SessionMenuAction::OpenPortForward),
                 None,
                 false,
@@ -237,7 +238,7 @@ pub fn entries_for(target: &ContextMenuTarget) -> Vec<MenuEntry> {
             ),
             entry(
                 "ctx-session-icon",
-                "🎨 更改图标…",
+                "🎨 更改图标",
                 ContextMenuAction::Session(SessionMenuAction::ChangeIcon),
                 None,
                 false,
@@ -245,7 +246,7 @@ pub fn entries_for(target: &ContextMenuTarget) -> Vec<MenuEntry> {
             ),
             entry(
                 "ctx-session-move",
-                "📁 移动到分组…",
+                "📁 移动到分组",
                 ContextMenuAction::Session(SessionMenuAction::MoveToFolder),
                 None,
                 false,
@@ -292,6 +293,32 @@ pub fn menu_height(entries: &[MenuEntry]) -> f32 {
     rows + MENU_PADDING_Y
 }
 
+/// 按最宽条目文字计算菜单宽度：文字 + 左右内边距 + 边框。
+pub fn menu_width(window: &mut Window, entries: &[MenuEntry]) -> f32 {
+    menu_width_for(window, entries.iter().map(|entry| entry.label.as_str()))
+}
+
+/// 按一组标签文字计算菜单宽度（顶部菜单栏下拉复用）。
+pub fn menu_width_for<'a>(window: &mut Window, labels: impl IntoIterator<Item = &'a str>) -> f32 {
+    let widest = labels
+        .into_iter()
+        .map(|label| measure_text(window, label, 12.))
+        .fold(0.0_f32, f32::max);
+    widest + MENU_ITEM_PAD_X * 2. + 2.
+}
+
+/// 用窗口当前字体测量单行文字宽度。
+fn measure_text(window: &mut Window, text: &str, font_size: f32) -> f32 {
+    let run = window.text_style().to_run(text.len());
+    let line = window.text_system().shape_line(
+        SharedString::from(text.to_string()),
+        px(font_size),
+        &[run],
+        None,
+    );
+    f32::from(line.width())
+}
+
 /// 位置夹取：菜单不越出窗口。
 pub fn clamp_position(
     x: f32,
@@ -316,7 +343,7 @@ pub fn menu_section_label(label: &str, text_color: Rgba) -> AnyElement {
     div()
         .w_full()
         .h(px(MENU_SECTION_H))
-        .px_3()
+        .px(px(MENU_ITEM_PAD_X))
         .flex()
         .items_center()
         .text_size(px(9.))
@@ -332,7 +359,7 @@ pub fn menu_divider(border_color: Rgba) -> AnyElement {
         .h(px(MENU_DIVIDER_H))
         .flex()
         .items_center()
-        .px_2()
+        .px(px(MENU_ITEM_PAD_X))
         .child(div().w_full().h(px(1.)).bg(border_color))
         .into_any_element()
 }
@@ -360,10 +387,9 @@ pub fn menu_item<W: 'static>(
     let mut item = div()
         .w_full()
         .h(px(MENU_ITEM_H))
-        .px_3()
+        .px(px(MENU_ITEM_PAD_X))
         .flex()
         .items_center()
-        .justify_center()
         .text_size(px(12.))
         .text_color(text_color)
         .id(id.to_string());
@@ -386,6 +412,7 @@ pub fn menu_item<W: 'static>(
 
 /// 渲染完整右键菜单（含分区、分隔线、位置夹取、点击外部关闭）。
 pub fn render_context_menu<W: 'static>(
+    window: &mut Window,
     state: &ContextMenuState,
     viewport_w: f32,
     viewport_h: f32,
@@ -396,10 +423,11 @@ pub fn render_context_menu<W: 'static>(
     let t = theme(cx);
     let entries = entries_for(&state.target);
     let height = menu_height(&entries);
+    let width = menu_width(window, &entries);
     let (x, y) = clamp_position(
         state.x as f32,
         state.y as f32,
-        CONTEXT_MENU_W,
+        width,
         height,
         viewport_w,
         viewport_h,
@@ -410,7 +438,7 @@ pub fn render_context_menu<W: 'static>(
         .absolute()
         .left(px(x))
         .top(px(y))
-        .w(px(CONTEXT_MENU_W))
+        .w(px(width))
         .py_1()
         .bg(t.card_bg())
         .border_1()

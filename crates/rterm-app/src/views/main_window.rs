@@ -1925,6 +1925,7 @@ impl Render for MainWindow {
         if let Some(menu_state) = self.context_menu.clone() {
             let viewport = window.viewport_size();
             root = root.child(context_menu::render_context_menu(
+                window,
                 &menu_state,
                 f32::from(viewport.width),
                 f32::from(viewport.height),
@@ -1944,7 +1945,8 @@ impl Render for MainWindow {
             let entries =
                 menu_bar::entries(kind, self.selected_session.is_some(), self.sidebar_visible);
             let viewport = window.viewport_size();
-            let width = context_menu::CONTEXT_MENU_W;
+            let width =
+                context_menu::menu_width_for(window, entries.iter().map(|entry| entry.label));
             let height = entries
                 .iter()
                 .map(|entry| {

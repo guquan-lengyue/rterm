@@ -17,6 +17,17 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
+// 布局常量
+// ---------------------------------------------------------------------------
+
+/// 单级缩进宽度（像素）。
+const INDENT_STEP: f32 = 12.0;
+/// 树行左侧基础内边距，保证根级节点不贴边。
+const ROW_PAD_LEFT: f32 = 8.0;
+/// 折叠箭头占位宽度：会话图标据此与文件夹图标对齐。
+const CHEVRON_W: f32 = 10.0;
+
+// ---------------------------------------------------------------------------
 // Tree 节点
 // ---------------------------------------------------------------------------
 
@@ -168,6 +179,64 @@ enum ConnectionBadge {
     Failed,
 }
 
+/// 拖拽会话时携带的负载：仅 id 与显示名（用于拖拽预览）。
+struct SessionDrag {
+    session_id: Uuid,
+    label: String,
+}
+
+/// 拖拽时跟随鼠标的轻量预览。
+struct SessionDragPreview {
+    label: String,
+    /// 抓取点相对会话行左上角的偏移。GPUI 把预览画在 `鼠标位置 - 偏移` 处，
+    /// 这里用等量内边距抵消，让预览始终贴在鼠标右下角。
+    grab_offset: Point<Pixels>,
+}
+
+impl Render for SessionDragPreview {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        div()
+            .pl(self.grab_offset.x + px(14.))
+            .pt(self.grab_offset.y + px(10.))
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(t.border_medium())
+                    .bg(t.card_bg())
+                    .text_size(px(11.))
+                    .text_color(t.text_on_card_bg())
+                    .child(self.label.clone()),
+            )
+    }
+}
+
+/// 统计分组子树内的会话数。
+fn count_sessions(nodes: &[TreeNode]) -> usize {
+    nodes
+        .iter()
+        .map(|node| match node {
+            TreeNode::Session { .. } => 1,
+            TreeNode::Folder { children, .. } => count_sessions(children),
+        })
+        .sum()
+}
+
+/// 展开 `path` 的所有父级（移动会话后让目标分组可见）。
+fn expand_ancestors(expanded: &mut HashSet<String>, path: &str) {
+    let mut acc = String::new();
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        if !acc.is_empty() {
+            acc.push('/');
+        }
+        acc.push_str(segment);
+        expanded.insert(acc.clone());
+    }
+}
+
 pub struct SessionTreeView {
     expanded: HashSet<String>,
     pub selected: Option<Uuid>,
@@ -190,14 +259,7 @@ impl SessionTreeView {
                         .and_then(|session| session.folder.clone())
                 };
                 if let Some(folder) = folder {
-                    let mut acc = String::new();
-                    for part in folder.split('/').filter(|part| !part.is_empty()) {
-                        if !acc.is_empty() {
-                            acc.push('/');
-                        }
-                        acc.push_str(part);
-                        this.expanded.insert(acc.clone());
-                    }
+                    expand_ancestors(&mut this.expanded, &folder);
                 }
                 cx.notify()
             }
@@ -349,7 +411,15 @@ impl Render for SessionTreeView {
                 }),
             )
             .on_click(cx.listener(|this: &mut Self, _ev: &ClickEvent, _w, cx| {
+                // 拖拽落位后的 mouse up 不算点击，避免丢失刚移动的会话选中态
+                if cx.has_active_drag() {
+                    return;
+                }
                 this.select(None, cx);
+            }))
+            // 空白区 = 根目录：把会话拖到这里即移出分组
+            .on_drop(cx.listener(|this: &mut Self, drag: &SessionDrag, _w, cx| {
+                this.drop_session(drag.session_id, None, cx);
             }));
 
         if tree.is_empty() {
@@ -385,6 +455,19 @@ impl Render for SessionTreeView {
 }
 
 impl SessionTreeView {
+    /// 拖拽落位：把会话移动到目标分组（`None` 表示根目录）。
+    fn drop_session(&mut self, session_id: Uuid, folder: Option<String>, cx: &mut Context<Self>) {
+        let folder = folder
+            .map(|path| path.trim_matches('/').to_string())
+            .filter(|path| !path.is_empty());
+        if let Some(path) = folder.as_deref() {
+            // 目标分组立即展开，移动后的会话才能被看到
+            expand_ancestors(&mut self.expanded, path);
+        }
+        self.emit_event(cx, AppEvent::SessionMoveRequested { session_id, folder });
+        cx.notify();
+    }
+
     fn render_node(
         &mut self,
         node: &TreeNode,
@@ -392,6 +475,7 @@ impl SessionTreeView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme(cx);
+        let depth = indent as f32;
 
         match node {
             TreeNode::Folder {
@@ -400,22 +484,27 @@ impl SessionTreeView {
                 children,
             } => {
                 let is_expanded = self.expanded.contains(path);
-                let path_clone = path.clone();
-                let folder_path = path.clone();
+                let drop_bg = t.primary().opacity(0.16);
+                let menu_path = path.clone();
+                let drop_path = path.clone();
                 let toggle_path = path.clone();
-                let empty_hint = children.is_empty();
+                let session_count = count_sessions(children);
 
-                let row = div()
+                // 只有 header 是交互区：hover / 右键 / 折叠 / drop 高亮都不会覆盖子树
+                let mut header = div()
+                    .id(format!("folder-{}", path))
                     .w_full()
-                    .pl(px(12. * indent as f32))
+                    .h(px(24.))
+                    .pl(px(ROW_PAD_LEFT + INDENT_STEP * depth))
                     .pr(px(8.))
-                    .py_1()
+                    .rounded_sm()
                     .flex()
                     .items_center()
+                    .gap_1()
                     .text_size(px(12.))
                     .text_color(t.text_on_sidebar_bg())
-                    .id(format!("folder-{}", path))
                     .hover(|s| s.bg(t.row_hover_bg()))
+                    .drag_over::<SessionDrag>(move |style, _drag, _window, _cx| style.bg(drop_bg))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this: &mut Self, ev: &MouseDownEvent, _w, cx| {
@@ -424,7 +513,7 @@ impl SessionTreeView {
                                 cx,
                                 AppEvent::SessionTreeOpenContextMenuAt {
                                     session_id: None,
-                                    folder: Some(folder_path.clone()),
+                                    folder: Some(menu_path.clone()),
                                     x: ev.position.x.to_f64() as i32,
                                     y: ev.position.y.to_f64() as i32,
                                 },
@@ -434,29 +523,60 @@ impl SessionTreeView {
                     .on_click(
                         cx.listener(move |this: &mut Self, _ev: &ClickEvent, _w, cx| {
                             cx.stop_propagation();
-                            if this.expanded.contains(&toggle_path) {
-                                this.expanded.remove(&toggle_path);
-                            } else {
+                            if !this.expanded.remove(&toggle_path) {
                                 this.expanded.insert(toggle_path.clone());
                             }
                             cx.notify();
                         }),
                     )
-                    .child(format!(
-                        "{} 📁 {}{}",
-                        if is_expanded { "▼" } else { "▶" },
-                        name,
-                        if empty_hint { "（空）" } else { "" }
-                    ));
+                    .child(
+                        div()
+                            .w(px(CHEVRON_W))
+                            .flex()
+                            .justify_center()
+                            .text_size(px(9.))
+                            .text_color(t.text_subtle())
+                            .child(if is_expanded { "▾" } else { "▸" }),
+                    )
+                    .child(div().text_size(px(11.)).child("📁"))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(name.clone()));
+                if session_count > 0 {
+                    header = header.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(t.text_placeholder())
+                            .child(session_count.to_string()),
+                    );
+                }
 
-                let mut container = row.into_element();
+                // 子树容器：拖到分组内任意位置（含空分组提示）都落到该分组
+                let mut column = div().w_full().flex().flex_col().on_drop(cx.listener(
+                    move |this: &mut Self, drag: &SessionDrag, _w, cx| {
+                        this.drop_session(drag.session_id, Some(drop_path.clone()), cx);
+                    },
+                ));
+                column = column.child(header);
                 if is_expanded {
-                    for child in children {
-                        container = container.child(self.render_node(child, indent + 1, cx));
+                    if children.is_empty() {
+                        column = column.child(
+                            div()
+                                .w_full()
+                                .h(px(22.))
+                                .pl(px(ROW_PAD_LEFT + INDENT_STEP * (depth + 1.)))
+                                .flex()
+                                .items_center()
+                                .text_size(px(11.))
+                                .text_color(t.text_placeholder())
+                                .child("空分组"),
+                        );
+                    } else {
+                        for child in children {
+                            column = column.child(self.render_node(child, indent + 1, cx));
+                        }
                     }
                 }
-                let _ = path_clone;
-                container.into_any_element()
+                column.into_any_element()
             }
 
             TreeNode::Session {
@@ -488,12 +608,19 @@ impl SessionTreeView {
                 };
                 let icon = icon.clone();
                 let name = name.clone();
+                let drag = SessionDrag {
+                    session_id: id_copy,
+                    label: name.clone(),
+                };
 
                 let row = div()
+                    .id(format!("session-{}", id_copy))
                     .w_full()
-                    .pl(px(12. * indent as f32 + 8.))
+                    // 会话内容从箭头之后开始，图标与同级文件夹图标对齐
+                    .pl(px(ROW_PAD_LEFT + INDENT_STEP * depth + CHEVRON_W + 4.))
                     .pr(px(8.))
                     .py_1()
+                    .rounded_sm()
                     .bg(bg)
                     .flex()
                     .flex_col()
@@ -503,8 +630,13 @@ impl SessionTreeView {
                     } else {
                         t.text_on_sidebar_bg()
                     })
-                    .id(format!("session-{}", id_copy))
                     .hover(|s| s.bg(t.row_hover_bg()))
+                    .on_drag(drag, |drag, grab_offset, _window, cx| {
+                        cx.new(|_| SessionDragPreview {
+                            label: drag.label.clone(),
+                            grab_offset,
+                        })
+                    })
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this: &mut Self, ev: &MouseDownEvent, _w, cx| {
@@ -552,13 +684,22 @@ impl SessionTreeView {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(div().text_size(px(9.)).text_color(dot_color).child(dot))
-                            .child(format!("{icon} {name}")),
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(9.))
+                                    .text_color(dot_color)
+                                    .child(dot),
+                            )
+                            .child(div().flex_shrink_0().text_size(px(11.)).child(icon))
+                            .child(div().flex_1().min_w(px(0.)).truncate().child(name)),
                     )
                     .child(
                         div()
+                            .pl(px(13.))
                             .text_size(px(10.))
                             .text_color(t.text_subtle())
+                            .truncate()
                             .child(format!("{}:{}", host, port)),
                     );
 
