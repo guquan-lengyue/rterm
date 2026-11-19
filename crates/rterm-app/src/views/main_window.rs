@@ -788,6 +788,18 @@ impl MainWindow {
             .update(cx, |bar, cx| bar.set_active_session(active_session, cx));
     }
 
+    /// 打开中的模态是否自行管理焦点（此时不得把焦点交还终端）。
+    fn modal_owns_focus(&self) -> bool {
+        self.palette.is_some()
+            || self.settings_dialog.is_some()
+            || self.edit_dialog.is_some()
+            || self.import_export_dialog.is_some()
+            || self.folder_prompt.is_some()
+            || self.group_dialog.is_some()
+            || self.info_dialog.is_some()
+            || self.icon_dialog_session.is_some()
+    }
+
     /// 是否有任何弹窗 / 确认卡片打开（弹窗期间屏蔽全局 Tab 快捷键）。
     fn dialogs_open(&self, cx: &mut Context<Self>) -> bool {
         self.palette.is_some()
@@ -1718,8 +1730,9 @@ impl Render for MainWindow {
         let t = theme(cx);
         let new_btn_id = "rterm-new-session-btn".to_string();
 
-        // 切换 / 新建 / 关闭 Tab 后，把键盘焦点交给活动终端
-        if self.focus_pending {
+        // 切换 / 新建 / 关闭 Tab 后，把键盘焦点交给活动终端；
+        // 但模态弹窗自行管理焦点时不得抢占（否则输入框无法获得键盘）。
+        if self.focus_pending && !self.modal_owns_focus() {
             let handle = self
                 .tabs
                 .get(self.active_tab)
