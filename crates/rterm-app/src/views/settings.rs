@@ -77,7 +77,27 @@ const SFTP_MODES: [(&str, &str); 4] = [
     ("双向同步", "bidirectional"),
 ];
 
-const FONT_CHOICES: [&str; 4] = ["Cascadia Code", "Consolas", "JetBrains Mono", "Fira Code"];
+/// 等宽字体预设。
+///
+/// 跨平台罗列主流等宽字体。`merge_font_choices` 会把它作为 `all_font_names()`
+/// 枚举失败 / 结果为空时的回退，并确保当前设置值始终在列表里。
+/// 顺序是平台常用优先 + 跨平台通用字体，方便用户快速定位到自己机器已装的那种。
+const FONT_CHOICES: [&str; 10] = [
+    // Windows
+    "Cascadia Code",
+    "Consolas",
+    // macOS
+    "Menlo",
+    "Monaco",
+    // Linux 通用（绝大多数发行版预装）
+    "DejaVu Sans Mono",
+    "Ubuntu Mono",
+    // 跨平台热门等宽字体（需用户自行安装）
+    "JetBrains Mono",
+    "Fira Code",
+    "Source Code Pro",
+    "Noto Sans Mono",
+];
 
 /// 字体列表行高 / 视口高度（9.13 自绘滚动容器）
 const FONT_ROW_H: f32 = 24.0;
@@ -1254,7 +1274,7 @@ mod tests {
     #[test]
     fn empty_system_fonts_fall_back_to_presets() {
         let fonts = merge_font_choices(Vec::new(), "Consolas");
-        assert_eq!(fonts.len(), 4);
+        assert_eq!(fonts.len(), 10);
         assert_eq!(fonts[0], "Cascadia Code");
     }
 

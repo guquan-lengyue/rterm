@@ -32,13 +32,16 @@ dirs = "5"
 rfd.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
-# 单实例锁：命名互斥体 + MessageBox 提示
+# 单实例锁：命名互斥体（Win）+ flock（Linux/macOS）
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+nix = { version = "0.29", features = ["fs"] }
 
 # Linux：gpui_platform 默认不启用任何窗口后端，必须显式选择 X11 / Wayland
 [target.'cfg(target_os = "linux")'.dependencies]

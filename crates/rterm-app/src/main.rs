@@ -17,7 +17,7 @@ pub mod ui;
 pub mod views;
 
 use gpui::prelude::*;
-use gpui::{App, KeyBinding, WindowHandle, WindowOptions};
+use gpui::{App, KeyBinding, WindowDecorations, WindowHandle, WindowOptions};
 
 use state::AppState;
 use views::main_window::MainWindow;
@@ -100,10 +100,19 @@ fn main() {
         bindings.extend(views::main_window::key_bindings());
         app.bind_keys(bindings);
 
+        // Linux（X11 / Wayland）默认用 Server-side decorations，
+        // 让窗口管理器提供关闭 / 最小化 / 最大化按钮。
+        // Wayland 服务器不支持 server-side 时 GPUI 会自动 fallback 回 client-side。
         let window_handle = app
-            .open_window(WindowOptions::default(), |_window, app| {
-                app.new(MainWindow::new)
-            })
+            .open_window(
+                WindowOptions {
+                    window_decorations: Some(WindowDecorations::Server),
+                    ..WindowOptions::default()
+                },
+                |_window, app| {
+                    app.new(MainWindow::new)
+                },
+            )
             .unwrap();
 
         // Ctrl+, → 全局打开设置。

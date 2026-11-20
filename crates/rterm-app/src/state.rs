@@ -66,6 +66,21 @@ pub struct Settings {
     pub sidebar_visible: bool,
 }
 
+/// 各平台默认等宽字体。
+///
+/// Windows 自带 Cascadia Code；Ubuntu / Fedora / Arch 默认带 DejaVu Sans Mono；
+/// macOS 自带 Menlo。GPUI 的 fallback 栈会兜底，但这里选平台最可能存在的那个。
+fn default_mono_font() -> String {
+    if cfg!(target_os = "windows") {
+        "Cascadia Code".into()
+    } else if cfg!(target_os = "macos") {
+        "Menlo".into()
+    } else {
+        // Linux：DejaVu Sans Mono 几乎所有发行版都装；Ubuntu Mono 次之
+        "DejaVu Sans Mono".into()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum CursorStyle {
     Block,
@@ -82,7 +97,7 @@ impl Default for Settings {
             connect_timeout_secs: 10,
 
             default_theme: "Catppuccin Mocha".into(),
-            default_font_family: "Cascadia Code".into(),
+            default_font_family: default_mono_font(),
             default_font_size: 14.0,
             terminal_scrollback_lines: 10_000,
             terminal_cursor_style: CursorStyle::Block,

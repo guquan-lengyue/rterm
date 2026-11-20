@@ -1,8 +1,11 @@
-//! single_instance — Windows 单实例保护
+//! single_instance — 跨平台单实例保护
 //!
-//! 用命名互斥体 `Local\rterm-single-instance` 保证同一登录会话只跑一个 rterm，
-//! 避免两个进程同时读写 sessions.json 相互覆盖。
-//! guard 在 main 整个生命周期内持有，进程退出（Drop）时释放。
+//! Windows：命名互斥体 `Local\rterm-single-instance`
+//! POSIX（Linux / macOS）：`flock` 锁文件（`$XDG_CACHE_HOME/rterm/single-instance.lock`
+//! 或 `$HOME/.cache/rterm/single-instance.lock`）
+//!
+//! guard 在 main 整个生命周期内持有，进程退出时 Drop → 锁释放。
+//! flock 与命名互斥体在「进程崩溃后自动释放」这点上行为一致。
 
 #[cfg(target_os = "windows")]
 mod imp {
@@ -64,12 +67,93 @@ mod imp {
 
 #[cfg(not(target_os = "windows"))]
 mod imp {
-    /// 非 Windows 平台不限制单实例。
-    pub struct SingleInstanceGuard;
+    use std::fs::{File, OpenOptions};
+    use std::io::ErrorKind;
+    use std::path::{Path, PathBuf};
 
+    use nix::fcntl::{flock, FlockArg};
+
+    /// `flock` 持有的锁文件；进程退出（Drop）时关闭 fd → 内核自动释放锁。
+    pub struct SingleInstanceGuard {
+        _file: File,
+        path: PathBuf,
+    }
+
+    impl Drop for SingleInstanceGuard {
+        fn drop(&mut self) {
+            // 主动 unlock + 删除锁文件，避免留下脏文件；文件被另一个进程接管时删除失败。
+            let _ = flock(self._file.as_raw_fd(), FlockArg::Unlock);
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// 锁文件路径：`$XDG_CACHE_HOME/rterm/single-instance.lock`
+    /// 回退 `$HOME/.cache/rterm/single-instance.lock`。
+    fn lock_path() -> PathBuf {
+        let dir = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| {
+                    let mut p = PathBuf::from(h);
+                    p.push(".cache");
+                    p
+                })
+            })
+            .unwrap_or_else(|| PathBuf::from("."));
+        dir.join("rterm").join("single-instance.lock")
+    }
+
+    /// 尝试获取单实例锁。
+    ///
+    /// - 已有实例持有锁 → 返回 None
+    /// - 锁文件无法创建 → 记日志并继续启动
     pub fn acquire() -> Option<SingleInstanceGuard> {
-        Some(SingleInstanceGuard)
+        let path = lock_path();
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::error!(
+                    "[single_instance] 创建锁目录 {} 失败，继续启动: {e}",
+                    parent.display()
+                );
+            }
+        }
+
+        let file = match OpenOptions::new().create(true).write(true).open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                log::error!(
+                    "[single_instance] 打开锁文件 {} 失败，继续启动: {e}",
+                    path.display()
+                );
+                return None;
+            }
+        };
+
+        // 写 pid 方便排查（调试时 `cat` 锁文件就能知道谁持有的）
+        let _ = std::fs::write(&path, format!("{}\n", std::process::id()));
+
+        match flock(file.as_raw_fd(), FlockArg::LockExclusive | FlockArg::LockNonBlocking) {
+            Ok(()) => Some(SingleInstanceGuard { _file: file, path }),
+            Err(nix::Error::EWOULDBLOCK | nix::Error::EAGAIN) => {
+                log::info!("[single_instance] 已有 rterm 实例在运行（PID 锁文件 {}），本次启动退出", path.display());
+                None
+            }
+            Err(e) => {
+                log::error!(
+                    "[single_instance] flock 失败（PID={}，路径={}），继续启动: {e}",
+                    std::process::id(),
+                    path.display()
+                );
+                Some(SingleInstanceGuard { _file: file, path })
+            }
+        }
     }
 }
 
 pub use imp::{acquire, SingleInstanceGuard};
+
+// 本模块全是平台 FFI（Windows 命名互斥体 / POSIX flock），
+// 单元测试里无法可靠模拟「第二个进程已持有锁」的场景，因此省略独立测试。
+// 手动验证步骤：
+//   1. 启动一个 rterm 实例 → 第二个 rterm 应该直接退出（Win 弹窗提示，Linux 静默返回）
+//   2. 杀掉第一个 → 再启动 → 正常进入
