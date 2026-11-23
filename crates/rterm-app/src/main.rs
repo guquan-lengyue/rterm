@@ -1,9 +1,13 @@
-// rterm-app main.rs — Sprint 3 版
+// rterm-app main.rs — Sprint 7 — SFTP 文件管理
 //
 // gpui 0.3 EventBus 设计（重要）：
 //   EventEmitter 只能挂在 Entity 上。EventBusHost 是空 View struct，
 //   只用来承载 EventEmitter<AppEvent>。所有 View subscribe 它；
 //   emit 必须通过 app.update_entity(&host, |_, cx| cx.emit(event))
+
+// 发布版在 Windows 上使用 GUI 子系统，避免启动时弹出黑色终端窗口。
+// Debug 版保留 Console 子系统，便于观察 log 输出。
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 // libssh2-sys 静态 OpenSSL 的 PDB 缺失属于依赖产物，不影响链接；抑制该链接器噪声。
 #![allow(linker_messages)]
@@ -17,7 +21,7 @@ pub mod ui;
 pub mod views;
 
 use gpui::prelude::*;
-use gpui::{App, KeyBinding, WindowDecorations, WindowHandle, WindowOptions};
+use gpui::{px, size, App, KeyBinding, WindowBounds, WindowDecorations, WindowHandle, WindowOptions};
 
 use state::AppState;
 use views::main_window::MainWindow;
@@ -103,9 +107,11 @@ fn main() {
         // Linux（X11 / Wayland）默认用 Server-side decorations，
         // 让窗口管理器提供关闭 / 最小化 / 最大化按钮。
         // Wayland 服务器不支持 server-side 时 GPUI 会自动 fallback 回 client-side。
+        let default_size = size(px(1280.), px(800.));
         let window_handle = app
             .open_window(
                 WindowOptions {
+                    window_bounds: Some(WindowBounds::centered(default_size, app)),
                     window_decorations: Some(WindowDecorations::Server),
                     ..WindowOptions::default()
                 },

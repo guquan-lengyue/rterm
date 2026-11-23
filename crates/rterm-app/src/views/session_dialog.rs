@@ -135,10 +135,16 @@ impl SessionEditDialog {
     }
 
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self::from_session(cx, None)
+        Self::from_session(cx, None, None)
     }
 
-    pub fn from_session(cx: &mut Context<Self>, session: Option<&rterm_session::Session>) -> Self {
+    /// 从已有会话创建（编辑模式），或从空白模板创建（新建模式）。
+    /// `initial_folder` 用于「在此分组新建会话」等场景预填分组选择器。
+    pub fn from_session(
+        cx: &mut Context<Self>,
+        session: Option<&rterm_session::Session>,
+        initial_folder: Option<String>,
+    ) -> Self {
         let editing_id = session.map(|s| s.id);
 
         // 新建会话时用设置里的 SSH 默认值（编辑已有会话保持原值）
@@ -157,7 +163,7 @@ impl SessionEditDialog {
                 String::new(),
                 settings.default_port.to_string(),
                 settings.default_username.clone().unwrap_or_default(),
-                String::new(),
+                initial_folder.unwrap_or_default(),
             ),
         };
 
@@ -622,7 +628,9 @@ impl Render for SessionEditDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         if self.autofocus_pending {
-            window.focus(&self.focus_handle, cx);
+            // 直接把焦点交给会话名称输入框，打开即可输入
+            let ti = self.name_input.read(cx).focus_handle(cx);
+            window.focus(&ti, cx);
             self.autofocus_pending = false;
         }
         let title = if self.editing_id.is_some() {

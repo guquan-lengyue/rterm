@@ -26,7 +26,7 @@ use futures::StreamExt;
 use gpui::prelude::*;
 use gpui::{
     black, canvas, div, fill, font, point, px, size, App, Bounds, ClipboardItem, Context,
-    FocusHandle, Font, FontId, GlyphId, Hsla, IntoElement, KeyDownEvent, MouseButton,
+    Focusable, FocusHandle, Font, FontId, GlyphId, Hsla, IntoElement, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, Rgba, ScrollWheelEvent,
     SharedString, TextRun, Window,
 };
@@ -82,12 +82,13 @@ impl TerminalStatus {
     }
 }
 
-/// Canvas 在窗口中的实际位置与字符网格尺寸（鼠标事件坐标换算用）。
+/// Canvas 在窗口中的实际位置（鼠标事件坐标换算用）。
+///
+/// 字符网格尺寸不放在这里：`self.cell_w` / `self.line_height` 是唯一事实来源，
+/// 由 `measure_font` 依据字体实测刷新。
 #[derive(Clone, Copy, Default)]
 struct ViewMetrics {
     bounds: Option<Bounds<Pixels>>,
-    cell_w: f32,
-    line_h: f32,
 }
 
 /// 未知 / 变更主机密钥弹窗状态：info 用于渲染，reply 用于把用户选择送回后台线程。
@@ -905,6 +906,45 @@ impl TerminalView {
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
 
+        // 调试：打印按键事件，便于排查按键是否被拦截（RUST_LOG=debug 时可见）
+        log::debug!(
+            "[terminal] on_key: key={:?}, mods=ctrl:{} alt:{} shift:{} plat:{}, key_char={:?}",
+            keystroke.key,
+            modifiers.control,
+            modifiers.alt,
+            modifiers.shift,
+            modifiers.platform,
+            keystroke.key_char,
+        );
+
+        // Ctrl+Shift+V：粘贴（终端里 Ctrl+V 是字面量前缀，用 Shift 区分）
+        if modifiers.control && modifiers.shift && !modifiers.alt {
+            if keystroke.key == "v" {
+                self.paste_clipboard(cx);
+                return;
+            }
+        }
+
+        // Ctrl+Shift+C：复制选中内容（无跨格选区则发给远程 0x03）
+        if modifiers.control && modifiers.shift && !modifiers.alt {
+            if keystroke.key == "c" {
+                // 单击只产生 anchor == head 的单格选区，视为"没有选中"
+                let has_range = self.selection.is_some_and(|(anchor, head)| anchor != head);
+                if has_range && self.copy_selection(cx) > 0 {
+                    self.selection = None;
+                    cx.notify();
+                    return;
+                }
+                // 没选中：发给远程 Ctrl+C
+                if self.status == TerminalStatus::Connected {
+                    self.send_bytes(vec![0x03]);
+                    self.engine.scroll_bottom();
+                    cx.notify();
+                }
+                return;
+            }
+        }
+
         // 字号缩放：Ctrl+= / Ctrl+- / Ctrl+0（不依赖连接状态）
         if modifiers.control && !modifiers.alt {
             match keystroke.key.as_str() {
@@ -1081,6 +1121,8 @@ impl TerminalView {
                         if let Some((anchor, head)) = range {
                             self.selection = Some((anchor, head));
                             self.selecting = false;
+                            // 双击选词 / 三击整行后立即复制，与常见终端行为一致
+                            self.copy_selection(cx);
                             cx.notify();
                             return;
                         }
@@ -1124,6 +1166,21 @@ impl TerminalView {
         }
     }
 
+    /// 把当前选区文本写入系统剪贴板，返回复制的字符数（0 = 没有可复制内容）。
+    fn copy_selection(&mut self, cx: &mut Context<Self>) -> usize {
+        let Some((anchor, head)) = self.selection else {
+            return 0;
+        };
+        let text = self.engine.text_in_range(anchor, head);
+        if text.is_empty() {
+            return 0;
+        }
+        let chars = text.chars().count();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        log::info!("[terminal] copied selection ({chars} chars)");
+        chars
+    }
+
     fn on_mouse_up(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
         if event.button != MouseButton::Left {
             return;
@@ -1137,14 +1194,10 @@ impl TerminalView {
         }
         self.selecting = false;
 
+        // 只复制跨多个 cell 的拖动选区；单击（anchor == head）只用于聚焦，不写剪贴板
         if let Some((anchor, head)) = self.selection {
             if anchor != head {
-                let text = self.engine.text_in_range(anchor, head);
-                if !text.is_empty() {
-                    let chars = text.chars().count();
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    log::info!("[terminal] copied selection ({chars} chars)");
-                }
+                self.copy_selection(cx);
             }
         }
         cx.notify();
@@ -1204,18 +1257,21 @@ impl TerminalView {
     ) -> Option<(usize, usize)> {
         let metrics = *self.metrics.borrow();
         let bounds = metrics.bounds?;
-        let x = f32::from(position.x) - f32::from(bounds.left());
-        let y = f32::from(position.y) - f32::from(bounds.top());
+        let dx = f32::from(position.x) - f32::from(bounds.left());
+        let dy = f32::from(position.y) - f32::from(bounds.top());
 
-        if !clamp && (x < 0.0 || y < 0.0) {
+        if !clamp && (dx < 0.0 || dy < 0.0) {
             return None;
         }
 
-        let col = (x / metrics.cell_w.max(1.0)).floor();
-        let row = (y / metrics.line_h.max(1.0)).floor();
-        let col = col.clamp(0.0, self.cols.saturating_sub(1) as f32) as usize;
-        let row = row.clamp(0.0, self.rows.saturating_sub(1) as f32) as usize;
-        Some((row, col))
+        Some(offset_to_cell(
+            dx,
+            dy,
+            self.cell_w,
+            self.line_height,
+            self.cols as usize,
+            self.rows as usize,
+        ))
     }
 
     /// 滚动条热区：右侧 12px、有真实历史时才可拖。
@@ -1538,6 +1594,13 @@ fn is_function_key(key: &str) -> bool {
         return false;
     };
     matches!(number.parse::<u8>(), Ok(1..=12))
+}
+
+// 显式实现 Focusable，让 GPUI 的焦点系统正确识别 TerminalView。
+impl Focusable for TerminalView {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2060,9 +2123,51 @@ fn offset_from_scrollbar(y: f32, height: f32, history: usize) -> usize {
     ((1.0 - progress) * history as f32).round() as usize
 }
 
+/// 视口内像素偏移 → cell 坐标 `(row, col)`。
+///
+/// 超出右下边界时夹到最后一格（拖动选区到区域外时贴边用）；
+/// 负数偏移夹到 0。`cell_w` / `line_h` 非法（≤0）时按 1px 兜底，避免除零。
+fn offset_to_cell(
+    dx: f32,
+    dy: f32,
+    cell_w: f32,
+    line_h: f32,
+    cols: usize,
+    rows: usize,
+) -> (usize, usize) {
+    let cell_w = cell_w.max(1.0);
+    let line_h = line_h.max(1.0);
+    let col = (dx / cell_w).floor().clamp(0.0, cols.saturating_sub(1) as f32);
+    let row = (dy / line_h).floor().clamp(0.0, rows.saturating_sub(1) as f32);
+    (row as usize, col as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offset_maps_to_expected_cell() {
+        // 8px 宽、16px 高的网格
+        assert_eq!(offset_to_cell(0.0, 0.0, 8.0, 16.0, 80, 24), (0, 0));
+        assert_eq!(offset_to_cell(8.0, 16.0, 8.0, 16.0, 80, 24), (1, 1));
+        // 格子内部任意位置都归属同一格
+        assert_eq!(offset_to_cell(15.9, 31.9, 8.0, 16.0, 80, 24), (1, 1));
+    }
+
+    #[test]
+    fn offset_clamps_to_grid_bounds() {
+        // 右下越界夹到最后一格
+        assert_eq!(offset_to_cell(9999.0, 9999.0, 8.0, 16.0, 80, 24), (23, 79));
+        // 负偏移夹到 0（拖动到左上区域外贴边）
+        assert_eq!(offset_to_cell(-50.0, -50.0, 8.0, 16.0, 80, 24), (0, 0));
+    }
+
+    #[test]
+    fn offset_uses_pixel_fallback_for_invalid_cell_size() {
+        // cell_w / line_h 为 0 时不能除零或产生 NaN
+        assert_eq!(offset_to_cell(3.0, 7.0, 0.0, 0.0, 80, 24), (7, 3));
+    }
 
     #[test]
     fn scrollbar_top_maps_to_oldest_history() {

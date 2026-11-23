@@ -138,7 +138,9 @@ impl Render for TextPromptDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         if self.autofocus_pending {
-            window.focus(&self.focus_handle, cx);
+            // 直接把焦点交给输入框，打开即可输入
+            let input = self.input.read(cx).focus_handle(cx);
+            window.focus(&input, cx);
             self.autofocus_pending = false;
         }
         let (card_w, _) = super::adaptive_dialog_size(window, 420.0, 230.0, 320.0, 200.0);

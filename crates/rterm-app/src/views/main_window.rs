@@ -1083,16 +1083,9 @@ impl MainWindow {
                 };
                 match action {
                     FolderMenuAction::NewSessionInFolder => {
+                        // pending_new_folder 会在 open_edit_dialog 内被消费
                         self.pending_new_folder = Some(folder.clone());
                         self.open_edit_dialog(None, cx);
-                        if let Some(dialog) = self.edit_dialog.clone() {
-                            dialog.update(cx, |dialog, cx| {
-                                dialog.group_picker.update(cx, |picker, cx| {
-                                    picker.set_selected(Some(folder.clone()), cx);
-                                });
-                                cx.notify();
-                            });
-                        }
                     }
                     FolderMenuAction::NewSubfolder => {
                         self.open_folder_prompt(Some(folder.clone()), cx)
@@ -1648,7 +1641,13 @@ impl MainWindow {
         session: Option<&rterm_session::Session>,
         cx: &mut Context<Self>,
     ) {
-        let dialog = cx.new(|cx| SessionEditDialog::from_session(cx, session));
+        // 新建模式下消费 pending_new_folder（右键「在此分组新建会话」设置的）
+        let initial_folder = if session.is_none() {
+            self.pending_new_folder.take()
+        } else {
+            None
+        };
+        let dialog = cx.new(|cx| SessionEditDialog::from_session(cx, session, initial_folder));
         self.edit_dialog = Some(dialog);
         self.context_menu = None;
         cx.notify();

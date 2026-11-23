@@ -63,6 +63,11 @@ impl GroupPicker {
         }
     }
 
+    /// 暴露内部搜索框的 focus_handle，供父 Modal 直接 autofocus。
+    pub fn query_handle(&self, cx: &gpui::App) -> FocusHandle {
+        self.query.read(cx).focus_handle(cx)
+    }
+
     pub fn selected(&self) -> Option<String> {
         self.selected.clone()
     }
@@ -442,7 +447,9 @@ impl Render for GroupPickerDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         if self.autofocus_pending {
-            window.focus(&self.focus_handle, cx);
+            // 直接把焦点交给 picker 内的搜索框
+            let query = self.picker.read(cx).query_handle(cx);
+            window.focus(&query, cx);
             self.autofocus_pending = false;
         }
         let (card_w, card_h) = super::adaptive_dialog_size(window, 420.0, 300.0, 320.0, 220.0);
