@@ -68,8 +68,8 @@ mod imp {
 #[cfg(not(target_os = "windows"))]
 mod imp {
     use std::fs::{File, OpenOptions};
-    use std::io::ErrorKind;
-    use std::path::{Path, PathBuf};
+    use std::os::unix::io::AsRawFd;
+    use std::path::PathBuf;
 
     use nix::fcntl::{flock, FlockArg};
 
@@ -80,6 +80,8 @@ mod imp {
     }
 
     impl Drop for SingleInstanceGuard {
+        // 同上：显式使用 deprecated 的 flock(RawFd) 版本
+        #[allow(deprecated)]
         fn drop(&mut self) {
             // 主动 unlock + 删除锁文件，避免留下脏文件；文件被另一个进程接管时删除失败。
             let _ = flock(self._file.as_raw_fd(), FlockArg::Unlock);
@@ -107,6 +109,9 @@ mod imp {
     ///
     /// - 已有实例持有锁 → 返回 None
     /// - 锁文件无法创建 → 记日志并继续启动
+    // `nix::fcntl::flock` 在 0.29 已标记 deprecated（推荐 Flock 类型），
+    // 但其 RawFd 版本语义简单且行为稳定，这里保留并显式允许。
+    #[allow(deprecated)]
     pub fn acquire() -> Option<SingleInstanceGuard> {
         let path = lock_path();
         if let Some(parent) = path.parent() {
@@ -132,9 +137,13 @@ mod imp {
         // 写 pid 方便排查（调试时 `cat` 锁文件就能知道谁持有的）
         let _ = std::fs::write(&path, format!("{}\n", std::process::id()));
 
-        match flock(file.as_raw_fd(), FlockArg::LockExclusive | FlockArg::LockNonBlocking) {
+        match flock(
+            file.as_raw_fd(),
+            FlockArg::LockExclusiveNonblock,
+        ) {
             Ok(()) => Some(SingleInstanceGuard { _file: file, path }),
-            Err(nix::Error::EWOULDBLOCK | nix::Error::EAGAIN) => {
+            // EWOULDBLOCK 与 EAGAIN 在 Linux/macOS 上同值，用 guard 比较避免重复分支。
+            Err(e) if e == nix::Error::EWOULDBLOCK => {
                 log::info!("[single_instance] 已有 rterm 实例在运行（PID 锁文件 {}），本次启动退出", path.display());
                 None
             }
