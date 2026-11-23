@@ -9,7 +9,7 @@
 ;       有图标后取消 SetupIconFile / IconFilename 的注释。
 
 #define AppName "rterm"
-#define AppVersion "0.2.3"
+#define AppVersion "0.2.4"
 #define AppPublisher "rterm"
 #define AppExeName "rterm-app.exe"
 
