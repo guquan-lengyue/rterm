@@ -54,7 +54,8 @@ pub enum FolderMenuAction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionMenuAction {
-    OpenTerminal,
+    /// 为所选会话新开一个终端标签（每次都是新连接，不复用已有标签）
+    NewTerminal,
     OpenSftp,
     OpenMonitor,
     OpenPortForward,
@@ -198,9 +199,9 @@ pub fn entries_for(target: &ContextMenuTarget) -> Vec<MenuEntry> {
         ContextMenuTarget::Session(_) => vec![
             entry(
                 "ctx-session-terminal",
-                "▶ 打开终端",
-                ContextMenuAction::Session(SessionMenuAction::OpenTerminal),
-                Some("打开"),
+                "▶ 新建会话",
+                ContextMenuAction::Session(SessionMenuAction::NewTerminal),
+                Some("新建"),
                 false,
                 false,
             ),

@@ -226,7 +226,8 @@ impl MainWindow {
             &host,
             |this: &mut Self, _host, event: &AppEvent, cx| match event {
                 AppEvent::SessionConnectRequested { session_id } => {
-                    this.request_terminal_tab(*session_id, cx);
+                    // 双击会话：每次都新开一个终端标签（同一会话可并行多个 SSH/PTY）
+                    this.open_terminal_tab(*session_id, cx);
                 }
                 AppEvent::TabSelectRequested { tab_id } => {
                     this.activate_tab(*tab_id, cx);
@@ -545,21 +546,11 @@ impl MainWindow {
 
     /// 同名 Tab 加序号，避免多个 Tab 完全无法区分。
     fn unique_title(&self, base: String, kind: TabKind) -> String {
-        let taken = |title: &str| {
+        unique_title_with(&base, |title| {
             self.tabs
                 .iter()
                 .any(|tab| tab.kind == kind && tab.title == title)
-        };
-        if !taken(&base) {
-            return base;
-        }
-        for n in 2..1000 {
-            let candidate = format!("{base} ({n})");
-            if !taken(&candidate) {
-                return candidate;
-            }
-        }
-        base
+        })
     }
 
     /// 打开终端：已有同会话终端 Tab 时直接激活，否则新建。
@@ -1104,7 +1095,7 @@ impl MainWindow {
                     return;
                 };
                 match action {
-                    SessionMenuAction::OpenTerminal => self.request_terminal_tab(session_id, cx),
+                    SessionMenuAction::NewTerminal => self.open_terminal_tab(session_id, cx),
                     SessionMenuAction::OpenSftp => self.request_sftp_tab(session_id, cx),
                     SessionMenuAction::OpenMonitor => self.request_monitor_tab(session_id, cx),
                     SessionMenuAction::OpenPortForward => {
@@ -2357,4 +2348,62 @@ fn shortcut_text() -> String {
         "Ctrl+= / Ctrl+- 调整字号",
     ]
     .join("\n")
+}
+
+/// 为 `base` 生成未被占用的标签标题：优先原样，冲突时追加 ` (2)`、` (3)` …
+///
+/// 同一会话可开多个终端标签，标题必须可区分。上限 999，全部占用时返回 `base`
+/// （宁可重名也不无限循环）。`taken` 判定某个标题是否已被占用。
+fn unique_title_with(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    for n in 2..1000 {
+        let candidate = format!("{base} ({n})");
+        if !taken(&candidate) {
+            return candidate;
+        }
+    }
+    base.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+
+    fn title_with(base: &str, existing: &[&str]) -> String {
+        let set: HashSet<String> = existing.iter().map(|s| s.to_string()).collect();
+        unique_title_with(base, |t| set.contains(t))
+    }
+
+    #[test]
+    fn unique_title_keeps_free_base() {
+        assert_eq!(title_with("orange", &[]), "orange");
+        assert_eq!(title_with("orange", &["other"]), "orange");
+    }
+
+    #[test]
+    fn unique_title_appends_incrementing_suffix() {
+        assert_eq!(title_with("orange", &["orange"]), "orange (2)");
+        assert_eq!(title_with("orange", &["orange", "orange (2)"]), "orange (3)");
+        // 序号不连续时取第一个可用值
+        assert_eq!(title_with("orange", &["orange", "orange (3)"]), "orange (2)");
+    }
+
+    #[test]
+    fn unique_title_falls_back_when_all_taken() {
+        // 占用 base 与 2..999 全部序号后回退到 base，避免无线循环
+        let existing: Vec<String> = std::iter::once("s".to_string())
+            .chain((2..1000).map(|n| format!("s ({n})")))
+            .collect();
+        let called = RefCell::new(0usize);
+        let result = unique_title_with("s", |t| {
+            *called.borrow_mut() += 1;
+            existing.iter().any(|e| e == t)
+        });
+        assert_eq!(result, "s");
+        assert_eq!(*called.borrow(), 999, "最多探测 base + 998 个序号");
+    }
 }
